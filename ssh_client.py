@@ -101,29 +101,58 @@ class SSHClient:
                   process: bool = False) -> Dict:
         """
         在指定主机执行命令（自动复用已有会话，没有则新建）
-        这是最常用的方法 - 其他程序只需知道 host_id 就能执行命令
-
-        智能识别：如果传入的 ID 在活跃终端列表中能匹配到 session_id，
-        则直接使用该会话执行；否则按 host_id 处理。
-
-        默认模式：如果会话有交互式 shell，命令注入到 Web 终端，
-        输出实时显示在终端中，同时捕获返回。
-        process=True：强制独立进程执行，不显示在 Web 终端。
+        智能识别（按优先级）：
+        1. session_id 匹配
+        2. host_id 匹配
+        3. IP 地址匹配（支持 ip 或 ip:port，默认使用第 1 个终端）
+        4. 都不匹配则新建连接
         """
         terminals = self.list_active_terminals()
-        # 先尝试匹配 session_id（用户可能从 terminals 命令复制了会话ID）
+        # 1. session_id 匹配
         session_match = [t for t in terminals if t['session_id'] == host_id]
         if session_match:
-            session_id = session_match[0]['session_id']
-        else:
-            # 按 host_id 处理：复用该主机已有会话，没有则新建
-            existing = [t for t in terminals if t['host_id'] == host_id]
-            if existing:
-                session_id = existing[0]['session_id']
-            else:
-                result = self.connect_host(host_id)
-                session_id = result['session_id']
-        return self.run_command(session_id, command, timeout, process)
+            return self.run_command(session_match[0]['session_id'], command, timeout, process)
+        # 2. host_id 匹配
+        existing = [t for t in terminals if t['host_id'] == host_id]
+        if existing:
+            return self.run_command(existing[0]['session_id'], command, timeout, process)
+        # 3. IP 匹配（支持 ip 或 ip:port）
+        ip_to_match = host_id
+        port_to_match = None
+        if ':' in host_id:
+            parts = host_id.rsplit(':', 1)
+            ip_to_match = parts[0]
+            try:
+                port_to_match = int(parts[1])
+            except ValueError:
+                pass
+        # 在活跃终端中按 IP 匹配
+        ip_match = []
+        for t in terminals:
+            if t.get('host') == ip_to_match:
+                if port_to_match is None or t.get('port', 22) == port_to_match:
+                    ip_match.append(t)
+        if ip_match:
+            ip_match.sort(key=lambda x: x.get('created_at', 0))
+            return self.run_command(ip_match[0]['session_id'], command, timeout, process)
+        # 在保存的主机中按 IP 匹配
+        try:
+            hosts_data = self.list_hosts()
+            for h in hosts_data.get('hosts', []):
+                if h.get('host') == ip_to_match:
+                    if port_to_match is None or h.get('port', 22) == port_to_match:
+                        hid = h['id']
+                        existing_by_host = [t for t in terminals if t['host_id'] == hid]
+                        if existing_by_host:
+                            sid = existing_by_host[0]['session_id']
+                        else:
+                            sid = self.connect_host(hid)['session_id']
+                        return self.run_command(sid, command, timeout, process)
+        except Exception:
+            pass
+        # 4. 都不匹配，新建连接
+        result = self.connect_host(host_id)
+        return self.run_command(result['session_id'], command, timeout, process)
 
     # ============ 主机管理 ============
 

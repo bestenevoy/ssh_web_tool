@@ -87,6 +87,11 @@ function App() {
     loadHosts()
     loadQuickCommands()
     terminals.restoreTerminals()
+    // 定期刷新主机列表，确保终端计数及时更新（CLI/Python 包创建的终端也能显示）
+    const timer = setInterval(() => {
+      loadHosts()
+    }, 5000)
+    return () => clearInterval(timer)
   }, [])
 
   const activeHostId: string | null = terminals.activeId ? terminals.terminals.get(terminals.activeId)?.host_id || null : null
@@ -101,7 +106,10 @@ function App() {
       terminals.createTerminal(host)
         .then(() => {
           setStatus(`已连接 ${host.host}`)
+          // 立即刷新（连接已建立，terminal_count 已更新）
           loadHosts()
+          // 延迟再次刷新（确保 WebSocket 和 shell 启动完成，状态完全同步）
+          setTimeout(() => loadHosts(), 800)
         })
         .catch((e) => {
           setStatus('连接失败')
@@ -117,7 +125,10 @@ function App() {
         const host = hosts.find((h) => h.id === inst.host_id)
         if (host) {
           terminals.createTerminal(host)
-            .then(() => loadHosts())
+            .then(() => {
+              loadHosts()
+              setTimeout(() => loadHosts(), 800)
+            })
             .catch((e) => alert('创建终端失败: ' + (e as Error).message))
         }
       }

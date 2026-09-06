@@ -783,16 +783,36 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     await websocket.accept()
 
     session = session_manager.get_session(session_id)
-    if not session or not session.is_connected:
-        await websocket.send_json({"type": "error", "data": "会话不存在或未连接"})
+    if not session:
+        await websocket.send_json({"type": "error", "data": "会话不存在"})
         await websocket.close()
         return
 
-    # 如果会话已有交互式终端（页面重开恢复），直接复用；否则创建新的
+    # 检测 SSH 连接是否真的活着，如果断开了自动重连
+    if not session.is_alive():
+        await websocket.send_json({"type": "info", "data": "检测到连接断开，正在自动重连..."})
+        try:
+            reconnect_ok = await session.reconnect()
+            if not reconnect_ok:
+                await websocket.send_json({"type": "error", "data": "自动重连失败，请重新连接主机"})
+                await websocket.close()
+                return
+            await websocket.send_json({"type": "info", "data": "自动重连成功"})
+        except Exception as e:
+            await websocket.send_json({"type": "error", "data": f"重连异常: {str(e)}"})
+            await websocket.close()
+            return
+
+    # 如果会话已有交互式终端（页面重开恢复），直接复用 process
     pending_msg = None  # 初始化：如果第一个消息不是 resize，保存下来在消息循环中处理
-    if session.has_shell and session.process is not None:
+    if session._has_shell and session.process is not None:
         await websocket.send_json({"type": "info", "data": "已恢复已有终端会话"})
     else:
+        # shell 未启动，需要启动
+        if session._has_shell and session.process is None:
+            await websocket.send_json({"type": "info", "data": "检测到终端已断开，正在重新启动 shell..."})
+            session._has_shell = False
+
         # 关键修复：在启动 shell 前先等待前端的第一个 resize 消息（最多 500ms）
         # 因为 start_interactive_shell 在消息循环开始前调用，如果在里面等待 resize 事件会导致死锁
         # 所以在这里先接收第一个 resize 消息，获取正确的终端尺寸，再启动 shell
@@ -837,21 +857,81 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
 
     read_task = asyncio.create_task(read_output())
 
+    # 定期检测连接状态（每 15 秒检测一次，如果断开自动重连）
+    async def monitor_connection():
+        try:
+            while True:
+                await asyncio.sleep(15)
+                # 检测 SSH 连接是否活着
+                if not session.is_alive():
+                    print(f"[WebSocket] 检测到 SSH 连接断开，尝试自动重连: {session_id}")
+                    try:
+                        if await session.reconnect():
+                            print(f"[WebSocket] 自动重连成功: {session_id}")
+                        else:
+                            print(f"[WebSocket] 自动重连失败: {session_id}")
+                    except Exception as e:
+                        print(f"[WebSocket] 重连异常: {e}")
+                # 检测 shell 是否活着（如果有 shell）
+                elif session._has_shell and not session.is_shell_alive():
+                    print(f"[WebSocket] 检测到 shell 退出，尝试重新启动: {session_id}")
+                    try:
+                        session.process = None
+                        session._has_shell = False
+                        await session.start_interactive_shell(
+                            cols=session._last_cols, rows=session._last_rows
+                        )
+                        print(f"[WebSocket] shell 重启成功: {session_id}")
+                    except Exception as e:
+                        print(f"[WebSocket] shell 重启失败: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[WebSocket] 连接监控异常: {e}")
+
+    monitor_task = asyncio.create_task(monitor_connection())
+
     # 处理单条消息的函数
     async def handle_message(raw: str):
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
+            # 非 JSON 消息，直接尝试写入
             if session.process:
-                session.process.stdin.write(raw)
+                try:
+                    session.process.stdin.write(raw)
+                except Exception:
+                    pass
             return
 
         msg_type = msg.get("type")
         if msg_type == "input":
             data = msg.get("data", "")
-            if data and session.process:
-                session.process.stdin.write(data)
-                session.last_active = time.time()
+            if data:
+                # 直接尝试写入，失败时再检测并重连
+                try:
+                    if session.process is None:
+                        raise RuntimeError("process is None")
+                    session.process.stdin.write(data)
+                    session.last_active = time.time()
+                except Exception as e:
+                    print(f"[WebSocket] 输入失败，尝试重连: {e}")
+                    await websocket.send_json({"type": "error", "data": f"终端输入失败，正在尝试自动重连... ({e})"})
+                    # 尝试自动重连
+                    try:
+                        if await session.reconnect():
+                            await websocket.send_json({"type": "info", "data": "自动重连成功，可以继续输入"})
+                            # 重连成功后重新发送这次输入
+                            try:
+                                if session.process:
+                                    session.process.stdin.write(data)
+                                    session.last_active = time.time()
+                            except Exception as e2:
+                                await websocket.send_json({"type": "error", "data": f"重连后输入仍失败: {e2}"})
+                        else:
+                            await websocket.send_json({"type": "error", "data": "自动重连失败，请关闭此标签重新连接主机"})
+                    except Exception as e2:
+                        await websocket.send_json({"type": "error", "data": f"重连异常: {e2}"})
         elif msg_type == "resize":
             cols = msg.get("cols", 120)
             rows = msg.get("rows", 40)
@@ -876,8 +956,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
             pass
     finally:
         read_task.cancel()
+        monitor_task.cancel()
         try:
             await read_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await monitor_task
         except (asyncio.CancelledError, Exception):
             pass
         # 移除监听器，但不停止输出读取器（可能有其他监听器如 CLI 注入捕获）

@@ -42,9 +42,11 @@ body {
   color: var(--text-primary);
   height: 100vh;
   overflow: hidden;
+  padding-bottom: 48px; /* 底部留出空间，防止被任务栏遮挡 */
+  box-sizing: border-box;
 }
-#root { height: 100vh; display: flex; flex-direction: column; }
-.app { display: flex; flex-direction: column; height: 100vh; }
+#root { height: calc(100vh - 48px); display: flex; flex-direction: column; }
+.app { display: flex; flex-direction: column; height: 100%; }
 
 /* 顶部栏 */
 .topbar {
@@ -214,6 +216,17 @@ body {
 .panel-body::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
 
 /* 快速指令 */
+.qc-container {
+  display: flex;
+  flex-direction: column;
+}
+.qc-list {
+  max-height: calc(100vh - 260px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.qc-list::-webkit-scrollbar { width: 5px; }
+.qc-list::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
 .qc-item {
   padding: 8px 10px; background: var(--bg-hover); border-radius: 5px; margin-bottom: 6px;
   cursor: pointer; transition: background .12s;

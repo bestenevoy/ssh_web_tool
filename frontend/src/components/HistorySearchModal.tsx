@@ -22,11 +22,11 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  // 统一搜索（快捷命令 + 历史命令）
+  // 统一搜索（快捷命令 + 历史命令），最多显示20条
   const doSearch = useCallback(async (kw: string) => {
     setLoading(true)
     try {
-      const res = await api.unifiedSearch(kw, 50)
+      const res = await api.unifiedSearch(kw, 20)
       setResults(res.results || [])
       setSelectedIndex(0)
     } catch (e) {

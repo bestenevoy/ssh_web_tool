@@ -16,10 +16,13 @@ import asyncssh
 
 
 def get_data_dir() -> str:
-    """获取数据文件目录（PyInstaller 打包后保存在 EXE 所在目录）"""
+    """获取数据文件目录
+    - PyInstaller 打包后：保存在 EXE 所在目录
+    - 其他情况：保存在当前工作目录（用户运行命令的目录）
+    """
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
 
 
 class SSHSession:
@@ -56,6 +59,16 @@ class SSHSession:
         self._pending_size: Optional[Tuple[int, int]] = None
         # resize 事件：PTY 创建后等待第一个 resize 消息，确保 shell 第一帧输出使用正确尺寸
         self._resize_event = asyncio.Event()
+        # 自动重连相关
+        self._password: Optional[str] = None
+        self._private_key: Optional[str] = None
+        self._passphrase: Optional[str] = None
+        self._last_cols = 120
+        self._last_rows = 40
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._reconnecting = False
+        self._reconnect_count = 0
+        self._max_reconnect = 5  # 最大自动重连次数
 
     @property
     def is_connected(self) -> bool:
@@ -68,12 +81,19 @@ class SSHSession:
     async def connect(self, password: Optional[str] = None,
                       private_key: Optional[str] = None,
                       passphrase: Optional[str] = None):
-        """建立 SSH 连接"""
+        """建立 SSH 连接（带 keepalive 防止空闲超时断开）"""
+        # 保存认证信息，用于自动重连
+        self._password = password
+        self._private_key = private_key
+        self._passphrase = passphrase
+
         kwargs = {
             "host": self.host,
             "port": self.port,
             "username": self.username,
             "known_hosts": None,  # 跳过主机密钥校验（本地工具简化处理）
+            "keepalive_interval": 30,  # 每 30 秒发送 keepalive 包，防止空闲超时断开
+            "keepalive_count_max": 3,  # 3 次 keepalive 无响应则认为连接断开
         }
         if password:
             kwargs["password"] = password
@@ -82,7 +102,9 @@ class SSHSession:
 
         self.conn = await asyncssh.connect(**kwargs)
         self._connected = True
+        self._reconnect_count = 0  # 重连成功后重置计数
         self.last_active = time.time()
+        print(f"[SSHSystem] 连接成功: {self.username}@{self.host}:{self.port} (keepalive=30s)")
 
     async def start_interactive_shell(self, cols: int = 120, rows: int = 40,
                                       term_type: str = "xterm-256color"):
@@ -97,6 +119,9 @@ class SSHSession:
             cols, rows = self._pending_size
             self._pending_size = None
         print(f"[SSHSystem] start_interactive_shell: cols={cols}, rows={rows}, term_type={term_type}")
+        # 保存终端尺寸，用于重连后恢复
+        self._last_cols = cols
+        self._last_rows = rows
         # asyncssh 的 term_size 参数顺序是 (cols, rows)
         self.process = await self.conn.create_process(
             term_type=term_type,
@@ -279,47 +304,62 @@ class SSHSession:
                                 total_timeout: int = 15) -> str:
         """
         注入命令到交互式终端，等待提示符出现，返回清理后的输出
+        - 使用独立的输出监听器捕获新输出，不受历史输出和缓冲区清理影响
         - 多提示符检测：自动识别 shell/Python/MySQL/Redis 等提示符
         - 空闲超时兜底：连续 idle_timeout 秒无新输出即认为完成
         - 通用底层方法，供 inject_and_capture 和获取退出码复用
         - 不自动启动 shell，调用前需确保 shell 已启动
         """
-        buf_start_len = sum(len(s) for s in self._output_buffer)
+        # 使用独立的输出监听器捕获新输出（不受历史输出影响）
+        listener = self.add_output_listener()
+        captured_parts = []
 
-        # 发送命令
-        self.process.stdin.write(f"{command}\n")
-        self.last_active = time.time()
+        try:
+            # 发送命令
+            self.process.stdin.write(f"{command}\n")
+            self.last_active = time.time()
 
-        # 等待命令完成：多提示符检测 + 空闲超时兜底
-        start_time = time.time()
-        last_output_time = time.time()
-        has_output = False
+            # 等待命令完成：多提示符检测 + 空闲超时兜底
+            start_time = time.time()
+            last_output_time = time.time()
+            has_output = False
 
-        while time.time() - start_time < total_timeout:
-            await asyncio.sleep(0.1)
-            current_len = sum(len(s) for s in self._output_buffer)
+            while time.time() - start_time < total_timeout:
+                try:
+                    # 非阻塞读取队列中的新输出
+                    data = await asyncio.wait_for(listener.get(), timeout=0.1)
+                    captured_parts.append(data)
+                    has_output = True
+                    last_output_time = time.time()
 
-            if current_len > buf_start_len:
-                has_output = True
-                last_output_time = time.time()
+                    # 多提示符检测：匹配任意一种已知提示符即认为完成
+                    recent = self._clean_ansi(''.join(captured_parts)[-2000:])
+                    if self._match_any_prompt(recent):
+                        await asyncio.sleep(0.15)  # 确保提示符后内容写入
+                        # 读取队列中剩余的输出
+                        while not listener.empty():
+                            try:
+                                captured_parts.append(listener.get_nowait())
+                            except Exception:
+                                break
+                        break
+                except asyncio.TimeoutError:
+                    # 0.1 秒内没有新输出，检查是否空闲超时
+                    pass
 
-                # 多提示符检测：匹配任意一种已知提示符即认为完成
-                recent = self._clean_ansi(''.join(self._output_buffer)[-2000:])
-                if self._match_any_prompt(recent):
-                    await asyncio.sleep(0.15)  # 确保提示符后内容写入
+                # 空闲超时：连续无新输出即认为完成（即使没有匹配到提示符）
+                if has_output and (time.time() - last_output_time > idle_timeout):
+                    break
+                # 特殊情况：命令无输出（如 cd），发送后 1.5 秒无输出也认为完成
+                if not has_output and (time.time() - start_time > 1.5):
                     break
 
-            # 空闲超时：连续无新输出即认为完成（即使没有匹配到提示符）
-            # 注意：需要 has_output 为 True，避免命令还没开始输出就超时
-            if has_output and (time.time() - last_output_time > idle_timeout):
-                break
-            # 特殊情况：命令无输出（如 cd），发送后 1 秒无输出也认为完成
-            if not has_output and (time.time() - start_time > 1.0):
-                break
+        finally:
+            # 移除监听器
+            self.remove_output_listener(listener)
 
         # 提取并清理输出
-        full_buffer = ''.join(self._output_buffer)
-        output = self._clean_ansi(full_buffer[buf_start_len:])
+        output = self._clean_ansi(''.join(captured_parts))
 
         # 去掉第一行命令回显
         lines = output.split('\n')
@@ -603,8 +643,110 @@ class SSHSession:
                 pass
             self._sftp = None
 
+    def is_alive(self) -> bool:
+        """检测 SSH 连接是否真的活着（不只是标志位）"""
+        if not self._connected or self.conn is None:
+            return False
+        try:
+            # 检查连接对象是否还活着
+            if hasattr(self.conn, '_transport') and self.conn._transport:
+                return not self.conn._transport.is_closing()
+            # 备用方法：检查 conn 是否有 is_closing 方法
+            if hasattr(self.conn, 'is_closing'):
+                return not self.conn.is_closing()
+            return True
+        except Exception:
+            return False
+
+    def is_shell_alive(self) -> bool:
+        """检测 shell 进程是否活着"""
+        if not self._has_shell or self.process is None:
+            return False
+        try:
+            # 优先检查内部进程对象是否存在
+            if hasattr(self.process, '_process') and self.process._process is not None:
+                # 检查内部进程是否已退出
+                if hasattr(self.process._process, 'returncode'):
+                    if self.process._process.returncode is not None:
+                        return False
+                return True
+            # 备用：检查 exit_status
+            if hasattr(self.process, 'exit_status'):
+                if self.process.exit_status is not None:
+                    return False
+            return True
+        except Exception as e:
+            print(f"[SSHSystem] is_shell_alive 检测异常: {e}")
+            # 检测异常时默认认为活着，避免阻止输入
+            return True
+
+    async def reconnect(self) -> bool:
+        """自动重连 SSH 并恢复 shell（如果之前有 shell）"""
+        if self._reconnecting:
+            print(f"[SSHSystem] 重连进行中，跳过: {self.session_id}")
+            return False
+        if self._reconnect_count >= self._max_reconnect:
+            print(f"[SSHSystem] 已达最大重连次数 {self._max_reconnect}，停止重连: {self.session_id}")
+            return False
+
+        self._reconnecting = True
+        self._reconnect_count += 1
+        had_shell = self._has_shell
+        cols = self._last_cols
+        rows = self._last_rows
+
+        print(f"[SSHSystem] 开始重连 ({self._reconnect_count}/{self._max_reconnect}): {self.username}@{self.host}:{self.port}")
+
+        try:
+            # 清理旧连接
+            self.stop_output_reader()
+            if self.process:
+                try:
+                    self.process.close()
+                except Exception:
+                    pass
+                self.process = None
+            if self.conn:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+            self._connected = False
+            self._has_shell = False
+
+            # 等待一下再重连
+            await asyncio.sleep(1)
+
+            # 重新连接
+            await self.connect(
+                password=self._password,
+                private_key=self._private_key,
+                passphrase=self._passphrase
+            )
+
+            # 如果之前有 shell，重新启动
+            if had_shell:
+                await self.start_interactive_shell(cols=cols, rows=rows)
+                # 广播重连成功消息
+                await self._broadcast_output(f"\r\n\x1b[33m[连接已恢复] 重连成功 ({self._reconnect_count}次)\x1b[0m\r\n")
+                print(f"[SSHSystem] 重连成功，shell 已恢复: {self.session_id}")
+            else:
+                await self._broadcast_output(f"\r\n\x1b[33m[连接已恢复] SSH 重连成功\x1b[0m\r\n")
+                print(f"[SSHSystem] 重连成功: {self.session_id}")
+
+            self._reconnecting = False
+            return True
+
+        except Exception as e:
+            print(f"[SSHSystem] 重连失败: {e}")
+            self._reconnecting = False
+            await self._broadcast_output(f"\r\n\x1b[31m[重连失败] {e}\x1b[0m\r\n")
+            return False
+
     async def close(self):
         """关闭会话"""
+        self._reconnecting = False
         self.stop_output_reader()
         await self.close_sftp()
         if self.process:
@@ -620,6 +762,14 @@ class SSHSession:
                 pass
             self.conn = None
         self._connected = False
+        self._has_shell = False
+        # 关闭日志文件
+        if self._log_fp:
+            try:
+                self._log_fp.close()
+            except Exception:
+                pass
+            self._log_fp = None
 
 
 class SessionManager:
@@ -671,9 +821,12 @@ class SessionManager:
         return [s for s in self._sessions.values() if s.is_connected and s.has_shell]
 
     def get_host_terminal_count(self, host_id: str) -> int:
-        """获取某主机的活跃终端数"""
-        return len([s for s in self._sessions.values()
-                    if s.host_id == host_id and s.is_connected and s.has_shell])
+        """获取某主机的活跃终端数（检测真实连接状态，不只是标志位）"""
+        count = 0
+        for s in self._sessions.values():
+            if s.host_id == host_id and s.is_alive():
+                count += 1
+        return count
 
     def list_sessions(self):
         """列出所有会话摘要"""

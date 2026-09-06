@@ -57,6 +57,22 @@ export function useTerminals(settings: TerminalSettings) {
   // 保存最新的 settings 引用，用于回调中
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+  // 保存最新的 terminals 引用，用于回调中（解决闭包捕获旧状态导致 input_buffer 不记录的问题）
+  const terminalsRef = useRef(terminals)
+  terminalsRef.current = terminals
+
+  // 后端所有活跃终端列表（包括 CLI/Python 包创建的，Web 页面统一显示）
+  const [activeSessions, setActiveSessions] = useState<any[]>([])
+
+  // 同步后端活跃终端列表
+  const syncActiveSessions = useCallback(async () => {
+    try {
+      const res = await api.listActiveTerminals()
+      setActiveSessions(res.terminals || [])
+    } catch (e) {
+      // 同步失败不影响主流程
+    }
+  }, [])
 
   // 使用官方 FitAddon 自动计算终端尺寸，确保 cols/rows 准确
   const fitTerminal = useCallback((inst: TerminalInstance) => {
@@ -116,8 +132,9 @@ export function useTerminals(settings: TerminalSettings) {
   }, [settings, terminals, updateTerminalSettings])
 
   // 处理终端输入，维护输入行缓冲区，遇到回车时记录命令到后端
+  // 注意：使用 terminalsRef.current 而不是 terminals，避免闭包捕获旧状态导致新终端的 input_buffer 不记录
   const handleTerminalInput = useCallback((session_id: string, data: string) => {
-    const inst = terminals.get(session_id)
+    const inst = terminalsRef.current.get(session_id)
     if (!inst) return
     // 回车：记录当前输入行到后端全局历史，清空缓冲区
     if (data === '\r' || data === '\n' || data === '\r\n') {
@@ -137,12 +154,16 @@ export function useTerminals(settings: TerminalSettings) {
       inst.input_buffer = ''
       return
     }
-    // 可打印字符：添加到缓冲区（忽略控制字符）
-    if (data >= ' ' && data <= '~') {
-      inst.input_buffer += data
+    // 可打印字符：添加到缓冲区（支持多字符粘贴和非 ASCII 字符）
+    if (data.length > 0 && data !== '\x00') {
+      // 过滤掉纯控制字符（除了可打印字符和空格）
+      const printable = data.split('').filter(c => c >= ' ' || c.charCodeAt(0) > 127).join('')
+      if (printable) {
+        inst.input_buffer += printable
+      }
     }
     // 其他字符（方向键、Tab 等）：忽略，不影响缓冲区
-  }, [terminals])
+  }, [])
 
   const createTerminal = useCallback(async (host: Host, terminal_name?: string) => {
     try {
@@ -272,6 +293,10 @@ export function useTerminals(settings: TerminalSettings) {
       const { terminals: active } = await api.listActiveTerminals()
       const s = settingsRef.current
       for (const t of active) {
+        // 跳过已连接的终端，避免重复连接
+        if (terminalsRef.current.has(t.session_id)) {
+          continue
+        }
         const term = new Terminal({
           cursorBlink: true,
           theme: getTerminalTheme(s),
@@ -381,6 +406,17 @@ export function useTerminals(settings: TerminalSettings) {
       console.error('恢复终端失败', e)
     }
   }, [activeId, fitTerminal, sendResize, handleTerminalInput])
+
+  // 定期同步活跃终端列表，并自动恢复新创建的终端（CLI/Python 包创建的）
+  useEffect(() => {
+    syncActiveSessions()
+    restoreTerminals()
+    const timer = setInterval(() => {
+      syncActiveSessions()
+      restoreTerminals()
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [syncActiveSessions, restoreTerminals])
 
   const switchTerminal = useCallback((session_id: string) => {
     setActiveId(session_id)
@@ -499,6 +535,7 @@ export function useTerminals(settings: TerminalSettings) {
   return {
     terminals,
     activeId,
+    activeSessions,
     createTerminal,
     restoreTerminals,
     switchTerminal,

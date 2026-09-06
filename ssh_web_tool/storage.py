@@ -12,10 +12,13 @@ from typing import Dict, List, Optional
 
 
 def get_data_dir() -> str:
-    """获取数据文件目录（PyInstaller 打包后保存在 EXE 所在目录）"""
+    """获取数据文件目录
+    - PyInstaller 打包后：保存在 EXE 所在目录
+    - 其他情况：保存在当前工作目录（用户运行命令的目录）
+    """
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
 
 
 # 默认主机类型（可自定义）
