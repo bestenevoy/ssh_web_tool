@@ -645,6 +645,24 @@ class SSHSession:
 
     def is_alive(self) -> bool:
         """检测 SSH 连接是否真的活着（不只是标志位）"""
+        # 外部镜像会话（paramiko/asyncssh 劫持注册）：基于外部 client 的真实状态
+        if getattr(self, '_external', False):
+            client = getattr(self, '_paramiko_client', None)
+            if client is not None:
+                try:
+                    transport = client.get_transport()
+                    return transport is not None and transport.is_active()
+                except Exception:
+                    return False
+            conn = getattr(self, '_asyncssh_conn', None)
+            if conn is not None:
+                try:
+                    if hasattr(conn, 'is_closing'):
+                        return not conn.is_closing()
+                    return True
+                except Exception:
+                    return False
+            return False
         if not self._connected or self.conn is None:
             return False
         try:
@@ -854,12 +872,28 @@ class SessionManager:
             return True
         return False
 
+    def remove_session_sync(self, session_id: str) -> bool:
+        """
+        同步移除会话（供 paramiko/asyncssh 劫持的 close 回调使用）。
+
+        外部镜像会话没有 asyncssh 资源，直接移出并标记断开即可。
+        """
+        session = self._sessions.pop(session_id, None)
+        if session:
+            session._connected = False
+            session.last_active = time.time()
+            return True
+        return False
+
     async def cleanup_idle(self, idle_timeout: int = 86400):
-        """清理超时空闲会话（默认24小时，前端关闭不影响）"""
+        """清理超时空闲会话（默认24小时，前端关闭不影响）
+        外部镜像会话（paramiko/asyncssh 劫持）由对应 client 的 close 回调负责移除，不在此清理。
+        """
         now = time.time()
         to_remove = [
             sid for sid, s in self._sessions.items()
-            if now - s.last_active > idle_timeout
+            if not getattr(s, '_external', False)
+            and now - s.last_active > idle_timeout
         ]
         for sid in to_remove:
             await self.remove_session(sid)

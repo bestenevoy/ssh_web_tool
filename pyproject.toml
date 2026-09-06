@@ -40,6 +40,10 @@ dependencies = [
 dev = [
     "pyinstaller>=6.0.0",
 ]
+# 劫持 paramiko / asyncssh 已有代码时安装（pip install -e ".[monkeypatch]"）
+monkeypatch = [
+    "paramiko>=3.0",
+]
 
 [project.scripts]
 ssh-web-tool = "main:main"

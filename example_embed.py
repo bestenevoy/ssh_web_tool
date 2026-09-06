@@ -71,10 +71,16 @@ def example_with_web_ui():
 
 # ============================================================
 # 示例3：劫持 paramiko - 让已有代码自动注册到管理器
+# 前提：需要安装 paramiko（pip install paramiko 或 uv add paramiko）
 # ============================================================
 def example_patch_paramiko():
+    try:
+        import paramiko
+    except ImportError:
+        print("示例需要 paramiko，请先安装：pip install paramiko")
+        return
+
     from ssh_web_tool import SSHWebTool, patch_paramiko, unpatch
-    import paramiko
 
     # 创建管理器并启动 Web UI
     tool = SSHWebTool(web_ui=True)
@@ -83,7 +89,7 @@ def example_patch_paramiko():
     patch_paramiko(tool)
 
     # 之后所有 paramiko 连接都会自动注册到管理器
-    # 并在 Web UI 中显示
+    # 并出现在会话列表（/api/sessions）中
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect("192.168.1.100", username="root", password="pass")
@@ -92,12 +98,17 @@ def example_patch_paramiko():
     stdin, stdout, stderr = client.exec_command("ls -la")
     print(stdout.read().decode())
 
-    # 同时可以在 Web UI 中看到这个连接
+    # 会话列表中可以看到这个镜像会话
     sessions = tool.list_sessions()
     print(f"当前活跃会话数: {len(sessions)}")
 
+    # 注意：镜像会话没有交互式 shell，不会出现在 Web UI 的活跃终端中
+    # 如需在 Web 终端中交互操作，请用 tool.connect() 创建会话
+
     # 恢复
     unpatch()
+
+    # 关闭连接：镜像会话会自动从列表中移除
     client.close()
     tool.close_all()
 
