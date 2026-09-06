@@ -15,21 +15,29 @@
 
 ### 功能需求
 - 多标签终端：一个主机可开多个终端，tab 切换，tab 显示环境类型标签（sh/py/sql/pg）
-- 主机列表显示连接状态（绿色圆点 + 终端数徽章）
+- 主机列表显示连接状态（绿色圆点 + 终端数徽章），终端计数使用真实连接状态检测
 - 前端关闭页面后 SSH 连接不中断，由后端统一维护
-- 页面重新打开时自动恢复所有活跃终端
+- 页面重新打开时自动恢复所有活跃终端（包括 CLI/SDK 创建的终端）
+- 前端定期同步后端活跃终端列表，新创建的终端自动显示
+- SSH 连接 keepalive：每 30 秒发送保活包，防止空闲超时断开
+- 自动重连：连接意外断开后自动重连并恢复 shell，输入失败时自动重连并重发
 - 主机持久化保存（JSON 文件）
-- 主机分组管理
-- 主机类型标签（prod/test/dev/web/db 等，带颜色）
+- 主机分组管理（一级目录，可添加/重命名/删除）
+- 主机类型标签（prod/test/dev/web/db/other，带颜色）
+- 设备类型区分：普通主机 / 存储阵列（存储阵列支持 DeviceManager 管理页面自动登录）
 - 快速复制连接信息（ssh 命令 + 密码）
-- 快捷指令：点击 item 立即执行、点击 ▶ 编辑后执行、点击 ✎ 编辑弹窗、点击 ✕ 删除
-- 全局命令历史：跨终端跨主机记录，按使用频次排序，Alt+R 弹窗搜索
+- 快速复制主机（从现有主机复制，修改 IP 即可）
+- 主机搜索（按名称/IP/分组搜索）
+- 快捷指令：点击 item 立即执行、点击 ▶ 编辑后执行、点击 ✎ 编辑弹窗、点击 ✕ 删除，按钮只保留 icon
+- 快捷指令支持描述字段，添加改为弹窗形式
+- 全局命令历史：跨终端跨主机记录，按使用频次排序，Alt+R 弹窗搜索，最多显示20条
 - 统一搜索：同时搜索快捷指令和历史命令，快捷指令可直接执行/历史命令可编辑后执行
 - SFTP 文件管理：浏览、下载、上传、拖拽上传、查看文件内容
 - 活动日志：实时记录所有来源（WEB/API/CLI/SDK）的操作事件
 - 终端日志持久化：logs/<session_id>.log，页面加载时自动加载最近 3000 字符
 - 主题切换：暗色/亮色主题
 - 终端字体和字号调节：8 种等宽字体，8-32px 字号
+- 页面底部预留空间，防止被任务栏遮挡
 - 完整 HTTP REST API + Swagger 文档
 
 ### 技术约束
@@ -89,18 +97,29 @@
 ## 四、快速开始
 
 ### 环境要求
-- Python 3.10+（开发用 3.14）
+- Python 3.10+（开发用 3.13）
 - Node.js 18+（仅前端开发需要，运行时不需要）
 - asyncssh >= 2.20.0（2.17.0 有 SFTP bug）
+- 推荐使用 UV 管理 Python 虚拟环境
 
-### 安装依赖
+### 安装依赖（UV 方式，推荐）
 ```bash
 cd ssh-web-tool
-python -m pip install -r requirements.txt
+uv sync
+```
+
+### 安装依赖（pip 方式）
+```bash
+cd ssh-web-tool
+pip install -e .
 ```
 
 ### 启动服务
 ```bash
+# UV 方式
+uv run python main.py
+
+# 或直接运行
 python main.py
 ```
 浏览器打开 **http://127.0.0.1:8765**
@@ -112,8 +131,19 @@ python main.py
 - 用户名、密码
 - 类型（prod/test/dev/web/db/other）
 - 分组（如"生产环境"，可自定义）
+- 设备类型（普通主机 / 存储阵列）
 
 点击主机即可建立 SSH 连接。
+
+### 作为 Python 包使用
+```bash
+# clone 后安装到当前 Python 环境
+pip install -e .
+
+# 然后在任何 Python 脚本中导入使用
+from ssh_client import SSHClient
+client = SSHClient("http://127.0.0.1:8765")
+```
 
 ## 五、快捷键
 
@@ -211,17 +241,25 @@ result = client.exec_host("117d5a13", "df -h && free -m && uptime")
 print(result['stdout'])
 print("返回码:", result['returncode'])
 
-# 3. 管理会话
+# 3. 直接用 IP 执行命令（自动匹配该主机第1个活跃终端）
+result = client.exec_host("192.168.1.100", "uptime")
+result = client.exec_host("192.168.1.100:22", "df -h")
+
+# 4. 连续执行命令（状态保持，cd 等生效）
+client.exec_host("117d5a13", "cd /tmp")
+client.exec_host("117d5a13", "pwd")  # 输出 /tmp
+
+# 5. 管理会话
 sessions = client.list_sessions()
 client.close_session("session_id")
 
-# 4. SFTP
+# 6. SFTP
 client.sftp_list("session_id", "/var/log")
 client.sftp_download("session_id", "/etc/hosts", "./local_hosts")
 client.sftp_upload("session_id", "./local_file.txt", "/tmp/remote_file.txt")
 client.sftp_delete("session_id", "/tmp/remote_file.txt")
 
-# 5. 主机管理
+# 7. 主机管理
 client.add_host(name="测试机", host="192.168.1.100", port=22,
                 username="root", password="xxx", type="test", group="测试环境")
 client.update_host("host_id", {"name": "新名称"})
@@ -265,6 +303,10 @@ python ssh_client.py terminals
 # ⭐ 在指定主机执行命令（自动复用已有会话，输出同步显示在 Web 终端）
 python ssh_client.py exec 117d5a13 "uptime && df -h"
 
+# ⭐ 直接用 IP 执行命令（自动匹配该主机第1个活跃终端，没有则新建）
+python ssh_client.py exec 192.168.1.100 "uptime"
+python ssh_client.py exec 192.168.1.100:22 "df -h"
+
 # 从保存的主机创建新会话（指定终端名称）
 python ssh_client.py connect 117d5a13 --name "部署终端"
 
@@ -284,16 +326,23 @@ python ssh_client.py upload <session_id> ./file.txt /tmp/file.txt
 python ssh_client.py close <session_id>
 ```
 
+### exec 命令的智能 ID 识别
+`exec` 命令会按优先级自动识别传入的 ID：
+1. **session_id** — 如果匹配到活跃终端的会话 ID，直接使用该终端
+2. **host_id** — 如果匹配到保存主机的 ID，复用该主机的第1个活跃终端
+3. **IP 地址** — 如果是 `ip` 或 `ip:port` 格式，按 IP 查找主机，使用第1个活跃终端
+4. **都不匹配** — 按 host_id 处理，没有则新建连接
+
 ### CLI 自动化示例
 ```bash
-# 批量在多台主机执行命令
-for host_id in 117d5a13 a1b2c3d4 e5f6g7h8; do
-  echo "=== $host_id ==="
-  python ssh_client.py exec $host_id "uptime"
+# 批量在多台主机执行命令（用 IP 更方便）
+for ip in 192.168.1.100 192.168.1.101 192.168.1.102; do
+  echo "=== $ip ==="
+  python ssh_client.py exec $ip "uptime"
 done
 
 # 定时收集服务器状态
-python ssh_client.py exec 117d5a13 "free -m && df -h && uptime" > server_status_$(date +%Y%m%d).txt
+python ssh_client.py exec 192.168.1.100 "free -m && df -h && uptime" > server_status_$(date +%Y%m%d).txt
 ```
 
 ## 九、HTTP REST API
@@ -452,26 +501,38 @@ self.process.change_terminal_size(cols, rows)   # ✓ 正确（和文档相反�
 
 ```
 ssh-web-tool/
-├── main.py              # FastAPI 后端（API + WebSocket + 静态文件）
-├── sessions.py          # SSH 会话池（统一管理所有 SSH 连接）
-├── storage.py           # JSON 持久化存储（主机/分组/类型/快捷指令/命令历史）
-├── ssh_client.py        # Python SDK + CLI 二合一
-├── requirements.txt     # Python 依赖
-├── data.json            # 运行时生成的主机配置文件
-├── logs/                # 终端历史日志（按会话 ID 分文件）
+├── main.py                  # FastAPI 后端入口（API + WebSocket + 静态文件）
+├── ssh_client.py            # Python SDK + CLI 二合一
+├── pyproject.toml           # UV 项目配置（包配置、依赖、CLI 入口点）
+├── uv.lock                  # UV 依赖锁定文件
+├── build_exe.bat            # Windows 打包脚本（构建前端 + PyInstaller 打包 EXE）
+├── data.json                # 运行时生成的主机配置文件
+├── logs/                    # 终端历史日志（按会话 ID 分文件）
+├── ssh_web_tool/            # 核心 Python 包
+│   ├── __init__.py          # 包入口（导出 SSHWebTool 等）
+│   ├── sessions.py          # SSH 会话池（统一管理所有 SSH 连接）
+│   ├── storage.py           # JSON 持久化存储（主机/分组/类型/快捷指令/命令历史）
+│   ├── ssh_tool.py          # 可嵌入的 Python 库入口（SSHWebTool 类）
+│   └── playwright_mgmt.py   # 存储阵列管理页面自动登录（基于 Playwright）
 ├── static/
-│   └── index.html       # React 构建产物（单文件）
-└── frontend/            # React + TypeScript 源码
-    ├── src/
-    │   ├── components/  # 10 个 React 组件
-    │   ├── lib/         # API 封装 + 自定义 hooks
-    │   ├── types/       # TypeScript 类型定义
-    │   ├── App.tsx      # 主应用
-    │   ├── main.tsx     # 入口
-    │   └── index.css    # 样式
-    ├── vite.config.ts   # Vite 配置（单文件构建 + 开发代理）
-    ├── package.json
-    └── index.html
+│   └── index.html           # React 构建产物（单文件，约 546KB）
+├── frontend/                # React + TypeScript 源码
+│   ├── src/
+│   │   ├── components/      # 12 个 React 组件
+│   │   ├── lib/             # API 封装 + 自定义 hooks（useTerminals/useEvents/useSettings）
+│   │   ├── types/           # TypeScript 类型定义
+│   │   ├── App.tsx          # 主应用
+│   │   ├── main.tsx         # 入口
+│   │   └── index.css        # 样式（CSS 变量主题）
+│   ├── vite.config.ts       # Vite 配置（单文件构建 + 开发代理）
+│   ├── package.json
+│   └── index.html
+├── .github/
+│   └── workflows/
+│       ├── ci.yml           # CI workflow（多平台多 Python 版本测试）
+│       └── release.yml      # Release workflow（推送 tag 自动构建 EXE 并发布）
+└── dist/
+    └── SSHWebTool.exe       # 打包生成的 EXE 文件（约 55MB）
 ```
 
 ## 十三、已知问题和注意事项
@@ -512,14 +573,31 @@ ssh-web-tool/
 ### CLI 执行命令的输出同步
 - CLI 执行命令时使用「注入+捕获」模式：命令注入到已有终端，输出同步显示在 Web 终端
 - CLI 也能拿到输出和返回码
+- 使用独立的输出监听器捕获新输出，不受历史输出和缓冲区清理影响
 - 支持多提示符检测（shell/python/mysql/sqlite/redis/node 等），不会干扰交互程序
 - 等待时间约 0.28 秒（多提示符检测 + 空闲超时兜底）
+
+### SSH 连接保活与自动重连
+- 连接时设置 `keepalive_interval=30`，每 30 秒发送保活包，防止空闲超时断开
+- `keepalive_count_max=3`，3 次无响应则认为连接断开
+- 自动重连机制：连接意外断开后自动重连并恢复 shell，最多重连 5 次
+- WebSocket 连接时自动检测连接状态，如果断开自动重连
+- 输入时如果检测到 shell 已死，自动重连并重发输入
+- 后台每 15 秒检测一次连接状态，发现断开自动重连
+- 重连成功/失败都会在终端中显示提示
+
+### 前端自动同步活跃终端
+- 前端每 5 秒同步一次后端活跃终端列表
+- CLI/SDK/Python 包创建的新终端会自动显示在 Web 页面的终端标签中
+- 已连接的终端不会重复连接，只连接新创建的终端
+- 主机列表每 5 秒自动刷新，终端计数及时更新
+- 终端计数使用 `is_alive()` 检测真实连接状态，而非 `is_connected` 标志位
 
 ## 十四、常用命令速查
 
 ```bash
 # 启动服务
-cd ssh-web-tool && python main.py
+cd ssh-web-tool && uv run python main.py
 
 # 前端开发（热更新）
 cd ssh-web-tool/frontend && npm run dev
@@ -528,13 +606,16 @@ cd ssh-web-tool/frontend && npm run dev
 cd ssh-web-tool/frontend && npm run build
 
 # CLI 执行命令（输出同步到 Web 终端）
-python ssh_client.py exec <host_id> "command"
+uv run ./ssh_client.py exec <host_id或IP> "command"
 
 # CLI 列出主机
-python ssh_client.py hosts
+uv run ./ssh_client.py hosts
 
 # CLI 列出活跃终端
-python ssh_client.py terminals
+uv run ./ssh_client.py terminals
+
+# 打包成 EXE
+build_exe.bat
 
 # 查看 API 文档
 # 浏览器打开 http://127.0.0.1:8765/docs
