@@ -1,0 +1,41 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.spec
+
+# Virtual environments
+.venv
+venv/
+env/
+
+# 数据文件（用户本地配置，不提交）
+data.json
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 前端构建中间产物（static/index.html 是构建产物，需要提交）
+frontend/node_modules/
+frontend/dist/
+
+# PyInstaller
+SSHWebTool.exe
+*.exe
+
+# UV
+.uv-cache/

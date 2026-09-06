@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-import:
+    name: Test Package Import
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Test import
+        run: |
+          python -c "from ssh_web_tool import SSHWebTool, patch_paramiko, patch_asyncssh, unpatch, quick_connect, session_manager, storage; print('Import OK, version:', __import__('ssh_web_tool').__version__)"
+
+      - name: Test CLI entry
+        run: |
+          python -c "import main; print('main module OK')"
+          python -c "import ssh_client; print('ssh_client module OK')"
+
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install and build
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Verify build output
+        run: |
+          if [ -f "static/index.html" ]; then
+            echo "Frontend built successfully"
+            ls -lh static/index.html
+          else
+            echo "Build output not found!"
+            exit 1
+          fi
