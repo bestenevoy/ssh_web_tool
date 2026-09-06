@@ -114,6 +114,39 @@ def example_patch_paramiko():
 
 
 # ============================================================
+# 示例3b：patch_all - 一次劫持当前进程所有 SSH 连接入口
+# 同时覆盖 paramiko（含 fabric/scp 等基于 paramiko 的库）和 asyncssh。
+# 工具自身内部的 asyncssh 连接不会被重复注册（自动防护）。
+# ============================================================
+def example_patch_all():
+    from ssh_web_tool import SSHWebTool, patch_all, unpatch
+
+    tool = SSHWebTool(web_ui=True)
+
+    # 一个地方完成所有劫持：当前进程里 paramiko / asyncssh 的
+    # 连接都会自动注册为镜像会话（连接状态可见，关闭自动移除）
+    patch_all(tool)
+
+    # 之后无论你的代码用 paramiko 还是 asyncssh 连接，都会出现在
+    # 会话列表（/api/sessions）中；paramiko 未安装时仅劫持 asyncssh，
+    # 两者都不可用时会明确提示失败
+    try:
+        import paramiko
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect("192.168.1.100", username="root", password="pass")
+        client.close()
+    except ImportError:
+        pass
+
+    sessions = tool.list_sessions()
+    print(f"当前活跃会话数: {len(sessions)}")
+
+    unpatch()
+
+
+# ============================================================
 # 示例4：使用已保存的主机配置
 # ============================================================
 def example_saved_hosts():
@@ -202,6 +235,7 @@ if __name__ == "__main__":
     # example_basic()
     # example_with_web_ui()
     # example_patch_paramiko()
+    # example_patch_all()
     # example_saved_hosts()
     # example_quick_connect()
     # example_automation()

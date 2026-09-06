@@ -11,8 +11,14 @@ import sys
 import uuid
 import time
 import re
+import threading
 from typing import Dict, List, Optional, Tuple
 import asyncssh
+
+# 供 asyncssh.connect 劫持（patch_asyncssh）识别"工具内部连接"的标记：
+# 工具自身创建会话时置位，劫持层看到标记则直接放行，避免把工具自己的连接
+# 重复注册为镜像会话。
+_patch_guard = threading.local()
 
 
 def get_data_dir() -> str:
@@ -100,7 +106,13 @@ class SSHSession:
         if private_key:
             kwargs["client_keys"] = [asyncssh.import_private_key(private_key, passphrase)]
 
-        self.conn = await asyncssh.connect(**kwargs)
+        # 标记为工具内部连接：劫持层（patch_asyncssh）看到该标记直接放行，
+        # 不会把工具自身的连接重复注册为镜像会话
+        _patch_guard.active = True
+        try:
+            self.conn = await asyncssh.connect(**kwargs)
+        finally:
+            _patch_guard.active = False
         self._connected = True
         self._reconnect_count = 0  # 重连成功后重置计数
         self.last_active = time.time()

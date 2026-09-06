@@ -320,7 +320,7 @@ def patch_paramiko(manager: Optional[SSHWebTool] = None):
         import paramiko
     except ImportError:
         print("[SSHWebTool] paramiko 未安装，无法劫持（可先执行 pip install paramiko）")
-        return
+        return False
 
     if _original_paramiko_connect is None:
         _original_paramiko_connect = paramiko.SSHClient.connect
@@ -384,6 +384,7 @@ def patch_paramiko(manager: Optional[SSHWebTool] = None):
     paramiko.SSHClient.connect = patched_connect
     _patched = True
     print("[SSHWebTool] paramiko 已劫持，所有连接将自动注册到管理器")
+    return True
 
 
 def patch_asyncssh(manager: Optional[SSHWebTool] = None):
@@ -406,12 +407,21 @@ def patch_asyncssh(manager: Optional[SSHWebTool] = None):
         import asyncssh
     except ImportError:
         print("[SSHWebTool] asyncssh 未安装，无法劫持")
-        return
+        return False
 
     if _original_asyncssh_connect is None:
         _original_asyncssh_connect = asyncssh.connect
 
     async def patched_connect(host, port=22, username=None, password=None, client_keys=None, known_hosts=None, **kwargs):
+        # 工具自身连接（SSHSession.connect 内部调用）：直接放行，不注册镜像
+        from .sessions import _patch_guard
+
+        if getattr(_patch_guard, 'active', False):
+            return await _original_asyncssh_connect(
+                host, port=port, username=username, password=password,
+                client_keys=client_keys, known_hosts=known_hosts, **kwargs
+            )
+
         # 执行原有连接
         conn = await _original_asyncssh_connect(host, port=port, username=username, password=password, client_keys=client_keys, known_hosts=known_hosts, **kwargs)
 
@@ -455,6 +465,52 @@ def patch_asyncssh(manager: Optional[SSHWebTool] = None):
 
     asyncssh.connect = patched_connect
     print("[SSHWebTool] asyncssh 已劫持，所有连接将自动注册到管理器")
+    return True
+
+
+def patch_all(manager: Optional[SSHWebTool] = None) -> Optional[SSHWebTool]:
+    """
+    一次调用，劫持当前进程内所有主流 SSH 连接入口：
+    - paramiko（SSHClient.connect）—— fabric / scp / pssh 等基于 paramiko 的库自动覆盖
+    - asyncssh（asyncssh.connect）
+
+    之后当前进程中发起的 SSH 连接都会注册为镜像会话（连接状态可见，
+    client 关闭时自动移除）。工具自身内部的 asyncssh 连接不会被重复注册。
+
+    注意：
+    - 仅对"同一 Python 进程内"的调用生效；通过 subprocess 调外部 ssh 命令
+      （openssh 客户端）属于跨进程，无法劫持。
+    - 镜像会话只登记连接（无交互 shell）；如需命令/输出观测请另行开启。
+
+    Args:
+        manager: SSHWebTool 实例（保留参数，当前注册到全局会话管理器）
+
+    Returns:
+        传入的 manager（未传入时为全局默认实例），便于链式使用
+    """
+    if manager is None:
+        manager = _get_default_manager()
+
+    results = []
+    try:
+        results.append(patch_paramiko(manager))
+    except Exception as e:
+        print(f"[SSHWebTool] 劫持 paramiko 失败: {e}")
+        results.append(False)
+    try:
+        results.append(patch_asyncssh(manager))
+    except Exception as e:
+        print(f"[SSHWebTool] 劫持 asyncssh 失败: {e}")
+        results.append(False)
+
+    ok = sum(1 for r in results if r)
+    if ok == len(results) and ok > 0:
+        print("[SSHWebTool] 已劫持当前进程所有 SSH 连接入口（paramiko + asyncssh）")
+    elif ok > 0:
+        print(f"[SSHWebTool] 部分劫持成功（{ok}/{len(results)}），请查看上方提示")
+    else:
+        print("[SSHWebTool] 劫持失败：paramiko 与 asyncssh 均不可用")
+    return manager
 
 
 def unpatch():
