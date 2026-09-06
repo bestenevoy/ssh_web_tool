@@ -6,6 +6,9 @@ on:
       - 'v*'  # 推送 v 开头的 tag 时触发，如 v0.1.0
   workflow_dispatch:  # 支持手动触发
 
+permissions:
+  contents: write  # 允许创建 Release 和上传资产
+
 jobs:
   build-windows:
     name: Build Windows EXE
