@@ -35,15 +35,22 @@ class SSHWebTool:
     所有连接由本实例统一维护，关闭 Python 进程前连接保持活跃。
     """
 
-    def __init__(self, web_ui: bool = False, host: str = "127.0.0.1", port: int = 8765):
+    def __init__(self, web_ui: bool = False, host: Optional[str] = None, port: Optional[int] = None):
         """
         初始化管理器
 
         Args:
             web_ui: 是否启动 Web UI 服务器（在后台线程运行）
-            host: Web UI 监听地址
-            port: Web UI 监听端口
+            host: Web UI 监听地址（不传则读取 config.json，默认 127.0.0.1）
+            port: Web UI 监听端口（不传则读取 config.json，默认 8765；
+                  端口被占用时按 config.json 的 auto_find_free_port 自动切换）
         """
+        from .config import load_config
+
+        server_cfg = load_config().get("server", {})
+        self._web_host = host if host is not None else str(server_cfg.get("host", "127.0.0.1"))
+        self._web_port = int(port if port is not None else server_cfg.get("port", 8765))
+
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -51,7 +58,7 @@ class SSHWebTool:
         self._uvicorn_server = None
 
         if web_ui:
-            self.start_web_ui(host, port)
+            self.start_web_ui(self._web_host, self._web_port)
 
     def _run_loop(self):
         """在后台线程运行事件循环"""
@@ -197,14 +204,28 @@ class SSHWebTool:
 
     # ============ Web UI ============
 
-    def start_web_ui(self, host: str = "127.0.0.1", port: int = 8765):
+    def start_web_ui(self, host: Optional[str] = None, port: Optional[int] = None):
         """
         在后台线程启动 Web UI 服务器
 
         启动后可以在浏览器中打开 http://host:port 观察和操作所有 SSH 连接。
+        端口被占用时，按 config.json 的 server.auto_find_free_port 自动切换。
         """
         if self._web_ui_thread and self._web_ui_thread.is_alive():
             return  # 已在运行
+
+        from .config import load_config, resolve_server_config
+
+        cfg = load_config()
+        cfg["server"]["host"] = host if host is not None else self._web_host
+        cfg["server"]["port"] = int(port if port is not None else self._web_port)
+        try:
+            resolved = resolve_server_config(cfg)
+        except (RuntimeError, ValueError) as e:
+            print(f"[SSHWebTool] Web UI 启动失败: {e}")
+            raise
+        host, port = resolved["host"], resolved["port"]
+        self._web_host, self._web_port = host, port
 
         def _run_server():
             import uvicorn

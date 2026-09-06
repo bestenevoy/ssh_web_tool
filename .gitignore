@@ -39,3 +39,6 @@ SSHWebTool.exe
 
 # UV
 .uv-cache/
+
+# Server config (user local, not committed; template config.example.json is committed)
+config.json

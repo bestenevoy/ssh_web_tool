@@ -1018,10 +1018,30 @@ def main():
     import webbrowser
     import threading
 
+    from ssh_web_tool.config import (
+        load_config, resolve_server_config, ensure_config_file, CONFIG_FILE_NAME,
+    )
+
+    # 加载配置：首次运行自动生成 config.json（优先复制 config.example.json 模板）
+    ensure_config_file()
+    cfg = load_config()
+    try:
+        server = resolve_server_config(cfg)
+    except (RuntimeError, ValueError) as e:
+        print(f"\n启动失败：{e}")
+        print(f"提示：可编辑 {CONFIG_FILE_NAME} 修改 server.port / server.host 后重启")
+        if hasattr(sys, 'frozen'):
+            input("\n按回车键退出...")
+        return
+
+    host, port = server["host"], server["port"]
+    base_url = f"http://{host}:{port}"
+
     print("=" * 50)
     print("SSH Web Tool v2.0 启动中...")
-    print("网页 UI:  http://127.0.0.1:8765")
-    print("API 文档: http://127.0.0.1:8765/docs")
+    print(f"配置文件: {CONFIG_FILE_NAME}")
+    print(f"网页 UI:  {base_url}")
+    print(f"API 文档: {base_url}/docs")
     print("数据文件:", storage.data_file)
     print("日志目录:", SSHSession.LOG_DIR)
     print("=" * 50)
@@ -1031,13 +1051,12 @@ def main():
     # 延迟打开浏览器（等服务启动后）
     def open_browser():
         time.sleep(1.5)
-        webbrowser.open("http://127.0.0.1:8765")
+        webbrowser.open(base_url)
 
-    if hasattr(sys, 'frozen'):
-        # 打包后自动打开浏览器
+    if cfg.get("open_browser", True):
         threading.Thread(target=open_browser, daemon=True).start()
 
-    uvicorn.run(app, host="127.0.0.1", port=8765, log_level="info", workers=1)
+    uvicorn.run(app, host=host, port=port, log_level="info", workers=1)
 
 
 if __name__ == "__main__":
