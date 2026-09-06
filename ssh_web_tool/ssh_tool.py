@@ -92,7 +92,6 @@ class SSHWebTool:
             await session.connect(
                 password=password or None,
                 private_key=private_key or None,
-                timeout=15
             )
             await session.start_interactive_shell()
 
@@ -114,7 +113,6 @@ class SSHWebTool:
             await session.connect(
                 password=password or None,
                 private_key=private_key or None,
-                timeout=15
             )
 
         self._run_async(_connect())
@@ -160,10 +158,16 @@ class SSHWebTool:
         async def _run():
             if inject and session.has_shell:
                 # 注入到交互式终端
-                return await session.inject_and_capture(command, timeout=timeout)
+                # inject_and_capture 返回 (退出码, stdout, stderr)
+                exit_code, stdout, stderr = await session.inject_and_capture(
+                    command, total_timeout=timeout
+                )
+                return {"output": stdout, "exit_code": exit_code, "error": stderr}
             else:
                 # 独立执行命令
-                return await session.run_command(command, timeout=timeout)
+                # run_command 返回 (退出码, stdout, stderr)
+                exit_code, stdout, stderr = await session.run_command(command, timeout=timeout)
+                return {"output": stdout, "exit_code": exit_code, "error": stderr}
 
         return self._run_async(_run())
 

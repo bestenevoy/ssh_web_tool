@@ -71,6 +71,60 @@ class SSHClient:
             data["password"] = password
         return self._request('POST', '/api/sessions', data)
 
+    def get_or_create_session(self, host: str, port: int = 22, username: str = "root",
+                              password: Optional[str] = None) -> str:
+        """
+        获取或创建 SSH 会话（智能复用）
+        - 如果该主机已有活跃终端，直接复用第1个（按创建时间排序取最老的）
+        - 如果没有活跃终端，则创建新的 SSH 连接
+        - 返回 session_id
+
+        这样可以避免重复创建连接，所有操作都在同一个终端中进行
+        """
+        # 1. 列出所有活跃终端
+        terminals = self.list_active_terminals()
+
+        # 2. 按 host 和 port 匹配
+        matched = []
+        for t in terminals:
+            if t.get('host') == host and t.get('port', 22) == port:
+                matched.append(t)
+
+        # 3. 如果找到，返回第1个（按创建时间排序取最老的）
+        if matched:
+            matched.sort(key=lambda x: x.get('created_at', 0))
+            session_id = matched[0]['session_id']
+            print(f"[复用] 已有活跃终端 {session_id}，直接复用")
+            return session_id
+
+        # 4. 没有找到活跃终端，创建新的会话
+        print(f"[新建] 没有找到 {host}:{port} 的活跃终端，创建新连接")
+
+        # 4.1 先按 IP 查找保存的主机，如果找到就用 connect_host（会设置 host_id）
+        # 这样创建的终端会关联到保存的主机，前端能正确显示名称/类型/分组，也能统计终端数量
+        try:
+            hosts_data = self.list_hosts()
+            hosts = hosts_data.get('hosts', []) if isinstance(hosts_data, dict) else hosts_data
+            matched_host = None
+            for h in hosts:
+                if h.get('host') == host and h.get('port', 22) == port:
+                    matched_host = h
+                    break
+
+            if matched_host:
+                host_id = matched_host.get('id', '')
+                host_name = matched_host.get('name', host)
+                print(f"[关联] 找到保存的主机「{host_name}」(id={host_id})，使用 connect_host 创建会话")
+                result = self.connect_host(host_id)
+                return result.get('session_id', '')
+        except Exception as e:
+            print(f"[提示] 查找保存主机失败: {e}，使用 create_session 创建")
+
+        # 4.2 没有找到保存的主机，使用 create_session（没有 host_id）
+        result = self.create_session(host, port, username, password)
+        return result.get('session_id', '')
+
+
     def connect_host(self, host_id: str, terminal_name: Optional[str] = None) -> Dict:
         """从保存的主机创建 SSH 会话（支持多终端）"""
         data = {"host_id": host_id}

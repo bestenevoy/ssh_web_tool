@@ -206,7 +206,7 @@ async def index():
 
 @app.post("/api/sessions")
 async def api_create_session(req: CreateSessionRequest):
-    """创建 SSH 会话并连接"""
+    """创建 SSH 会话并连接，自动启动交互式 shell（会显示在 Web UI 中）"""
     session_id = session_manager.create_session(req.host, req.port, req.username)
     session = session_manager.get_session(session_id)
     try:
@@ -215,10 +215,18 @@ async def api_create_session(req: CreateSessionRequest):
             private_key=req.private_key,
             passphrase=req.passphrase,
         )
+        # 自动启动交互式 shell，使用默认尺寸 120x40
+        # 这样通过 API 创建的会话也会显示在 Web UI 中
+        await session.start_interactive_shell(cols=120, rows=40)
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"SSH 连接失败: {str(e)}")
-    return {"session_id": session_id, "status": "connected"}
+    await event_bus.publish(
+        "session_create", "api",
+        f"创建SSH会话 {session_id} -> {req.host}:{req.port}",
+        session_id=session_id, host=req.host, port=req.port
+    )
+    return {"session_id": session_id, "status": "connected", "has_shell": True}
 
 
 @app.post("/api/sessions/from-host")
@@ -238,6 +246,8 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
             private_key=host.get("private_key") or None,
             passphrase=host.get("passphrase") or None,
         )
+        # 自动启动交互式 shell，使用默认尺寸 120x40
+        await session.start_interactive_shell(cols=120, rows=40)
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"SSH 连接失败: {str(e)}")
