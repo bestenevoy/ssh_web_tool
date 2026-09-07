@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from ssh_web_tool.sessions import session_manager, SSHSession
 from ssh_web_tool.storage import storage
 from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
+from ssh_web_tool.config import load_config
 
 app = FastAPI(title="SSH Web Tool", version="2.0.0")
 
@@ -205,6 +206,17 @@ class SftpDeleteRequest(BaseModel):
 async def index():
     """主页：网页 UI"""
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+# ============ 配置 API ============
+
+@app.get("/api/config")
+async def api_get_config():
+    """返回前端展示所需的全局配置（如密码是否明文展示）"""
+    cfg = load_config()
+    return {
+        "show_password_plaintext": bool(cfg.get("show_password_plaintext", False)),
+    }
 
 
 # ============ SSH 会话 API ============

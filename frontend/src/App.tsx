@@ -34,6 +34,14 @@ function App() {
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
   const [quickCommandModalOpen, setQuickCommandModalOpen] = useState(false)
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null)
+  const [showPasswordPlaintext, setShowPasswordPlaintext] = useState(false)
+
+  // 获取全局配置（如密码是否明文展示）
+  useEffect(() => {
+    api.getConfig()
+      .then((cfg) => setShowPasswordPlaintext(!!cfg.show_password_plaintext))
+      .catch(() => setShowPasswordPlaintext(false))
+  }, [])
 
   const { settings, toggleTheme, setFontFamily, setFontSize } = useSettings()
   const terminals = useTerminals(settings)
@@ -515,6 +523,7 @@ function App() {
         host={editingHost}
         groups={groups}
         hostTypes={hostTypes}
+        showPasswordPlaintext={showPasswordPlaintext}
         onClose={() => { setModalOpen(false); setEditingHost(null); focusActiveTerminal() }}
         onSave={handleSaveHost}
         onAddGroup={handleAddGroup}

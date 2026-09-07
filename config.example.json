@@ -4,5 +4,6 @@
     "port": 8765,
     "auto_find_free_port": true
   },
-  "open_browser": true
+  "open_browser": true,
+  "show_password_plaintext": false
 }

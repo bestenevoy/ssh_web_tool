@@ -6,12 +6,13 @@ interface Props {
   host: Host | null
   groups: string[]
   hostTypes: HostType[]
+  showPasswordPlaintext?: boolean  // 全局配置：是否明文展示密码（默认 false=掩码）
   onClose: () => void
   onSave: (data: Partial<Host>) => void
   onAddGroup?: (name: string) => void
 }
 
-export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAddGroup }: Props) {
+export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext = false, onClose, onSave, onAddGroup }: Props) {
   const [name, setName] = useState('')
   const [hostAddr, setHostAddr] = useState('')
   const [port, setPort] = useState(22)
@@ -174,7 +175,11 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
           </div>
           <div className="form-group">
             <label>SSH 密码</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <input
+              type={showPasswordPlaintext ? 'text' : 'password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
           </div>
         </div>
         <div className="form-group">
@@ -244,7 +249,11 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
             </div>
             <div className="form-group">
               <label>管理密码</label>
-              <input type="password" value={mgmtPassword} onChange={(e) => setMgmtPassword(e.target.value)} />
+              <input
+                type={showPasswordPlaintext ? 'text' : 'password'}
+                value={mgmtPassword}
+                onChange={(e) => setMgmtPassword(e.target.value)}
+              />
             </div>
             <div className="form-hint">
               保存后，主机列表会出现「打开管理页面」按钮。点击可选择自动登录（Playwright）或手动打开。

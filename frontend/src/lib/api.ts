@@ -17,6 +17,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 // 主机管理
 export const api = {
+  // 全局配置
+  getConfig: () => request<{ show_password_plaintext: boolean }>('/api/config'),
+
   // 主机
   listHosts: () => request<{ hosts: Host[]; groups: string[]; host_types: HostType[] }>('/api/hosts'),
   addHost: (data: Partial<Host>) => request<Host>('/api/hosts', { method: 'POST', body: JSON.stringify(data) }),
