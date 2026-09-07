@@ -1,0 +1,57 @@
+name: build-ssh-monkeypatch-release
+
+# 推送 ssh-monkeypatch-v* 标签时自动构建 wheel/sdist 并发布到 GitHub Release
+on:
+  push:
+    tags:
+      - 'ssh-monkeypatch-v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build
+        run: python -m pip install --upgrade build
+
+      - name: Build wheel + sdist
+        working-directory: packages/ssh-monkeypatch
+        run: python -m build
+
+      - name: Create Release & Upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ssh-monkeypatch ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            ## ssh-monkeypatch
+
+            独立 pip 包：monkey-patch 劫持当前进程内 paramiko / asyncssh 的 SSH 连接，
+            采集连接 / 命令 / stdout/stderr 输出 / 会话事件，通过 WebSocket 推送到
+            ssh_web_tool 可视化服务（跨进程实时展示与历史回放）。
+
+            ### 安装
+            ```bash
+            pip install ssh-monkeypatch
+            ```
+            推送采集需要 websocket-client（`pip install ssh-monkeypatch[stream]`）。
+
+            ### 用法
+            ```python
+            import ssh_monkeypatch
+            ssh_monkeypatch.patch_all()
+            # 连接事件推送至 ws://127.0.0.1:8765/ws/stream
+            ssh_monkeypatch.start_streamer("ws://127.0.0.1:8765/ws/stream")
+            ```
+          files: |
+            packages/ssh-monkeypatch/dist/*
+          fail_on_unmatched_files: true

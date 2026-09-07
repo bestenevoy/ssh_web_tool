@@ -27,6 +27,7 @@ from ssh_web_tool.sessions import session_manager, SSHSession
 from ssh_web_tool.storage import storage
 from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
 from ssh_web_tool.config import load_config
+from ssh_web_tool.external_sessions import external_hub
 
 app = FastAPI(title="SSH Web Tool", version="2.0.0")
 
@@ -1082,6 +1083,76 @@ async def websocket_events(websocket: WebSocket):
         pass
     finally:
         event_bus.unsubscribe(websocket)
+
+
+# ============ 外部 SSH 会话（跨进程观测：ssh-monkeypatch 推送） ============
+
+@app.get("/api/external-sessions")
+async def api_external_sessions():
+    """外部会话列表（测试进程通过 ssh-monkeypatch 推送的 SSH 会话）"""
+    return {"sessions": external_hub.list_sessions()}
+
+
+@app.get("/api/external-sessions/{session_id}")
+async def api_external_session_detail(session_id: str, limit: int = 500):
+    """外部会话详情 + 历史事件（回放）"""
+    meta = external_hub.get_session(session_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="外部会话不存在")
+    return {"session": meta, "events": external_hub.get_history(session_id, limit)}
+
+
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket):
+    """ssh-monkeypatch（测试进程）推送 SSH 事件的入口。
+
+    客户端：websocket-client 推送 JSON 事件流（connect/command/output/close），
+    服务端按 session_id 区分会话，转发给订阅的浏览器并缓存历史。
+    """
+    await websocket.accept()
+    print("[External] 测试进程事件流已接入")
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                ev = json.loads(raw)
+                await external_hub.handle_event(ev)
+            except json.JSONDecodeError:
+                pass
+            except Exception as e:
+                print(f"[External] 事件处理异常: {e}")
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        print("[External] 测试进程事件流已断开")
+
+
+@app.websocket("/ws/external/{session_id}")
+async def websocket_external(websocket: WebSocket, session_id: str):
+    """浏览器订阅外部会话：先回放历史，再实时接收测试侧推送的 SSH 事件"""
+    await websocket.accept()
+    ok = await external_hub.subscribe(session_id, websocket)
+    if not ok:
+        await websocket.send_json({"type": "error", "data": "外部会话不存在"})
+        await websocket.close()
+        return
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except json.JSONDecodeError:
+                pass
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        external_hub.unsubscribe(session_id, websocket)
 
 
 # ============ 启动 ============

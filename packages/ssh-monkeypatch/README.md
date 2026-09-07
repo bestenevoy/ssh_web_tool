@@ -1,63 +1,97 @@
 # ssh-monkeypatch
 
-Monkey-patch 劫持当前 Python 进程内所有 paramiko / asyncssh 的 SSH 连接，自动登记连接状态（主机、端口、用户、连接时间、存活状态），连接对象 close 时自动移除登记。
+Monkey-patch 劫持当前 Python 进程内所有 paramiko / asyncssh 的 SSH 连接，自动登记连接状态，并**采集 SSH 事件**（连接 / 命令 / stdout/stderr 输出 / 关闭）。
 
-独立可用的轻量包，无需依赖 `ssh_web_tool` 主体；可选桥接到 `ssh_web_tool` 的 Web UI 镜像会话。
+核心场景：**劫持观测自动化测试的 SSH 会话（跨进程）**——测试框架与可视化服务完全分离，测试侧只 patch 采集 + WebSocket 推送，不修改任何原有测试业务逻辑。
+
+## 架构
+
+```
+┌─ 测试进程（py3.8+，独立 Python 环境）─────────────┐
+│  import ssh_monkeypatch                           │
+│  ssh_monkeypatch.patch_all()                      │
+│  ssh_monkeypatch.start_streamer("ws://host:8765/ws/stream")  │
+│                                                   │
+│  原有测试代码照常使用 paramiko / asyncssh：        │
+│  connect / exec_command / invoke_shell / close    │
+│  → 自动采集 connect/command/output/close 事件      │
+│  → WebSocket 推送（websocket-client 轻量依赖）     │
+└────────────────────┬──────────────────────────────┘
+                     │ WebSocket（跨进程）
+┌────────────────────▼──────────────────────────────┐
+│ ssh_web_tool 可视化服务                            │
+│  /ws/stream      接收事件，按 session_id 区分      │
+│  /ws/external/{session_id}  转发给浏览器           │
+│  → Web 终端页面实时展示 + 历史回放                 │
+└───────────────────────────────────────────────────┘
+```
 
 ## 安装
 
 ```bash
-pip install ssh-monkeypatch            # 核心（paramiko / asyncssh 按需劫持）
-pip install ssh-monkeypatch[paramiko]  # 附带 paramiko
-pip install ssh-monkeypatch[asyncssh]  # 附带 asyncssh
-pip install ssh-monkeypatch[all]       # 附带两者
-pip install ssh-monkeypatch[web]       # 附带 ssh_web_tool 桥接（Web UI 镜像会话）
+pip install ssh-monkeypatch            # 核心
+pip install ssh-monkeypatch[stream]    # + websocket-client（跨进程推送必需）
+pip install ssh-monkeypatch[paramiko]  # + paramiko
+pip install ssh-monkeypatch[asyncssh]  # + asyncssh
+pip install ssh-monkeypatch[all]       # + 两者
+pip install ssh-monkeypatch[web]       # + ssh_web_tool 桥接（同进程镜像会话）
 ```
 
-## 快速开始
+兼容 Python 3.8+。
+
+## 快速开始（测试侧）
 
 ```python
 import ssh_monkeypatch
+
+# 1. 劫持当前进程所有 SSH 连接入口
 ssh_monkeypatch.patch_all()
 
-# 之后现有代码发起 SSH 连接（paramiko / asyncssh 均可），自动登记：
+# 2. 开启 WebSocket 推送（可选；不推送到包内缓冲也可查）
+ssh_monkeypatch.start_streamer("ws://127.0.0.1:8765/ws/stream")
+
+# 3. 原有测试业务代码照常执行，不修改任何逻辑：
 import paramiko
 c = paramiko.SSHClient()
+c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 c.connect("192.168.1.10", username="root", password="xxx")
 
-# 查看已登记的连接：
-print(ssh_monkeypatch.list_connections())
-# [{'id': 'a1b2c3d4', 'host': '192.168.1.10', 'port': 22, 'username': 'root',
-#   'kind': 'paramiko', 'connected_at': 1757..., 'is_alive': True}]
+stdin, stdout, stderr = c.exec_command("uname -a")
+print(stdout.read())        # 读到的输出同时被采集并推送
 
-c.close()   # 登记自动移除
+c.close()                   # 登记移除 + close 事件
 ```
 
-## 桥接到 Web UI（可选）
+## 事件协议（测试侧 → 可视化服务）
 
-```python
-import ssh_monkeypatch
-ssh_monkeypatch.bridge_to_web(True)   # 需要 pip install ssh_web_tool
-ssh_monkeypatch.patch_all()
+每条事件为 JSON，`type` 区分事件种类，`session_id` 区分 SSH 会话：
+
+```json
+{"type": "connect",      "session_id": "a1b2c3d4", "host": "192.168.1.10", "port": 22, "username": "root", "kind": "paramiko", "ts": 1757...}
+{"type": "command",      "session_id": "a1b2c3d4", "command": "uname -a", "ts": 1757...}
+{"type": "output",       "session_id": "a1b2c3d4", "stream": "stdout", "data": "Linux ...", "ts": 1757...}
+{"type": "stream_eof",   "session_id": "a1b2c3d4", "stream": "stdout", "ts": 1757...}
+{"type": "close",        "session_id": "a1b2c3d4", "ts": 1757...}
 ```
-
-开启后，被劫持的连接除了登记在本包 registry，还会同步注册为 `ssh_web_tool` 的镜像会话，出现在 Web UI 的会话列表（`/api/sessions`）中；连接关闭时同步移除。
 
 ## API
 
 | 函数 | 说明 |
 | --- | --- |
 | `patch_all()` | 一次劫持 paramiko + asyncssh（已安装的生效） |
-| `patch_paramiko()` | 仅劫持 `paramiko.SSHClient.connect`（含 fabric/scp/pssh 等上层库） |
-| `patch_asyncssh()` | 仅劫持 `asyncssh.connect` |
-| `unpatch()` | 恢复原始函数，停止劫持（已登记连接保留） |
-| `list_connections()` | 列出所有已登记的连接（dict 列表） |
-| `get_connection(id)` | 按 id 查询单条连接 |
-| `clear_registry()` | 清空登记（不关闭真实连接） |
-| `bridge_to_web(True/False)` | 开关 ssh_web_tool Web 镜像会话桥接 |
+| `patch_paramiko()` | 劫持 `SSHClient.connect / exec_command / invoke_shell`（含 fabric/scp/pssh 等上层库） |
+| `patch_asyncssh()` | 劫持 `asyncssh.connect` |
+| `unpatch()` | 恢复原始函数 |
+| `start_streamer(ws_url)` | 启动 WebSocket 推送（需 websocket-client），断线自动重连 |
+| `stop_streamer()` | 停止推送 |
+| `set_capture_unread(True/False)` | 测试代码不读取输出时是否后台自动采集（默认 False：读哪儿采哪儿，不抢数据） |
+| `get_events(session_id=None, limit=500)` | 查询采集的事件 |
+| `list_events(session_id, limit=500)` | 按会话列出事件（alias） |
+| `list_connections()` / `get_connection(id)` / `clear_registry()` | 连接登记查询/清空 |
+| `bridge_to_web(True/False)` | 同进程场景：登记同步到 ssh_web_tool 镜像会话 |
 
 ## 说明
 
-- 仅对**同一 Python 进程内**的调用生效；通过 subprocess 调外部 `ssh` 命令（openssh 客户端）属于跨进程，无法劫持。
-- 登记的是连接状态（镜像会话），不拦截命令/输出数据，不影响原连接的任何行为。
-- 支持 `paramiko` / `asyncssh` 任一或同时安装：未安装的库自动跳过，不会报错。
+- 仅对**同一 Python 进程内**的调用生效；subprocess 调外部 `ssh` 命令无法劫持。
+- 输出采集默认"读哪儿采哪儿"：只包装流对象的读方法，测试代码读到哪儿采集到哪儿，不与业务逻辑抢数据。若测试代码执行命令后从不读取输出，可 `set_capture_unread(True)` 启用后台采集（会消费输出流）。
+- 采集与推送均为旁路：不拦截、不修改命令/输出数据，不影响原连接行为。
