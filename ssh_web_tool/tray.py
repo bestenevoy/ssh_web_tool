@@ -42,6 +42,19 @@ user32.GetMenuStringW.argtypes = [wt.HANDLE, wt.UINT, wt.LPWSTR, ctypes.c_int, w
 user32.GetMenuStringW.restype = ctypes.c_int
 user32.SetForegroundWindow.argtypes = [wt.HWND]
 user32.SetForegroundWindow.restype = wt.BOOL
+user32.GetForegroundWindow.restype = wt.HWND
+user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+user32.GetWindowThreadProcessId.restype = wt.DWORD
+user32.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
+user32.AttachThreadInput.restype = wt.BOOL
+user32.BringWindowToTop.argtypes = [wt.HWND]
+user32.BringWindowToTop.restype = wt.BOOL
+user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wt.BOOL
+user32.GetLastActivePopup.argtypes = [wt.HWND]
+user32.GetLastActivePopup.restype = wt.HWND
+user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.DefWindowProcW.restype = ctypes.c_ssize_t
 user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 user32.PostMessageW.restype = wt.BOOL
 user32.DestroyWindow.argtypes = [wt.HWND]
@@ -268,6 +281,22 @@ class TrayIcon:
         nid.szTip = "SSH Web Tool - 网页版SSH终端"
         shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
 
+    def _force_foreground(self):
+        """将隐藏的托盘窗口强制置为前台（标准托盘做法，参考 pystray）"""
+        user32.ShowWindow(self.hwnd, 4)  # SW_SHOWNA：不激活显示
+        user32.SetForegroundWindow(self.hwnd)
+        # SetForegroundWindow 对隐藏窗口常被系统拒绝（SetForegroundLockTimeout 限制），
+        # 用 AttachThreadInput 挂接到当前前台线程后置前，是官方 workaround
+        fore = user32.GetForegroundWindow()
+        if fore and fore != self.hwnd:
+            fore_tid = user32.GetWindowThreadProcessId(fore, None)
+            cur_tid = kernel32.GetCurrentThreadId()
+            user32.AttachThreadInput(cur_tid, fore_tid, True)
+            user32.BringWindowToTop(self.hwnd)
+            user32.SetForegroundWindow(self.hwnd)
+            user32.AttachThreadInput(cur_tid, fore_tid, False)
+        user32.ShowWindow(self.hwnd, 0)  # SW_HIDE
+
     def _show_menu(self):
         menu = user32.CreatePopupMenu()
         if not menu:
@@ -306,13 +335,12 @@ class TrayIcon:
 
         pt = wt.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
-        # 隐藏窗口无法直接置前台，先以不激活方式显示再隐藏，确保菜单能正确弹出
-        user32.ShowWindow(self.hwnd, 4)  # SW_SHOWNA：不激活显示
-        user32.SetForegroundWindow(self.hwnd)
-        user32.ShowWindow(self.hwnd, 0)  # SW_HIDE
+        self._force_foreground()
         cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
                                     pt.x, pt.y, 0, self.hwnd, None)
         user32.DestroyMenu(menu)
+        # 菜单关闭后发 WM_NULL，避免菜单窗口残留不消失（标准技巧）
+        user32.PostMessageW(self.hwnd, 0x0000, 0, 0)  # WM_NULL
         if cmd == ID_OPEN_WEB:
             self.open_web()
         elif cmd == ID_OPEN_DIR:
