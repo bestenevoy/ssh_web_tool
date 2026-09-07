@@ -15,6 +15,7 @@ Windows 系统托盘（纯 ctypes Win32 实现，零第三方依赖）
 """
 import ctypes
 import ctypes.wintypes as wt
+import logging
 import os
 import subprocess
 import sys
@@ -25,6 +26,30 @@ user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 shell32 = ctypes.windll.shell32
 kernel32 = ctypes.windll.kernel32
+
+# ---------- 关键 Win32 函数显式签名（消除 ctypes 默认转换的不确定性） ----------
+user32.AppendMenuW.argtypes = [wt.HANDLE, wt.UINT, ctypes.c_uint, wt.LPCWSTR]
+user32.AppendMenuW.restype = wt.BOOL
+user32.CreatePopupMenu.restype = wt.HANDLE
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+user32.GetCursorPos.restype = wt.BOOL
+user32.TrackPopupMenu.argtypes = [wt.HANDLE, wt.UINT, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_int, wt.HWND, ctypes.c_void_p]
+user32.TrackPopupMenu.restype = wt.UINT
+user32.DestroyMenu.argtypes = [wt.HANDLE]
+user32.DestroyMenu.restype = wt.BOOL
+user32.GetMenuStringW.argtypes = [wt.HANDLE, wt.UINT, wt.LPWSTR, ctypes.c_int, wt.UINT]
+user32.GetMenuStringW.restype = ctypes.c_int
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.SetForegroundWindow.restype = wt.BOOL
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.PostMessageW.restype = wt.BOOL
+user32.DestroyWindow.argtypes = [wt.HWND]
+user32.DestroyWindow.restype = wt.BOOL
+user32.UnregisterClassW.argtypes = [wt.LPCWSTR, wt.HINSTANCE]
+user32.UnregisterClassW.restype = wt.BOOL
+shell32.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.c_void_p]
+shell32.Shell_NotifyIconW.restype = wt.BOOL
 
 # ---------- Win32 常量 ----------
 WM_DESTROY = 0x0002
@@ -245,16 +270,46 @@ class TrayIcon:
 
     def _show_menu(self):
         menu = user32.CreatePopupMenu()
-        user32.AppendMenuW(menu, MF_STRING, ID_OPEN_WEB, "打开界面 (Web)")
+        if not menu:
+            logging.error("[tray] CreatePopupMenu 失败")
+            return
+
+        # 持久保存字符串引用：某些情况下菜单只保存指针而不拷贝文本
+        labels = [
+            (ID_OPEN_WEB, "打开界面 (Web)"),
+            (ID_OPEN_DIR, "打开配置目录"),
+            (ID_OPEN_CONFIG, "打开配置文件 config.json"),
+            (ID_OPEN_LOG, "打开日志窗口"),
+            (ID_EXIT, "退出"),
+        ]
+        self._menu_labels = []
+
+        def _append(mid, text):
+            buf = ctypes.create_unicode_buffer(text)
+            self._menu_labels.append(buf)
+            r = user32.AppendMenuW(menu, MF_STRING, mid, buf)
+            if not r:
+                logging.error(f"[tray] AppendMenuW 失败 id={mid} err={kernel32.GetLastError()}")
+            # 诊断：读回菜单项文本，确认字符串是否正确写入
+            if r:
+                rb = ctypes.create_unicode_buffer(256)
+                n = user32.GetMenuStringW(menu, user32.GetMenuItemCount(menu) - 1, rb, 256, 0x0400)
+                logging.info(f"[tray] 菜单项 id={mid} 写入成功，读回[{n}]={rb.value!r}")
+
+        _append(ID_OPEN_WEB, "打开界面 (Web)")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, MF_STRING, ID_OPEN_DIR, "打开配置目录")
-        user32.AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, "打开配置文件 config.json")
-        user32.AppendMenuW(menu, MF_STRING, ID_OPEN_LOG, "打开日志窗口")
+        _append(ID_OPEN_DIR, "打开配置目录")
+        _append(ID_OPEN_CONFIG, "打开配置文件 config.json")
+        _append(ID_OPEN_LOG, "打开日志窗口")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, MF_STRING, ID_EXIT, "退出")
+        _append(ID_EXIT, "退出")
+
         pt = wt.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
+        # 隐藏窗口无法直接置前台，先以不激活方式显示再隐藏，确保菜单能正确弹出
+        user32.ShowWindow(self.hwnd, 4)  # SW_SHOWNA：不激活显示
         user32.SetForegroundWindow(self.hwnd)
+        user32.ShowWindow(self.hwnd, 0)  # SW_HIDE
         cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
                                     pt.x, pt.y, 0, self.hwnd, None)
         user32.DestroyMenu(menu)
