@@ -16,7 +16,6 @@ import { EventLog } from './components/EventLog'
 import { ApiDocs } from './components/ApiDocs'
 import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
-import { ParamInputModal } from './components/ParamInputModal'
 import HistorySearchModal from './components/HistorySearchModal'
 
 type PanelTab = 'quick' | 'sftp' | 'events' | 'api'
@@ -269,11 +268,6 @@ function App() {
     executeQuickCommand(qc, null)
   }, [terminals])
 
-  // 带参数快捷指令：打开参数输入弹窗，确认后执行
-  const [paramQc, setParamQc] = useState<QuickCommand | null>(null)
-  const handleExecuteParamQuickCommand = useCallback((qc: QuickCommand) => {
-    setParamQc(qc)
-  }, [])
 
   // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）
   const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null) => {
@@ -389,7 +383,6 @@ function App() {
           <QuickCommands
             commands={quickCommands}
             onExecute={handleSendQuickCommand}
-            onExecuteParam={handleExecuteParamQuickCommand}
             onEditExecute={handleEditExecuteQuickCommand}
             onEdit={handleEditQuickCommand}
             onDelete={handleDeleteQuickCommand}
@@ -561,16 +554,6 @@ function App() {
         />
       )}
 
-      {/* 带参数快捷指令：参数输入弹窗 */}
-      {paramQc && (
-        <ParamInputModal
-          open
-          commandName={paramQc.name}
-          paramHint={paramQc.param_hint}
-          onConfirm={(param) => executeQuickCommand(paramQc, param)}
-          onClose={() => { setParamQc(null); focusActiveTerminal() }}
-        />
-      )}
 
       {/* 拖拽提示 */}
       <div id="dropHint">释放文件以上传到当前 SFTP 目录</div>

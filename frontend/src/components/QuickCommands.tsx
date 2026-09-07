@@ -3,8 +3,7 @@ import type { QuickCommand } from '../types'
 interface Props {
   commands: QuickCommand[]
   onExecute: (cmd: QuickCommand) => void  // 直接执行（direct 类型）
-  onExecuteParam: (cmd: QuickCommand) => void  // 带参数执行（param 类型，弹参数输入框）
-  onEditExecute: (cmd: QuickCommand) => void  // 点击播放按钮：编辑后执行（输入到终端，可编辑）
+  onEditExecute: (cmd: QuickCommand) => void  // 输入到终端（可编辑后手动执行）
   onEdit: (cmd: QuickCommand) => void  // 点击编辑按钮：打开编辑弹窗
   onDelete: (id: string) => void
   onOpenAddModal: () => void
@@ -17,7 +16,7 @@ const PRE_OP_ICONS: Record<string, string> = {
   env: '🌱',
 }
 
-export function QuickCommands({ commands, onExecute, onExecuteParam, onEditExecute, onEdit, onDelete, onOpenAddModal, disabled }: Props) {
+export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDelete, onOpenAddModal, disabled }: Props) {
   return (
     <div className="qc-container">
       <div className="qc-header">
@@ -47,10 +46,10 @@ export function QuickCommands({ commands, onExecute, onExecuteParam, onEditExecu
               style={{ opacity: disabled ? 0.5 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
               onClick={() => {
                 if (disabled) return
-                if (isParam) onExecuteParam(qc)
+                if (isParam) onEditExecute(qc)  // 带参数指令：输入到终端，用户自行编辑 {args} 后执行
                 else onExecute(qc)
               }}
-              title={isParam ? `带参数指令：${qc.param_hint || '执行时输入参数'}` : '点击立即执行'}
+              title={isParam ? '带参数指令：点击输入到终端（含 {args} 占位），编辑后回车执行' : '点击立即执行'}
             >
               <div className="qc-item-header">
                 <div className="qc-name" title={qc.name}>
