@@ -29,6 +29,10 @@ export interface Host {
   pw_headless?: boolean
   terminal_count?: number
   is_connected?: boolean
+  // 敏感字段标记（后端脱敏：明文不下发，仅标记是否已设置）
+  has_password?: boolean
+  has_mgmt_password?: boolean
+  has_private_key?: boolean
   // 连接信息（后端附加）
   connected_since?: number | null
   connected_duration?: number | null

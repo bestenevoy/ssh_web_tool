@@ -63,18 +63,12 @@ export function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, 
         if (result.status === 'success' || result.status === 'warning') {
           alert(`自动登录：${result.message}`)
         } else {
-          // 自动登录失败，降级为手动打开
-          alert(`自动登录失败：${result.message}\n\n将手动打开管理页面，密码已复制到剪贴板`)
-          if (h.mgmt_password) {
-            navigator.clipboard.writeText(h.mgmt_password).catch(() => {})
-          }
+          // 自动登录失败，降级为手动打开（密码已脱敏，不会下发到前端）
+          alert(`自动登录失败：${result.message}\n\n将手动打开管理页面（密码已脱敏，请在本地 data.json 中查看）`)
           window.open(url, '_blank')
         }
       } catch (e) {
-        alert(`自动登录请求失败：${e}\n\n将手动打开管理页面，密码已复制到剪贴板`)
-        if (h.mgmt_password) {
-          navigator.clipboard.writeText(h.mgmt_password).catch(() => {})
-        }
+        alert(`自动登录请求失败：${e}\n\n将手动打开管理页面（密码已脱敏，请在本地 data.json 中查看）`)
         window.open(url, '_blank')
       } finally {
         setAutoLoggingHosts((prev) => {
@@ -84,12 +78,9 @@ export function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, 
         })
       }
     } else {
-      // 没有配置自动登录，手动打开
-      if (h.mgmt_password) {
-        navigator.clipboard.writeText(h.mgmt_password).catch(() => {})
-      }
+      // 没有配置自动登录，手动打开（密码已脱敏，不复制到剪贴板）
       window.open(url, '_blank')
-      alert('管理页面已打开，密码已复制到剪贴板。\n\n如需自动登录，请编辑主机，在「Playwright 自动登录选择器配置」中填写选择器。')
+      alert('管理页面已打开（密码已脱敏，不会下发到前端，请在本地 data.json 中查看）。\n\n如需自动登录，请编辑主机，在「Playwright 自动登录选择器配置」中填写选择器。')
     }
   }
 

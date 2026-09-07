@@ -277,7 +277,7 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
     # 持久化终端信息（会话ID复用，重启后可恢复）
     storage.save_terminal(session_id, req.host_id, session.terminal_name)
     return {"session_id": session_id, "status": "connected",
-            "terminal_name": session.terminal_name, "host": host}
+            "terminal_name": session.terminal_name, "host": _sanitize_host(host)}
 
 
 @app.get("/api/sessions")
@@ -430,11 +430,22 @@ async def api_get_session_logs(session_id: str, offset: int = 0, limit: int = 20
 
 # ============ 主机配置 API（持久化） ============
 
+def _sanitize_host(h: dict) -> dict:
+    """脱敏主机信息：密码/私钥等敏感字段不下发到前端（前端只作展示与编辑，不保存密码明文）"""
+    out = dict(h)
+    for key in ("password", "mgmt_password", "private_key", "passphrase"):
+        has = bool((h.get(key) or "").strip())
+        out[key] = ""
+        out[f"has_{key}"] = has
+    return out
+
+
 @app.get("/api/hosts")
 async def api_list_hosts():
-    """获取所有保存的主机（含实时连接状态与连接信息）"""
+    """获取所有保存的主机（含实时连接状态与连接信息；密码等敏感字段已脱敏）"""
     hosts = storage.list_hosts()
     now = time.time()
+    result = []
     # 为每个主机附加连接状态
     for h in hosts:
         h["terminal_count"] = session_manager.get_host_terminal_count(h["id"])
@@ -449,7 +460,8 @@ async def api_list_hosts():
         else:
             h["connected_since"] = None
             h["connected_duration"] = None
-    return {"hosts": hosts, "groups": storage.list_groups(), "host_types": storage.list_host_types()}
+        result.append(_sanitize_host(h))
+    return {"hosts": result, "groups": storage.list_groups(), "host_types": storage.list_host_types()}
 
 
 class ReorderHostsRequest(BaseModel):
@@ -502,16 +514,21 @@ async def api_list_active_terminals():
 async def api_add_host(req: HostRequest):
     """新增主机"""
     host = storage.add_host(req.dict())
-    return host
+    return _sanitize_host(host)
 
 
 @app.put("/api/hosts/{host_id}")
 async def api_update_host(host_id: str, req: HostRequest):
-    """更新主机"""
-    host = storage.update_host(host_id, req.dict())
+    """更新主机（密码/私钥等字段留空表示不修改，保持原值）"""
+    data = req.dict()
+    # 敏感字段为空字符串时不更新（前端编辑弹窗不回显密码，留空=不修改）
+    for key in ("password", "mgmt_password", "private_key", "passphrase"):
+        if key in data and not (data.get(key) or "").strip():
+            data.pop(key)
+    host = storage.update_host(host_id, data)
     if not host:
         raise HTTPException(status_code=404, detail="主机不存在")
-    return host
+    return _sanitize_host(host)
 
 
 @app.delete("/api/hosts/{host_id}")
@@ -525,12 +542,12 @@ async def api_delete_host(host_id: str):
 
 @app.post("/api/hosts/{host_id}/duplicate")
 async def api_duplicate_host(host_id: str):
-    """复制主机（生成新 ID，名称加"副本"后缀）"""
+    """复制主机（生成新 ID，名称加"副本"后缀；密码在后端随原主机复制，不下发明文）"""
     new_host = storage.duplicate_host(host_id)
     if not new_host:
         raise HTTPException(status_code=404, detail="主机不存在")
     await event_bus.publish("host_add", "WEB", f"复制主机: {new_host.get('name', new_host['host'])}")
-    return new_host
+    return _sanitize_host(new_host)
 
 
 # ============ 存储阵列管理页面自动登录 API（Playwright） ============

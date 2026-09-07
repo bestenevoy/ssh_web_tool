@@ -16,6 +16,7 @@ import { EventLog } from './components/EventLog'
 import { ApiDocs } from './components/ApiDocs'
 import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
+import { ParamInputModal } from './components/ParamInputModal'
 import HistorySearchModal from './components/HistorySearchModal'
 
 type PanelTab = 'quick' | 'sftp' | 'events' | 'api'
@@ -180,9 +181,10 @@ function App() {
 
   const handleCopyConnection = useCallback((host: Host) => {
     const cmd = `ssh ${host.username}@${host.host} -p ${host.port}`
-    const text = `${cmd}\n密码: ${host.password}`
+    // 密码已脱敏，不下发到前端，复制时只带连接命令
+    const text = `${cmd}\n（密码已脱敏，不在前端展示）`
     navigator.clipboard.writeText(text)
-      .then(() => alert('已复制连接信息和密码'))
+      .then(() => alert('已复制连接信息（密码已脱敏，不在前端展示）'))
       .catch(() => {
         const ta = document.createElement('textarea')
         ta.value = text
@@ -267,13 +269,11 @@ function App() {
     executeQuickCommand(qc, null)
   }, [terminals])
 
-  // 带参数快捷指令：弹出参数输入框后执行
+  // 带参数快捷指令：打开参数输入弹窗，确认后执行
+  const [paramQc, setParamQc] = useState<QuickCommand | null>(null)
   const handleExecuteParamQuickCommand = useCallback((qc: QuickCommand) => {
-    const hint = qc.param_hint || '请输入参数（替换命令中的 {args}）'
-    const param = window.prompt(hint, '')
-    if (param === null) return  // 用户取消
-    executeQuickCommand(qc, param.trim())
-  }, [terminals])
+    setParamQc(qc)
+  }, [])
 
   // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）
   const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null) => {
@@ -558,6 +558,17 @@ function App() {
           onAdd={handleAddQuickCommand}
           onUpdate={handleUpdateQuickCommand}
           editing={editingQuickCommand}
+        />
+      )}
+
+      {/* 带参数快捷指令：参数输入弹窗 */}
+      {paramQc && (
+        <ParamInputModal
+          open
+          commandName={paramQc.name}
+          paramHint={paramQc.param_hint}
+          onConfirm={(param) => executeQuickCommand(paramQc, param)}
+          onClose={() => { setParamQc(null); focusActiveTerminal() }}
         />
       )}
 

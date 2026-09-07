@@ -104,18 +104,23 @@ export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext
 
   const handleSave = () => {
     if (!hostAddr) return
-    onSave({
+    const isEdit = !!host
+    const payload: Record<string, unknown> = {
       name,
       host: hostAddr,
       port,
       username,
-      password,
       type,
       group,
       device_type: deviceType,
       mgmt_port: mgmtPort,
       mgmt_username: mgmtUsername,
-      mgmt_password: mgmtPassword,
+    }
+    // 编辑模式下密码留空表示不修改（后端不回显明文，也不会下发明文）
+    if (!isEdit || password) payload.password = password
+    if (!isEdit || mgmtPassword) payload.mgmt_password = mgmtPassword
+    onSave({
+      ...payload,
       pw_username_selector: pwUsernameSelector,
       pw_password_selector: pwPasswordSelector,
       pw_login_btn_selector: pwLoginBtnSelector,
@@ -174,11 +179,13 @@ export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext
             <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} />
           </div>
           <div className="form-group">
-            <label>SSH 密码</label>
+            <label>SSH 密码{host?.has_password ? '（已设置）' : ''}</label>
             <input
               type={showPasswordPlaintext ? 'text' : 'password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              placeholder={host ? '留空则不修改密码' : '如：password123'}
+              autoComplete="new-password"
             />
           </div>
         </div>
@@ -248,11 +255,13 @@ export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext
               </div>
             </div>
             <div className="form-group">
-              <label>管理密码</label>
+              <label>管理密码{host?.has_mgmt_password ? '（已设置）' : ''}</label>
               <input
                 type={showPasswordPlaintext ? 'text' : 'password'}
                 value={mgmtPassword}
                 onChange={(e) => setMgmtPassword(e.target.value)}
+                placeholder={host ? '留空则不修改密码' : '如：admin123'}
+                autoComplete="new-password"
               />
             </div>
             <div className="form-hint">
