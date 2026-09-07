@@ -4,6 +4,7 @@ import type { Host, HostType } from '../types'
 interface Props {
   hosts: Host[]
   hostTypes: HostType[]
+  groups: string[]
   activeHostId: string | null
   onHostClick: (host: Host) => void
   onEdit: (host: Host) => void
@@ -11,12 +12,23 @@ interface Props {
   onCopy: (host: Host) => void
   onDuplicate: (host: Host) => void
   onManageGroups: () => void
+  onReorderHosts: (ids: string[]) => void
 }
 
-export function HostList({ hosts, hostTypes, activeHostId, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups }: Props) {
+// 格式化连接时长：xx秒 / xx分钟 / xx小时
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.max(1, seconds)}秒`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`
+  return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
+}
+
+export function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
+  // 主机拖拽排序
+  const [dragHostId, setDragHostId] = useState<string | null>(null)
+  const [overHostId, setOverHostId] = useState<string | null>(null)
 
   const getTypeColor = (key: string) => hostTypes.find((t) => t.key === key)?.color || '#999'
 
@@ -90,12 +102,50 @@ export function HostList({ hosts, hostTypes, activeHostId, onHostClick, onEdit, 
     })
   }
 
+  // 按存储的分组顺序渲染（未分组固定放最后）
+  const groupNames = [...groups]
+  const withUngrouped = filteredHosts.some((h) => !h.group)
+  const orderedGroups = [...groupNames]
+  if (withUngrouped) orderedGroups.push('未分组')
+
   const grouped: Record<string, Host[]> = {}
   filteredHosts.forEach((h) => {
     const g = h.group || '未分组'
     if (!grouped[g]) grouped[g] = []
     grouped[g].push(h)
   })
+
+  // ---- 主机拖拽排序 ----
+  const moveHost = (fromId: string, toId: string) => {
+    if (fromId === toId) return
+    const list = [...hosts]
+    const fromIdx = list.findIndex((h) => h.id === fromId)
+    const toIdx = list.findIndex((h) => h.id === toId)
+    if (fromIdx < 0 || toIdx < 0) return
+    const [item] = list.splice(fromIdx, 1)
+    list.splice(toIdx, 0, item)
+    onReorderHosts(list.map((h) => h.id))
+  }
+
+  const handleHostDragStart = (h: Host) => {
+    setDragHostId(h.id)
+  }
+
+  const handleHostDragOver = (e: React.DragEvent, h: Host) => {
+    e.preventDefault()
+    if (dragHostId && dragHostId !== h.id) setOverHostId(h.id)
+  }
+
+  const handleHostDrop = (h: Host) => {
+    if (dragHostId) moveHost(dragHostId, h.id)
+    setDragHostId(null)
+    setOverHostId(null)
+  }
+
+  const handleHostDragEnd = () => {
+    setDragHostId(null)
+    setOverHostId(null)
+  }
 
   return (
     <div className="host-list">
@@ -113,59 +163,75 @@ export function HostList({ hosts, hostTypes, activeHostId, onHostClick, onEdit, 
         )}
         <button className="host-search-group-btn" onClick={onManageGroups} title="管理分组">📁</button>
       </div>
-      {Object.entries(grouped).map(([group, groupHosts]) => (
-        <div key={group}>
-          <div
-            className="group-header"
-            onClick={() => toggleGroup(group)}
-          >
-            <span className="arrow" style={{ display: 'inline-block', transform: collapsedGroups.has(group) ? 'rotate(-90deg)' : 'none', transition: 'transform .15s' }}>▼</span>
-            {group} ({groupHosts.length})
-          </div>
-          {!collapsedGroups.has(group) && (
-            <div>
-              {groupHosts.map((h) => (
-                <div
-                  key={h.id}
-                  className={`host-item${activeHostId === h.id ? ' active' : ''}`}
-                  onClick={() => onHostClick(h)}
-                >
-                  <span className="type-dot" style={{ background: getTypeColor(h.type) }} />
-                  <span className={`conn-dot${h.is_connected ? ' online' : ''}`} title={h.is_connected ? '已连接' : '未连接'} />
-                  <div className="host-info">
-                    <div className="host-name">
-                      {h.name || h.host}
-                    </div>
-                    <div className="host-ip">
-                      {h.name ? h.host : h.host}
-                      {h.device_type === 'storage' ? ' · 存储阵列' : ' · 主机'}
-                    </div>
-                  </div>
-                  {h.terminal_count && h.terminal_count > 0 && (
-                    <span className="term-count">{h.terminal_count}</span>
-                  )}
-                  <div className="actions">
-                    {h.device_type === 'storage' && (
-                      <button
-                        className={`action-btn mgmt-btn${autoLoggingHosts.has(h.id) ? ' loading' : ''}`}
-                        onClick={(e) => { e.stopPropagation(); openMgmtPage(h) }}
-                        title={hasAutoLoginConfig(h) ? '自动登录管理页面' : '打开管理页面'}
-                        disabled={autoLoggingHosts.has(h.id)}
-                      >
-                        {autoLoggingHosts.has(h.id) ? '⏳' : '🌐'}
-                      </button>
-                    )}
-                    <button className="action-btn" onClick={(e) => { e.stopPropagation(); onDuplicate(h) }} title="复制主机">📄</button>
-                    <button className="action-btn" onClick={(e) => { e.stopPropagation(); onCopy(h) }} title="复制连接信息">📋</button>
-                    <button className="action-btn" onClick={(e) => { e.stopPropagation(); onEdit(h) }} title="编辑">✎</button>
-                    <button className="action-btn" onClick={(e) => { e.stopPropagation(); onDelete(h) }} title="删除">🗑</button>
-                  </div>
-                </div>
-              ))}
+      {orderedGroups.map((group) => {
+        const groupHosts = grouped[group] || []
+        if (groupHosts.length === 0) return null
+        return (
+          <div key={group}>
+            <div
+              className="group-header"
+              onClick={() => toggleGroup(group)}
+              title="点击折叠/展开"
+            >
+              <span className="arrow" style={{ display: 'inline-block', transform: collapsedGroups.has(group) ? 'rotate(-90deg)' : 'none', transition: 'transform .15s' }}>▼</span>
+              {group} ({groupHosts.length})
             </div>
-          )}
-        </div>
-      ))}
+            {!collapsedGroups.has(group) && (
+              <div>
+                {groupHosts.map((h) => (
+                  <div
+                    key={h.id}
+                    className={`host-item${activeHostId === h.id ? ' active' : ''}${dragHostId === h.id ? ' dragging' : ''}${overHostId === h.id && dragHostId && dragHostId !== h.id ? ' drag-over' : ''}`}
+                    onClick={() => onHostClick(h)}
+                    draggable
+                    onDragStart={() => handleHostDragStart(h)}
+                    onDragOver={(e) => handleHostDragOver(e, h)}
+                    onDrop={() => handleHostDrop(h)}
+                    onDragEnd={handleHostDragEnd}
+                    title="拖动可调整顺序"
+                  >
+                    <span className="type-dot" style={{ background: getTypeColor(h.type) }} />
+                    <span className={`conn-dot${h.is_connected ? ' online' : ''}`} title={h.is_connected ? '已连接' : '未连接'} />
+                    <div className="host-info">
+                      <div className="host-name">
+                        {h.name || h.host}
+                      </div>
+                      <div className="host-ip">
+                        {h.host}
+                        {h.device_type === 'storage' ? ' · 存储阵列' : ' · 主机'}
+                        {h.is_connected && h.connected_duration != null && (
+                          <span className="host-conn-info" title={`已连接 ${formatDuration(h.connected_duration)}`}>
+                            {' '}· <span className="conn-dot-mini online" /> 已连 {formatDuration(h.connected_duration)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {h.terminal_count && h.terminal_count > 0 && (
+                      <span className="term-count">{h.terminal_count}</span>
+                    )}
+                    <div className="actions">
+                      {h.device_type === 'storage' && (
+                        <button
+                          className={`action-btn mgmt-btn${autoLoggingHosts.has(h.id) ? ' loading' : ''}`}
+                          onClick={(e) => { e.stopPropagation(); openMgmtPage(h) }}
+                          title={hasAutoLoginConfig(h) ? '自动登录管理页面' : '打开管理页面'}
+                          disabled={autoLoggingHosts.has(h.id)}
+                        >
+                          {autoLoggingHosts.has(h.id) ? '⏳' : '🌐'}
+                        </button>
+                      )}
+                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onDuplicate(h) }} title="复制主机">📄</button>
+                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onCopy(h) }} title="复制连接信息">📋</button>
+                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onEdit(h) }} title="编辑">✎</button>
+                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onDelete(h) }} title="删除">🗑</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
       {hosts.length === 0 && (
         <div style={{ textAlign: 'center', color: '#3a4a6a', padding: '30px 10px', fontSize: 11 }}>
           暂无主机<br />点击右上角「+ 新建主机」添加

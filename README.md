@@ -530,20 +530,21 @@ ssh-web-tool/
 ├── ssh_client.py            # Python SDK + CLI 二合一
 ├── pyproject.toml           # UV 项目配置（包配置、依赖、CLI 入口点）
 ├── uv.lock                  # UV 依赖锁定文件
-├── build_exe.bat            # Windows 打包脚本（构建前端 + PyInstaller 打包 EXE）
+├── build_exe.bat            # Windows 一键打包脚本入口（调用 build.ps1）
+├── build.ps1                # 打包脚本：前端构建 + PyInstaller 打包 EXE + 打包劫持包（wheel）
 ├── data.json                # 运行时生成的主机配置文件
 ├── logs/                    # 终端历史日志（按会话 ID 分文件）
 ├── ssh_web_tool/            # 核心 Python 包
-│   ├── __init__.py          # 包入口（导出 SSHWebTool 等）
+│   ├── __init__.py          # 包入口（导出 SSHWebTool / patch_all 等）
 │   ├── sessions.py          # SSH 会话池（统一管理所有 SSH 连接）
 │   ├── storage.py           # JSON 持久化存储（主机/分组/类型/快捷指令/命令历史）
-│   ├── ssh_tool.py          # 可嵌入的 Python 库入口（SSHWebTool 类）
+│   ├── ssh_tool.py          # 可嵌入的 Python 库入口（SSHWebTool / patch_paramiko / patch_asyncssh / patch_all）
 │   └── playwright_mgmt.py   # 存储阵列管理页面自动登录（基于 Playwright）
 ├── static/
-│   └── index.html           # React 构建产物（单文件，约 546KB）
+│   └── index.html           # React 构建产物（单文件，约 560KB）
 ├── frontend/                # React + TypeScript 源码
 │   ├── src/
-│   │   ├── components/      # 12 个 React 组件
+│   │   ├── components/      # React 组件（主机列表/终端/快捷指令/SFTP/分组管理等）
 │   │   ├── lib/             # API 封装 + 自定义 hooks（useTerminals/useEvents/useSettings）
 │   │   ├── types/           # TypeScript 类型定义
 │   │   ├── App.tsx          # 主应用
@@ -557,8 +558,21 @@ ssh-web-tool/
 │       ├── ci.yml           # CI workflow（多平台多 Python 版本测试）
 │       └── release.yml      # Release workflow（推送 tag 自动构建 EXE 并发布）
 └── dist/
-    └── SSHWebTool.exe       # 打包生成的 EXE 文件（约 55MB）
+    ├── SSHWebTool.exe       # 打包生成的 EXE 文件（双击运行）
+    ├── wheel/               # 劫持包（ssh_web_tool-*.whl，pip install 后 patch_all() 劫持 SSH 连接）
+    ├── example_embed.py     # 嵌入式使用示例（含 patch_all）
+    └── README.md / requirements.txt
 ```
+
+### 打包（同时产出 EXE 和劫持包）
+
+双击 `build_exe.bat`（或执行 `powershell -ExecutionPolicy Bypass -File build.ps1`），自动完成：
+
+1. **构建前端**：`npm run build`（产出单文件 `static/index.html`）
+2. **打包独立 EXE**：PyInstaller 将后端 + 前端 + 依赖打包为 `dist/SSHWebTool.exe`，双击即用
+3. **打包劫持包**：`pip wheel` 产出 `dist/wheel/ssh_web_tool-*.whl`，`pip install` 后调用 `patch_all()` 可劫持当前进程所有 paramiko / asyncssh 连接（含 fabric/scp 等基于 paramiko 的库）
+
+产物结构见上方 `dist/` 目录。
 
 ## 十三、已知问题和注意事项
 

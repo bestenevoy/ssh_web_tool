@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { Host, HostType } from '../types'
 
 interface Props {
@@ -28,6 +28,20 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
   const [mgmtUsername, setMgmtUsername] = useState('')
   const [mgmtPassword, setMgmtPassword] = useState('')
   // Playwright 自动登录选择器配置
+  const escRef = useRef<boolean>(false)
+
+  // ESC 关闭弹窗（防止鼠标误触遮罩丢失输入内容，遮罩点击已禁用关闭）
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        escRef.current = true
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [open, onClose])
   const [showSelectorConfig, setShowSelectorConfig] = useState(false)
   const [pwUsernameSelector, setPwUsernameSelector] = useState('')
   const [pwPasswordSelector, setPwPasswordSelector] = useState('')
@@ -116,9 +130,12 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
   const isStorage = deviceType === 'storage'
 
   return (
-    <div className="modal-overlay show" onClick={onClose}>
+    <div className="modal-overlay show" onMouseDown={(e) => e.stopPropagation()}>
       <div className="modal modal-large" onClick={(e) => e.stopPropagation()}>
-        <h3>{host ? '编辑主机' : '新建主机'}</h3>
+        <div className="modal-title-row">
+          <h3>{host ? '编辑主机' : '新建主机'}</h3>
+          <button className="modal-close-btn" onClick={onClose} title="关闭 (ESC)">✕</button>
+        </div>
         <div className="form-group">
           <label>别名（显示名称）</label>
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="如：阿里云生产服务器" />

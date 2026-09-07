@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
@@ -173,6 +173,11 @@ class QuickCommandRequest(BaseModel):
     name: str
     command: str
     description: str = ""
+    # 指令类型：direct 直接执行 / param 带参数（执行前弹输入框，替换命令中的 {args} 占位符）
+    type: str = "direct"
+    param_hint: str = ""
+    # 预操作（执行命令前依次执行）：[{"type": "upload", "remote": "/path"}, {"type": "chmod", "mode": "+x", "path": "/path"}, {"type": "env", "key": "VAR", "value": "x"}]
+    pre_ops: list = []
 
 
 class HostTypeRequest(BaseModel):
@@ -415,13 +420,46 @@ async def api_get_session_logs(session_id: str, offset: int = 0, limit: int = 20
 
 @app.get("/api/hosts")
 async def api_list_hosts():
-    """获取所有保存的主机（含实时连接状态）"""
+    """获取所有保存的主机（含实时连接状态与连接信息）"""
     hosts = storage.list_hosts()
+    now = time.time()
     # 为每个主机附加连接状态
     for h in hosts:
         h["terminal_count"] = session_manager.get_host_terminal_count(h["id"])
         h["is_connected"] = h["terminal_count"] > 0
+        # 连接信息：最早创建且仍存活的会话时间作为"连接时间"
+        sessions = session_manager.get_sessions_by_host(h["id"])
+        alive = [s for s in sessions if s.is_alive()]
+        if alive:
+            created = min(s.created_at for s in alive)
+            h["connected_since"] = created
+            h["connected_duration"] = max(0, int(now - created))
+        else:
+            h["connected_since"] = None
+            h["connected_duration"] = None
     return {"hosts": hosts, "groups": storage.list_groups(), "host_types": storage.list_host_types()}
+
+
+class ReorderHostsRequest(BaseModel):
+    ids: List[str]
+
+
+class ReorderGroupsRequest(BaseModel):
+    names: List[str]
+
+
+@app.post("/api/hosts/reorder")
+async def api_reorder_hosts(req: ReorderHostsRequest):
+    """按给定顺序重排主机列表"""
+    storage.reorder_hosts(req.ids)
+    return {"status": "reordered"}
+
+
+@app.post("/api/groups/reorder")
+async def api_reorder_groups(req: ReorderGroupsRequest):
+    """按给定顺序重排分组列表"""
+    storage.reorder_groups(req.names)
+    return {"status": "reordered"}
 
 
 @app.get("/api/sessions/active")
@@ -440,7 +478,7 @@ async def api_list_active_terminals():
             "port": s.port,
             "username": s.username,
             "terminal_name": s.terminal_name,
-            "host_name": host_info["name"] if host_info else s.host,
+            "host_name": (host_info.get("name") or s.host) if host_info else s.host,
             "host_type": host_info["type"] if host_info else "other",
             "created_at": s.created_at,
             "last_active": s.last_active,
@@ -479,7 +517,7 @@ async def api_duplicate_host(host_id: str):
     new_host = storage.duplicate_host(host_id)
     if not new_host:
         raise HTTPException(status_code=404, detail="主机不存在")
-    event_bus.publish("host_add", "WEB", f"复制主机: {new_host.get('name', new_host['host'])}")
+    await event_bus.publish("host_add", "WEB", f"复制主机: {new_host.get('name', new_host['host'])}")
     return new_host
 
 
@@ -554,6 +592,16 @@ async def api_rename_group(name: str, req: RenameGroupRequest):
     if not ok:
         raise HTTPException(status_code=400, detail="重命名失败（分组不存在或新名称已存在）")
     return {"status": "renamed", "old_name": name, "new_name": req.new_name}
+
+
+@app.post("/api/groups/{name}/duplicate")
+async def api_duplicate_group(name: str):
+    """复制分组（生成"xxx 副本"分组，组内主机一并复制）"""
+    result = storage.duplicate_group(name)
+    if not result:
+        raise HTTPException(status_code=404, detail="分组不存在")
+    await event_bus.publish("group_add", "WEB", f"复制分组: {name} -> {result['name']}")
+    return {"status": "duplicated", **result}
 
 
 # ============ 全局命令历史 API（跨终端，按使用频次排序） ============
@@ -631,14 +679,16 @@ async def api_list_quick_commands():
 @app.post("/api/quick-commands")
 async def api_add_quick_command(req: QuickCommandRequest):
     """新增快速指令"""
-    qc = storage.add_quick_command(req.name, req.command, req.description)
+    qc = storage.add_quick_command(req.name, req.command, req.description,
+                                   req.type, req.param_hint, req.pre_ops)
     return qc
 
 
 @app.put("/api/quick-commands/{qc_id}")
 async def api_update_quick_command(qc_id: str, req: QuickCommandRequest):
     """更新快速指令"""
-    qc = storage.update_quick_command(qc_id, req.name, req.command, req.description)
+    qc = storage.update_quick_command(qc_id, req.name, req.command, req.description,
+                                      req.type, req.param_hint, req.pre_ops)
     if not qc:
         raise HTTPException(status_code=404, detail="快速指令不存在")
     return qc

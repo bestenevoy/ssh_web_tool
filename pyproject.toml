@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ssh-web-tool"
-version = "0.1.0"
+version = "0.1.6"
 description = "网页版 SSH 连接管理工具 - 类似 Xshell 的 Web UI，支持 Python 库嵌入式使用、CLI/HTTP API 调用、存储阵列管理页面自动登录"
 readme = "README.md"
 requires-python = ">=3.10"

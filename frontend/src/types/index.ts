@@ -29,6 +29,9 @@ export interface Host {
   pw_headless?: boolean
   terminal_count?: number
   is_connected?: boolean
+  // 连接信息（后端附加）
+  connected_since?: number | null
+  connected_duration?: number | null
 }
 
 export interface HostType {
@@ -63,11 +66,25 @@ export interface ActiveTerminal {
   last_active: number
 }
 
+// 快捷指令预操作（执行命令前依次执行）
+export interface QuickPreOp {
+  type: 'upload' | 'chmod' | 'env'
+  remote?: string  // upload: 远端目标路径
+  mode?: string    // chmod: 权限模式，如 +x / 755
+  path?: string    // chmod: 目标文件路径
+  key?: string     // env: 环境变量名
+  value?: string   // env: 环境变量值
+}
+
 export interface QuickCommand {
   id: string
   name: string
   command: string
   description?: string
+  // 指令类型：direct 直接执行 / param 带参数（执行前弹输入框，替换命令中的 {args} 占位符）
+  type?: 'direct' | 'param'
+  param_hint?: string
+  pre_ops?: QuickPreOp[]
 }
 
 export interface SftpItem {

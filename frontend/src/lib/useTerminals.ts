@@ -75,10 +75,16 @@ export function useTerminals(settings: TerminalSettings) {
   }, [])
 
   // 使用官方 FitAddon 自动计算终端尺寸，确保 cols/rows 准确
+  // 附加溢出修正：字体放大后渲染行高可能略大于计算值，导致最后一行被容器裁切，
+  // 检测到滚动高度溢出时减少一行，保证底部内容完整可见
   const fitTerminal = useCallback((inst: TerminalInstance) => {
     if (inst.container) {
       try {
         inst.fitAddon.fit()
+        const el = inst.term.element
+        if (el && el.scrollHeight > el.clientHeight + 2 && inst.term.rows > 5) {
+          inst.term.resize(inst.term.cols, inst.term.rows - 1)
+        }
       } catch (e) {
         console.error('FitAddon fit failed', e)
       }
@@ -119,10 +125,10 @@ export function useTerminals(settings: TerminalSettings) {
     inst.term.options.theme = getTerminalTheme(s)
     // 重新计算终端尺寸
     if (inst.container) {
-      try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+      fitTerminal(inst)
       sendResize(inst.term, inst.ws)
     }
-  }, [sendResize])
+  }, [fitTerminal, sendResize])
 
   // 设置变化时更新所有终端
   useEffect(() => {
@@ -383,8 +389,8 @@ export function useTerminals(settings: TerminalSettings) {
         const instance: TerminalInstance = {
           session_id: t.session_id,
           host_id: t.host_id,
-          host_name: t.host_name,
-          terminal_name: t.terminal_name,
+          host_name: t.host_name || t.host,
+          terminal_name: t.terminal_name || '终端',
           type: t.host_type,
           shell_type: 'shell',
           term,
@@ -424,18 +430,18 @@ export function useTerminals(settings: TerminalSettings) {
       const inst = terminals.get(session_id)
       const container = containersRef.current.get(session_id)
       if (inst && container) {
-        try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+        fitTerminal(inst)
         // 切换终端后也 resync，确保 xterm.js 状态正确
         requestAnimationFrame(() => {
           if (inst.container) {
-            try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+            fitTerminal(inst)
             sendResize(inst.term, inst.ws)
           }
         })
         inst.term.focus()
       }
     }, 50)
-  }, [terminals, sendResize])
+  }, [terminals, fitTerminal, sendResize])
 
   const closeTerminal = useCallback(async (session_id: string, closeBackend: boolean) => {
     const inst = terminals.get(session_id)
@@ -469,6 +475,8 @@ export function useTerminals(settings: TerminalSettings) {
         inst.ws.send(JSON.stringify({ type: 'input', data: command }))
         inst.input_buffer = command
       }
+      // 输入/执行后光标聚焦到终端，方便直接继续输入
+      inst.term.focus()
     }
   }, [activeId, terminals])
 
@@ -486,18 +494,18 @@ export function useTerminals(settings: TerminalSettings) {
         inst.container = el
         // 终端真正打开后，使用 resyncTerminal 确保 xterm.js 状态正确
         // 关键：先 fit 计算正确的 cols/rows，再 reset 清除可能错误的状态，再发送 resize 和 Ctrl+L
-        try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+        fitTerminal(inst)
         // 延迟到下一帧，确保 xterm.js 完成渲染后再 resync
         requestAnimationFrame(() => {
           if (inst.container) {
-            try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+            fitTerminal(inst)
             resyncTerminal(inst.term, inst.ws)
           }
         })
         // 延迟再次调用，确保字体加载完成
         setTimeout(() => {
           if (inst.container) {
-            try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+            fitTerminal(inst)
             sendResize(inst.term, inst.ws)
           }
         }, 200)
@@ -505,7 +513,7 @@ export function useTerminals(settings: TerminalSettings) {
         if (document.fonts && document.fonts.ready) {
           document.fonts.ready.then(() => {
             if (inst.container) {
-              try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+              fitTerminal(inst)
               sendResize(inst.term, inst.ws)
             }
           })
@@ -514,7 +522,7 @@ export function useTerminals(settings: TerminalSettings) {
     } else {
       containersRef.current.delete(session_id)
     }
-  }, [terminals, sendResize, resyncTerminal])
+  }, [terminals, fitTerminal, sendResize, resyncTerminal])
 
   // 窗口大小变化时调整终端
   useEffect(() => {
@@ -523,14 +531,14 @@ export function useTerminals(settings: TerminalSettings) {
         const inst = terminals.get(activeId)
         const container = containersRef.current.get(activeId)
         if (inst && container) {
-          try { inst.fitAddon.fit() } catch (e) { console.error('fit failed', e) }
+          fitTerminal(inst)
           sendResize(inst.term, inst.ws)
         }
       }
     }
     window.addEventListener('resize', handler)
     return () => window.removeEventListener('resize', handler)
-  }, [activeId, terminals, sendResize])
+  }, [activeId, terminals, fitTerminal, sendResize])
 
   return {
     terminals,

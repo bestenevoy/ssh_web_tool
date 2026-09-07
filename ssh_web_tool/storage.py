@@ -34,12 +34,12 @@ DEFAULT_HOST_TYPES = [
 
 # 默认快速指令
 DEFAULT_QUICK_COMMANDS = [
-    {"id": "qc_1", "name": "系统信息", "command": "uname -a && uptime"},
-    {"id": "qc_2", "name": "磁盘使用", "command": "df -h"},
-    {"id": "qc_3", "name": "内存使用", "command": "free -h"},
-    {"id": "qc_4", "name": "查看进程", "command": "ps aux --sort=-%mem | head -10"},
-    {"id": "qc_5", "name": "查看监听端口", "command": "netstat -tlnp 2>/dev/null || ss -tlnp"},
-    {"id": "qc_6", "name": "查看日志(最近20行)", "command": "tail -n 20 /var/log/messages 2>/dev/null || journalctl -n 20 --no-pager"},
+    {"id": "qc_1", "name": "系统信息", "command": "uname -a && uptime", "type": "direct", "param_hint": "", "pre_ops": []},
+    {"id": "qc_2", "name": "磁盘使用", "command": "df -h", "type": "direct", "param_hint": "", "pre_ops": []},
+    {"id": "qc_3", "name": "内存使用", "command": "free -h", "type": "direct", "param_hint": "", "pre_ops": []},
+    {"id": "qc_4", "name": "查看进程", "command": "ps aux --sort=-%mem | head -10", "type": "direct", "param_hint": "", "pre_ops": []},
+    {"id": "qc_5", "name": "查看监听端口", "command": "netstat -tlnp 2>/dev/null || ss -tlnp", "type": "direct", "param_hint": "", "pre_ops": []},
+    {"id": "qc_6", "name": "查看日志(最近20行)", "command": "tail -n 20 /var/log/messages 2>/dev/null || journalctl -n 20 --no-pager", "type": "direct", "param_hint": "", "pre_ops": []},
 ]
 
 
@@ -174,7 +174,7 @@ class Storage:
             return None
         import copy
         new_host = copy.deepcopy(original)
-        new_host["id"] = self._gen_id()
+        new_host["id"] = str(uuid.uuid4())[:8]
         new_host["name"] = f"{original.get('name', original['host'])} 副本"
         new_host["created_at"] = time.time()
         new_host["updated_at"] = time.time()
@@ -187,6 +187,39 @@ class Storage:
     def list_groups(self) -> List[str]:
         """获取所有分组"""
         return self._data.get("groups", [])
+
+    def reorder_groups(self, names: List[str]) -> bool:
+        """按给定顺序重排分组（忽略不存在的名称，追加未列出的分组）"""
+        existing = self._data.get("groups", [])
+        seen = set()
+        ordered = []
+        for n in names:
+            if n in existing and n not in seen:
+                ordered.append(n)
+                seen.add(n)
+        for n in existing:
+            if n not in seen:
+                ordered.append(n)
+        self._data["groups"] = ordered
+        self._save()
+        return True
+
+    def reorder_hosts(self, ids: List[str]) -> bool:
+        """按给定顺序重排主机（忽略不存在的 ID，追加未列出的主机）"""
+        existing = self._data.get("hosts", [])
+        by_id = {h["id"]: h for h in existing}
+        seen = set()
+        ordered = []
+        for hid in ids:
+            if hid in by_id and hid not in seen:
+                ordered.append(by_id[hid])
+                seen.add(hid)
+        for h in existing:
+            if h["id"] not in seen:
+                ordered.append(h)
+        self._data["hosts"] = ordered
+        self._save()
+        return True
 
     def add_group(self, name: str) -> bool:
         """新增分组"""
@@ -221,31 +254,88 @@ class Storage:
         self._save()
         return True
 
+    def duplicate_group(self, name: str) -> Optional[dict]:
+        """复制分组：复制分组名（加"副本"后缀），并把组内主机一并复制
+
+        Returns:
+            复制结果：{"name": 新分组名, "copied_hosts": 复制的主机列表}；
+            原分组不存在返回 None
+        """
+        if name not in self._data["groups"]:
+            return None
+        import copy
+
+        # 新分组名：xxx 副本（若已存在则追加序号）
+        base = f"{name} 副本"
+        new_name = base
+        n = 2
+        while new_name in self._data["groups"]:
+            new_name = f"{base}{n}"
+            n += 1
+        self._data["groups"].append(new_name)
+
+        # 复制组内主机（与 duplicate_host 相同的副本逻辑）
+        copied_hosts = []
+        for h in self._data["hosts"]:
+            if h.get("group") != name:
+                continue
+            new_host = copy.deepcopy(h)
+            new_host["id"] = str(uuid.uuid4())[:8]
+            new_host["name"] = f"{h.get('name', h['host'])} 副本"
+            new_host["group"] = new_name
+            new_host["created_at"] = time.time()
+            new_host["updated_at"] = time.time()
+            self._data["hosts"].append(new_host)
+            copied_hosts.append(new_host)
+        self._save()
+        return {"name": new_name, "copied_hosts": copied_hosts}
+
     # ============ 快速指令管理 ============
 
     def list_quick_commands(self) -> List[dict]:
-        """获取所有快速指令"""
-        return self._data.get("quick_commands", [])
+        """获取所有快速指令（兼容旧数据：自动补全 type/param_hint/pre_ops 字段）"""
+        commands = self._data.get("quick_commands", [])
+        for qc in commands:
+            qc.setdefault("type", "direct")
+            qc.setdefault("param_hint", "")
+            qc.setdefault("pre_ops", [])
+        return commands
 
-    def add_quick_command(self, name: str, command: str, description: str = "") -> dict:
-        """新增快速指令"""
+    def add_quick_command(self, name: str, command: str, description: str = "",
+                          cmd_type: str = "direct", param_hint: str = "",
+                          pre_ops: Optional[list] = None) -> dict:
+        """新增快速指令
+
+        Args:
+            cmd_type: "direct" 直接执行 / "param" 带参数（执行前弹输入框，替换命令中的 {args} 占位符）
+            param_hint: 带参数类型的参数说明（如"输入文件路径"）
+            pre_ops: 预操作列表 [{"type": "upload"|"chmod"|"env", ...}]
+        """
         qc = {
             "id": "qc_" + str(uuid.uuid4())[:8],
             "name": name,
             "command": command,
             "description": description,
+            "type": cmd_type if cmd_type in ("direct", "param") else "direct",
+            "param_hint": param_hint or "",
+            "pre_ops": pre_ops or [],
         }
         self._data["quick_commands"].append(qc)
         self._save()
         return qc
 
-    def update_quick_command(self, qc_id: str, name: str, command: str, description: str = "") -> Optional[dict]:
+    def update_quick_command(self, qc_id: str, name: str, command: str, description: str = "",
+                             cmd_type: str = "direct", param_hint: str = "",
+                             pre_ops: Optional[list] = None) -> Optional[dict]:
         """更新快速指令"""
         for qc in self._data["quick_commands"]:
             if qc["id"] == qc_id:
                 qc["name"] = name
                 qc["command"] = command
                 qc["description"] = description
+                qc["type"] = cmd_type if cmd_type in ("direct", "param") else "direct"
+                qc["param_hint"] = param_hint or ""
+                qc["pre_ops"] = pre_ops or []
                 self._save()
                 return qc
         return None

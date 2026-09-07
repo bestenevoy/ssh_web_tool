@@ -224,9 +224,113 @@ function App() {
     }
   }, [loadHosts])
 
+  // 复制分组（含组内主机）
+  const handleDuplicateGroup = useCallback(async (name: string) => {
+    try {
+      const r = await api.duplicateGroup(name)
+      loadHosts()
+      alert(`已复制分组"${name}" -> "${r.name}"（含 ${r.copied_hosts.length} 台主机）`)
+    } catch (e) {
+      alert('复制分组失败: ' + (e as Error).message)
+    }
+  }, [loadHosts])
+
+  // 分组/主机拖拽排序后保存
+  const handleReorderGroups = useCallback(async (names: string[]) => {
+    try {
+      await api.reorderGroups(names)
+      loadHosts()
+    } catch (e) {
+      console.error('保存分组排序失败', e)
+    }
+  }, [loadHosts])
+
+  const handleReorderHosts = useCallback(async (ids: string[]) => {
+    try {
+      await api.reorderHosts(ids)
+    } catch (e) {
+      console.error('保存主机排序失败', e)
+    }
+  }, [])
+
   const handleSendQuickCommand = useCallback((qc: QuickCommand) => {
-    terminals.sendCommand(qc.command, true)
+    executeQuickCommand(qc, null)
   }, [terminals])
+
+  // 带参数快捷指令：弹出参数输入框后执行
+  const handleExecuteParamQuickCommand = useCallback((qc: QuickCommand) => {
+    const hint = qc.param_hint || '请输入参数（替换命令中的 {args}）'
+    const param = window.prompt(hint, '')
+    if (param === null) return  // 用户取消
+    executeQuickCommand(qc, param.trim())
+  }, [terminals])
+
+  // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）
+  const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null) => {
+    if (!terminals.activeId) return
+    const inst = terminals.terminals.get(terminals.activeId)
+    if (!inst || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) return
+    const session_id = inst.session_id
+
+    // 参数替换：{args} 占位符替换，无占位符则追加到末尾
+    let cmd = qc.command
+    if (param !== null) {
+      cmd = cmd.includes('{args}')
+        ? cmd.split('{args}').join(param)
+        : (cmd + ' ' + param).trim()
+    }
+
+    // 依次执行预操作（命令通过终端发送，SFTP 上传通过后端 API 完成后才继续）
+    for (const op of qc.pre_ops || []) {
+      if (op.type === 'upload') {
+        const remote = (op.remote || '').trim()
+        if (!remote) continue
+        const file = await pickLocalFile()
+        if (!file) {
+          setStatus('已取消：未选择上传文件，命令未执行')
+          return
+        }
+        setStatus(`上传中 ${file.name} -> ${remote}...`)
+        try {
+          await api.sftpUpload(session_id, remote, file)
+          setStatus(`已上传 ${file.name} -> ${remote}`)
+        } catch (e) {
+          setStatus('上传失败，命令未执行')
+          alert('预操作失败（上传文件）: ' + (e as Error).message)
+          return
+        }
+      } else if (op.type === 'chmod') {
+        if (!op.mode || !op.path) continue
+        terminals.sendCommand(`chmod ${op.mode} ${op.path}`, true)
+      } else if (op.type === 'env') {
+        if (!op.key) continue
+        terminals.sendCommand(`export ${op.key}=${op.value ?? ''}`, true)
+      }
+    }
+
+    terminals.sendCommand(cmd, true)
+    setStatus(`已执行: ${cmd.slice(0, 60)}`)
+  }, [terminals, setStatus])
+
+  // 选择本地文件（隐藏 input[type=file]，返回 File 或 null）
+  const pickLocalFile = useCallback((): Promise<File | null> => {
+    return new Promise((resolve) => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.style.display = 'none'
+      document.body.appendChild(input)
+      input.onchange = () => {
+        const file = input.files?.[0] || null
+        document.body.removeChild(input)
+        resolve(file)
+      }
+      input.oncancel = () => {
+        document.body.removeChild(input)
+        resolve(null)
+      }
+      input.click()
+    })
+  }, [])
 
   // 编辑后执行：只输入到终端，不执行，用户可编辑后手动执行
   const handleEditExecuteQuickCommand = useCallback((qc: QuickCommand) => {
@@ -240,18 +344,18 @@ function App() {
   }, [])
 
   // 更新快捷指令
-  const handleUpdateQuickCommand = useCallback(async (id: string, name: string, command: string, description: string) => {
+  const handleUpdateQuickCommand = useCallback(async (id: string, data: Partial<QuickCommand>) => {
     try {
-      await api.updateQuickCommand(id, name, command, description)
+      await api.updateQuickCommand(id, data)
       loadQuickCommands()
     } catch (e) {
       alert('更新失败: ' + (e as Error).message)
     }
   }, [loadQuickCommands])
 
-  const handleAddQuickCommand = useCallback(async (name: string, command: string, description: string = '') => {
+  const handleAddQuickCommand = useCallback(async (data: Partial<QuickCommand>) => {
     try {
-      await api.addQuickCommand(name, command, description)
+      await api.addQuickCommand(data)
       loadQuickCommands()
     } catch (e) {
       alert('添加失败: ' + (e as Error).message)
@@ -275,6 +379,7 @@ function App() {
           <QuickCommands
             commands={quickCommands}
             onExecute={handleSendQuickCommand}
+            onExecuteParam={handleExecuteParamQuickCommand}
             onEditExecute={handleEditExecuteQuickCommand}
             onEdit={handleEditQuickCommand}
             onDelete={handleDeleteQuickCommand}
@@ -353,6 +458,7 @@ function App() {
           <HostList
             hosts={hosts}
             hostTypes={hostTypes}
+            groups={groups}
             activeHostId={activeHostId}
             onHostClick={handleHostClick}
             onEdit={(h) => { setEditingHost(h); setModalOpen(true) }}
@@ -360,6 +466,7 @@ function App() {
             onCopy={handleCopyConnection}
             onDuplicate={handleDuplicateHost}
             onManageGroups={() => setGroupManagerOpen(true)}
+            onReorderHosts={handleReorderHosts}
           />
         </div>
 
@@ -369,6 +476,8 @@ function App() {
             terminals={terminals.terminals}
             activeId={terminals.activeId}
             hostTypes={hostTypes}
+            hosts={hosts}
+            groups={groups}
             onSwitch={terminals.switchTerminal}
             onClose={handleCloseTerminal}
             onNew={handleNewTerminal}
@@ -417,6 +526,8 @@ function App() {
         onAdd={handleAddGroup}
         onRename={handleRenameGroup}
         onDelete={handleDeleteGroup}
+        onDuplicate={handleDuplicateGroup}
+        onReorder={handleReorderGroups}
       />
 
       {/* 历史搜索弹窗 */}

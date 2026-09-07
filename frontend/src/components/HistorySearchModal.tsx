@@ -59,7 +59,7 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
   const confirmSave = async (command: string) => {
     if (!saveName.trim()) return
     try {
-      await api.addQuickCommand(saveName.trim(), command)
+      await api.addQuickCommand({ name: saveName.trim(), command })
       onRefreshQuickCommands()
       setSavingId(null)
       setSaveName('')
@@ -111,6 +111,10 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
           onInputToTerminal(item.command)
           onClose()
         }
+      } else if (keyword.trim()) {
+        // 没有匹配结果：把搜索框内容输入到终端（不执行），用户可编辑
+        onInputToTerminal(keyword.trim())
+        onClose()
       }
     } else if (e.key === 'Escape') {
       e.preventDefault()
@@ -127,14 +131,16 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
   return (
     <div
       className="history-modal-overlay"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
+      // 点击遮罩不关闭：防止鼠标误触导致输入内容丢失，请用右上角 ✕ 或 ESC 关闭
+      onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="history-modal" onClick={(e) => e.stopPropagation()}>
         <div className="history-modal-header">
           <span className="history-modal-title">🔍 命令搜索 (Alt+R)</span>
-          <span className="history-modal-hint">↑↓ 选择 | Enter 执行/输入 | Ctrl+S 保存 | ESC 关闭</span>
+          <div className="history-modal-header-right">
+            <span className="history-modal-hint">↑↓ 选择 | Enter 执行/输入 | Ctrl+S 保存 | ESC 关闭</span>
+            <button className="history-modal-close" onClick={onClose} title="关闭 (ESC)">✕</button>
+          </div>
         </div>
         <input
           ref={inputRef}

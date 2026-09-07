@@ -29,6 +29,12 @@ export const api = {
   renameGroup: (oldName: string, newName: string) =>
     request(`/api/groups/${oldName}`, { method: 'PUT', body: JSON.stringify({ new_name: newName }) }),
   deleteGroup: (name: string) => request(`/api/groups/${name}`, { method: 'DELETE' }),
+  duplicateGroup: (name: string) =>
+    request<{ status: string; name: string; copied_hosts: Host[] }>(`/api/groups/${encodeURIComponent(name)}/duplicate`, { method: 'POST' }),
+
+  // 排序（拖拽后保存顺序）
+  reorderHosts: (ids: string[]) => request('/api/hosts/reorder', { method: 'POST', body: JSON.stringify({ ids }) }),
+  reorderGroups: (names: string[]) => request('/api/groups/reorder', { method: 'POST', body: JSON.stringify({ names }) }),
 
   // 会话
   listSessions: () => request<{ sessions: Session[] }>('/api/sessions'),
@@ -59,10 +65,10 @@ export const api = {
 
   // 快速指令
   listQuickCommands: () => request<{ commands: QuickCommand[] }>('/api/quick-commands'),
-  addQuickCommand: (name: string, command: string, description: string = '') =>
-    request<QuickCommand>('/api/quick-commands', { method: 'POST', body: JSON.stringify({ name, command, description }) }),
-  updateQuickCommand: (id: string, name: string, command: string, description: string = '') =>
-    request<QuickCommand>(`/api/quick-commands/${id}`, { method: 'PUT', body: JSON.stringify({ name, command, description }) }),
+  addQuickCommand: (data: Partial<QuickCommand>) =>
+    request<QuickCommand>('/api/quick-commands', { method: 'POST', body: JSON.stringify(data) }),
+  updateQuickCommand: (id: string, data: Partial<QuickCommand>) =>
+    request<QuickCommand>(`/api/quick-commands/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteQuickCommand: (id: string) => request(`/api/quick-commands/${id}`, { method: 'DELETE' }),
 
   // SFTP
@@ -82,6 +88,20 @@ export const api = {
     request(`/api/sftp/${session_id}/delete`, { method: 'POST', body: JSON.stringify({ path }) }),
   sftpDownloadUrl: (session_id: string, path: string) =>
     `/api/sftp/${session_id}/download?path=${encodeURIComponent(path)}`,
+  // 上传本地文件到远端（multipart）
+  sftpUpload: async (session_id: string, remote_path: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const resp = await fetch(`${BASE}/api/sftp/${session_id}/upload?remote_path=${encodeURIComponent(remote_path)}`, {
+      method: 'POST',
+      body: fd,
+    })
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }))
+      throw new Error(err.detail || `HTTP ${resp.status}`)
+    }
+    return resp.json()
+  },
 
   // 全局命令历史（跨终端，按使用频次排序）
   recordCommand: (command: string) =>

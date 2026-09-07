@@ -184,7 +184,8 @@ body {
 .terminal-container { flex: 1; position: relative; overflow: hidden; }
 .terminal-instance {
   position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-  display: none; padding: 8px;
+  display: none; padding: 0;
+  overflow: hidden;
 }
 .terminal-instance.active { display: block; }
 .terminal-instance .xterm { height: 100%; }
@@ -615,3 +616,86 @@ body {
 .mgmt-open-btn.loading {
   opacity: .5; cursor: wait;
 }
+
+
+/* ============ 弹窗增强（第3条：关闭按钮 + 遮罩防误触） ============ */
+.modal-title-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.modal-title-row h3 { margin: 0; }
+.modal-close-btn {
+  background: none; border: none; color: #8a94a8; font-size: 16px;
+  cursor: pointer; padding: 4px 8px; border-radius: 4px;
+}
+.modal-close-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
+.modal-wide { width: 640px; max-width: 92vw; }
+
+/* 历史搜索弹窗关闭按钮 */
+.history-modal-header-right {
+  display: flex; align-items: center; gap: 10px;
+}
+.history-modal-close {
+  background: none; border: none; color: #8a94a8; font-size: 15px;
+  cursor: pointer; padding: 2px 8px; border-radius: 4px;
+}
+.history-modal-close:hover { background: rgba(255,255,255,0.1); color: #fff; }
+
+/* ============ 快捷指令：类型 + 预操作（第4/5条） ============ */
+.qc-type-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.qc-type-option {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  border: 1px solid #2a3444; border-radius: 6px; padding: 8px 10px;
+  font-size: 12px; flex: 1 1 200px;
+}
+.qc-type-option:has(input:checked) {
+  border-color: var(--accent, #4a90d9); background: rgba(74,144,217,0.08);
+}
+.qc-type-desc { color: #5a6a8a; font-size: 10px; margin-left: auto; }
+.qc-preop-row {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;
+}
+.qc-preop-type { background: #141b2b; color: #c8d0e0; border: 1px solid #2a3444; border-radius: 4px; padding: 5px 6px; font-size: 12px; }
+.qc-preop-input { flex: 1 1 180px; min-width: 120px; background: #141b2b; color: #c8d0e0; border: 1px solid #2a3444; border-radius: 4px; padding: 5px 8px; font-size: 12px; }
+.qc-preop-input-sm { width: 90px; background: #141b2b; color: #c8d0e0; border: 1px solid #2a3444; border-radius: 4px; padding: 5px 8px; font-size: 12px; }
+.qc-preop-note { color: #5a6a8a; font-size: 11px; }
+.qc-type-badge {
+  display: inline-block; margin-right: 5px; font-size: 11px;
+  padding: 1px 4px; border-radius: 3px;
+}
+.qc-type-badge.direct { background: rgba(76,175,80,0.15); }
+.qc-type-badge.param { background: rgba(255,152,0,0.15); }
+.qc-preop-badge { margin-left: 6px; font-size: 11px; opacity: 0.85; }
+
+/* ============ 终端 tab 筛选（第7条） ============ */
+.tab-bar-wrap { flex-shrink: 0; }
+.tab-filter-bar {
+  display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+  background: var(--bg-secondary); border-bottom: 1px solid var(--border-color);
+}
+.tab-filter-select, .tab-filter-input {
+  background: var(--bg-primary); color: var(--text-primary);
+  border: 1px solid var(--border-color); border-radius: 4px;
+  padding: 3px 6px; font-size: 11px;
+}
+.tab-filter-input { flex: 1; max-width: 220px; }
+.tab-filter-clear {
+  background: none; border: none; color: #8a94a8; cursor: pointer; font-size: 12px; padding: 2px 6px;
+}
+.tab-filter-clear:hover { color: #fff; }
+
+/* ============ 主机连接信息（第9条） ============ */
+.host-conn-info { color: #52c41a; font-size: 10px; }
+.conn-dot-mini {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: #888; margin-right: 1px;
+}
+.conn-dot-mini.online { background: #52c41a; }
+
+/* ============ 拖拽排序（第10条） ============ */
+.group-drag-handle { color: #5a6a8a; cursor: grab; font-size: 12px; user-select: none; }
+.group-drag-handle:active { cursor: grabbing; }
+.group-item.dragging { opacity: 0.4; }
+.group-item.drag-over { outline: 2px dashed var(--accent, #4a90d9); outline-offset: -2px; }
+.host-item.dragging { opacity: 0.4; }
+.host-item.drag-over { outline: 2px dashed var(--accent, #4a90d9); outline-offset: -2px; }
