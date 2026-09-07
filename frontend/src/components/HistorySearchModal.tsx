@@ -42,6 +42,15 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
     inputRef.current?.focus()
   }, [doSearch])
 
+  // window 级 ESC：无论焦点在哪都能关闭（点遮罩后焦点丢失也能 ESC 关闭）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   // 防抖搜索
   useEffect(() => {
     const timer = setTimeout(() => {

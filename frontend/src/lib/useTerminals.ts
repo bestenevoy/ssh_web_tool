@@ -443,6 +443,12 @@ export function useTerminals(settings: TerminalSettings) {
     }, 50)
   }, [terminals, fitTerminal, sendResize])
 
+  // 弹窗/面板关闭后把光标还给当前终端
+  const focusActiveTerminal = useCallback(() => {
+    const inst = activeId ? terminals.get(activeId) : undefined
+    if (inst && inst.term) inst.term.focus()
+  }, [terminals, activeId])
+
   const closeTerminal = useCallback(async (session_id: string, closeBackend: boolean) => {
     const inst = terminals.get(session_id)
     if (!inst) return
@@ -550,6 +556,7 @@ export function useTerminals(settings: TerminalSettings) {
     closeTerminal,
     sendCommand,
     registerContainer,
+    focusActiveTerminal,
     setShortcutHandler,
   }
 }

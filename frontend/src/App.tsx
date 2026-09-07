@@ -37,6 +37,7 @@ function App() {
 
   const { settings, toggleTheme, setFontFamily, setFontSize } = useSettings()
   const terminals = useTerminals(settings)
+  const { focusActiveTerminal } = terminals
   const events = useEvents()
 
   // 设置快捷键处理函数（Alt+R 打开历史搜索）
@@ -152,6 +153,7 @@ function App() {
       }
       setModalOpen(false)
       setEditingHost(null)
+      focusActiveTerminal()
       loadHosts()
     } catch (e) {
       alert('保存失败: ' + (e as Error).message)
@@ -513,7 +515,7 @@ function App() {
         host={editingHost}
         groups={groups}
         hostTypes={hostTypes}
-        onClose={() => { setModalOpen(false); setEditingHost(null) }}
+        onClose={() => { setModalOpen(false); setEditingHost(null); focusActiveTerminal() }}
         onSave={handleSaveHost}
         onAddGroup={handleAddGroup}
       />
@@ -522,7 +524,7 @@ function App() {
       <GroupManager
         open={groupManagerOpen}
         groups={groups}
-        onClose={() => setGroupManagerOpen(false)}
+        onClose={() => { setGroupManagerOpen(false); focusActiveTerminal() }}
         onAdd={handleAddGroup}
         onRename={handleRenameGroup}
         onDelete={handleDeleteGroup}
@@ -533,7 +535,7 @@ function App() {
       {/* 历史搜索弹窗 */}
       {historySearchOpen && (
         <HistorySearchModal
-          onClose={() => setHistorySearchOpen(false)}
+          onClose={() => { setHistorySearchOpen(false); focusActiveTerminal() }}
           onExecute={(cmd) => terminals.sendCommand(cmd, true)}
           onInputToTerminal={(cmd) => terminals.sendCommand(cmd, false)}
           onRefreshQuickCommands={loadQuickCommands}
@@ -543,7 +545,7 @@ function App() {
       {/* 添加/编辑快捷指令弹窗 */}
       {quickCommandModalOpen && (
         <QuickCommandModal
-          onClose={() => { setQuickCommandModalOpen(false); setEditingQuickCommand(null) }}
+          onClose={() => { setQuickCommandModalOpen(false); setEditingQuickCommand(null); focusActiveTerminal() }}
           onAdd={handleAddQuickCommand}
           onUpdate={handleUpdateQuickCommand}
           editing={editingQuickCommand}

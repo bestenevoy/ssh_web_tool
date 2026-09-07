@@ -76,11 +76,20 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
     setPreOps((prev) => prev.map((o, i) => (i === idx ? emptyPreOp(type) : o)))
   }
 
+  // window 级 ESC：无论焦点是否在弹窗内都能关闭（防止点遮罩后焦点丢失导致 ESC 失效）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      onClose()
-    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
       handleSubmit()
     }
