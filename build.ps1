@@ -51,8 +51,8 @@ Write-Host '=== [2/3] 打包独立 EXE（SSHWebTool.exe，约需 1-3 分钟）==
 python -m PyInstaller --noconfirm --clean --onefile --noconsole --name SSHWebTool `
     --add-data "static;static" `
     --hidden-import asyncssh `
-    --hidden-import playwright `
     --hidden-import paramiko `
+    --exclude-module playwright 
     main.py
 
 # ---- [3] 打包劫持包 + 整理产物 ----

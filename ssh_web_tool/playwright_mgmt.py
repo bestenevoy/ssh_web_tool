@@ -15,7 +15,6 @@
 
 import asyncio
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 
 # 保存已启动的浏览器实例，避免重复启动
@@ -51,6 +50,17 @@ async def auto_login_storage(host_config: dict) -> dict:
     username = host_config.get("mgmt_username", "")
     password = host_config.get("mgmt_password", "")
     headless = host_config.get("pw_headless", False)
+
+    # Playwright 延迟导入：打包的 EXE 为减小体积已排除该依赖，
+    # 未安装时返回友好提示，不阻塞其余功能。
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return {
+            "status": "error",
+            "message": "当前运行环境未安装 Playwright（打包版为减小体积已排除）。"
+                       "请使用源码方式运行（python main.py），或 pip install playwright 后重试。",
+        }
 
     url = f"https://{host}:{port}"
 
