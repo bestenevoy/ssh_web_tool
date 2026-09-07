@@ -99,7 +99,52 @@ export function useTerminals(settings: TerminalSettings) {
 
   // 终端重同步：清除缓冲区 + 启用自动换行 + 发送 Ctrl+L 让 shell 重绘 + 发送 resize
   // 用于初始连接时，确保 shell 第一帧输出使用正确的终端尺寸
-  const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
+  // 终端复制：选中内容立即复制；Ctrl+C 有选区时复制（不发送 SIGINT 到远端）
+function copySelection(term: Terminal) {
+  const sel = term.getSelection()
+  if (!sel) return
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(sel).catch(() => {
+      // clipboard API 被拒绝时兜底：用文本域 execCommand
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = sel
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      } catch { /* ignore */ }
+    })
+  } else {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = sel
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    } catch { /* ignore */ }
+  }
+}
+
+function setupTerminalCopy(term: Terminal) {
+  // 1) 选中终端内容立即复制（无需 Ctrl+C）
+  term.onSelectionChange(() => {
+    if (term.hasSelection()) copySelection(term)
+  })
+  // 2) Ctrl+C：有选区时复制并阻止发送（避免打断远端正在运行的命令）
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
+      if (term.hasSelection()) {
+        copySelection(term)
+        return false  // 阻止 xterm 把 Ctrl+C 发送到终端
+      }
+    }
+    return true
+  })
+}
+
+const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
     if (ws && ws.readyState === WebSocket.OPEN && term) {
       // 1. 清除 xterm.js 缓冲区（丢弃可能使用错误尺寸渲染的内容）
       term.reset()
@@ -196,6 +241,7 @@ export function useTerminals(settings: TerminalSettings) {
         }
         handleTerminalInput(session_id, data)
       })
+      setupTerminalCopy(term)
 
       // 检测快捷键 Alt+R（终端获得焦点时也能触发）
       term.onKey(({ domEvent }) => {
@@ -321,6 +367,7 @@ export function useTerminals(settings: TerminalSettings) {
           }
           handleTerminalInput(t.session_id, data)
         })
+        setupTerminalCopy(term)
 
         // 检测快捷键 Alt+R（终端获得焦点时也能触发）
         term.onKey(({ domEvent }) => {
