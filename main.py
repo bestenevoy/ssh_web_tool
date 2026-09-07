@@ -1167,10 +1167,24 @@ def main():
     import uvicorn
     import webbrowser
     import threading
+    import logging
 
     from ssh_web_tool.config import (
         load_config, resolve_server_config, ensure_config_file, CONFIG_FILE_NAME,
+        find_config_file, get_app_dir,
     )
+    from ssh_web_tool.tray import start_tray, acquire_single_instance
+
+    # 单实例：已有一个实例在运行则打开其 Web 页面并退出
+    if not acquire_single_instance():
+        port_file = get_app_dir() / ".running_port"
+        port = port_file.read_text().strip() if port_file.is_file() else "8765"
+        try:
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        except Exception:
+            pass
+        print("SSH Web Tool 已在运行，已打开其 Web 界面，本实例退出")
+        return
 
     # 加载配置：首次运行自动生成 config.json（优先复制 config.example.json 模板）
     ensure_config_file()
@@ -1187,6 +1201,32 @@ def main():
     host, port = server["host"], server["port"]
     base_url = f"http://{host}:{port}"
 
+    # 记录实际使用的端口（供单实例"打开已运行页面"与外部脚本读取）
+    try:
+        (get_app_dir() / ".running_port").write_text(str(port), encoding="utf-8")
+    except OSError:
+        pass
+
+    # ===== 请求日志：同时写入 logs/server.log 与控制台 =====
+    log_dir = Path(SSHSession.LOG_DIR)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    server_log = log_dir / "server.log"
+    if not server_log.is_file():
+        server_log.write_text("", encoding="utf-8")
+    file_handler = logging.FileHandler(str(server_log), encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
+    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    if sys.stderr is not None:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%H:%M:%S")
+        )
+        root_logger.addHandler(stream_handler)
+
     print("=" * 50)
     print("SSH Web Tool v2.0 启动中...")
     print(f"配置文件: {CONFIG_FILE_NAME}")
@@ -1194,9 +1234,17 @@ def main():
     print(f"API 文档: {base_url}/docs")
     print("数据文件:", storage.data_file)
     print("日志目录:", SSHSession.LOG_DIR)
+    print("请求日志:", server_log)
     print("=" * 50)
-    print("提示：关闭此窗口将停止服务")
+    print("提示：程序常驻右下角系统托盘，右键托盘图标可打开界面/配置/日志")
     print()
+
+    # 系统托盘（EXE 打包后 --noconsole 无窗口，托盘是唯一入口）
+    try:
+        config_path = find_config_file() or (get_app_dir() / CONFIG_FILE_NAME)
+        start_tray(base_url, get_app_dir(), config_path, server_log)
+    except Exception as e:
+        print(f"[tray] 托盘启动失败（不影响服务）: {e}")
 
     # 延迟打开浏览器（等服务启动后）
     def open_browser():
@@ -1206,7 +1254,9 @@ def main():
     if cfg.get("open_browser", True):
         threading.Thread(target=open_browser, daemon=True).start()
 
-    uvicorn.run(app, host=host, port=port, log_level="info", workers=1)
+    # log_config=None：使用我们自己的 logging 配置（文件 + 控制台），
+    # 避免 uvicorn 默认配置在 --noconsole（stderr=None）下报错
+    uvicorn.run(app, host=host, port=port, log_level="info", workers=1, log_config=None)
 
 
 if __name__ == "__main__":

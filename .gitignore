@@ -42,3 +42,6 @@ SSHWebTool.exe
 
 # Server config (user local, not committed; template config.example.json is committed)
 config.json
+
+# 运行时端口记录（启动时生成，不提交）
+.running_port
