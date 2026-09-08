@@ -81,6 +81,16 @@ class Storage:
         except Exception as e:
             print(f"保存数据文件失败: {e}")
 
+    def reload(self) -> dict:
+        """重新从磁盘加载数据文件（外部编辑 config/data 后点击"刷新配置"时调用）"""
+        self._data = self._load()
+        return {
+            "hosts": len(self._data.get("hosts", [])),
+            "groups": len(self._data.get("groups", [])),
+            "quick_commands": len(self._data.get("quick_commands", [])),
+            "data_file": self.data_file,
+        }
+
     # ============ 主机管理 ============
 
     def list_hosts(self) -> List[dict]:

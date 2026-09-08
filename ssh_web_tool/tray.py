@@ -15,6 +15,7 @@ Windows 系统托盘（纯 ctypes Win32 实现，零第三方依赖）
 """
 import ctypes
 import ctypes.wintypes as wt
+import json
 import logging
 import os
 import subprocess
@@ -100,7 +101,8 @@ ID_OPEN_WEB = 1001
 ID_OPEN_DIR = 1002
 ID_OPEN_CONFIG = 1003
 ID_OPEN_LOG = 1004
-ID_EXIT = 1005
+ID_REFRESH_CONFIG = 1005
+ID_EXIT = 1006
 
 
 def RGB(r, g, b):
@@ -238,6 +240,31 @@ class TrayIcon:
         except Exception as e:
             print(f"[tray] 打开日志窗口失败: {e}")
 
+    def refresh_config(self):
+        """检查并刷新配置文件与 scripts 脚本目录（调后端 reload API，异步执行避免卡菜单）"""
+
+        def _do():
+            import urllib.request
+            try:
+                url = self.base_url.rstrip("/") + "/api/config/reload"
+                req = urllib.request.Request(url, method="POST", data=b"")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode())
+                hosts = data.get("data", {}).get("hosts", "?")
+                qcs = data.get("data", {}).get("quick_commands", "?")
+                scripts = data.get("scripts", [])
+                msg = (
+                    f"配置已刷新：\n"
+                    f"主机 {hosts} 台 · 快捷指令 {qcs} 条\n"
+                    f"scripts 脚本 {len(scripts)} 个\n\n"
+                    f"{data.get('scripts_dir', '')}"
+                )
+                user32.MessageBoxW(None, msg, "SSH Web Tool - 刷新配置", 0x40)
+            except Exception as e:
+                user32.MessageBoxW(None, f"刷新配置失败：{e}", "SSH Web Tool - 刷新配置", 0x10)
+
+        threading.Thread(target=_do, daemon=True).start()
+
     def exit_app(self):
         print("[tray] 通过托盘菜单退出")
         os._exit(0)  # noqa: PLR1722
@@ -330,6 +357,7 @@ class TrayIcon:
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         _append(ID_OPEN_DIR, "打开配置目录")
         _append(ID_OPEN_CONFIG, "打开配置文件 config.json")
+        _append(ID_REFRESH_CONFIG, "检查配置/脚本更新")
         _append(ID_OPEN_LOG, "打开日志窗口")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         _append(ID_EXIT, "退出")
@@ -348,6 +376,8 @@ class TrayIcon:
             self.open_dir()
         elif cmd == ID_OPEN_CONFIG:
             self.open_config()
+        elif cmd == ID_REFRESH_CONFIG:
+            self.refresh_config()
         elif cmd == ID_OPEN_LOG:
             self.open_log()
         elif cmd == ID_EXIT:
@@ -387,6 +417,7 @@ class TrayIcon:
         _menu_actions[ID_OPEN_WEB] = self.open_web
         _menu_actions[ID_OPEN_DIR] = self.open_dir
         _menu_actions[ID_OPEN_CONFIG] = self.open_config
+        _menu_actions[ID_REFRESH_CONFIG] = self.refresh_config
         _menu_actions[ID_OPEN_LOG] = self.open_log
         _menu_actions[ID_EXIT] = self.exit_app
 

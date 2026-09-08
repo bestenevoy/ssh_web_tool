@@ -108,6 +108,19 @@ export const api = {
     return resp.json()
   },
 
+  // 预操作上传：后端直读本机源文件（绝对路径或 scripts 目录文件）后 SFTP 上传
+  preopUpload: (session_id: string, source: string, source_type: string, remote: string) =>
+    request('/api/preop/upload', {
+      method: 'POST',
+      body: JSON.stringify({ session_id, source, source_type, remote }),
+    }),
+
+  // scripts 脚本目录文件列表（预操作上传下拉选择）
+  listScripts: () => request<{ scripts: string[]; dir: string }>('/api/scripts'),
+
+  // 检查/刷新配置与脚本（扫描 config/data/scripts）
+  reloadConfig: () => request<Record<string, unknown>>('/api/config/reload', { method: 'POST' }),
+
   // 全局命令历史（跨终端，按使用频次排序）
   recordCommand: (command: string) =>
     request('/api/history/record', { method: 'POST', body: JSON.stringify({ command }) }),

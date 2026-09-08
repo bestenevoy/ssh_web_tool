@@ -215,6 +215,24 @@ async def api_get_config():
     return {}
 
 
+@app.post("/api/config/reload")
+async def api_reload_config():
+    """扫描并重新加载配置文件（data.json / config.json）与 scripts 脚本目录，
+    供 Web 界面/托盘"检查配置更新"使用（外部手动编辑配置或添加脚本后刷新）"""
+    cfg = load_config()
+    data_summary = storage.reload()
+    scripts_dir = get_app_dir() / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    scripts = sorted(p.name for p in scripts_dir.iterdir() if p.is_file())
+    return {
+        "status": "reloaded",
+        "config": {"port": cfg.get("server", {}).get("port"), "open_browser": cfg.get("open_browser")},
+        "data": data_summary,
+        "scripts_dir": str(scripts_dir),
+        "scripts": scripts,
+    }
+
+
 # ============ SSH 会话 API ============
 
 @app.post("/api/sessions")
@@ -891,6 +909,49 @@ async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = 
         return {"status": "uploaded", "path": remote_path, "size": len(content)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+class PreopUploadRequest(BaseModel):
+    session_id: str
+    source: str          # 源文件：本机绝对路径，或 scripts 目录下的文件名
+    source_type: str = "path"  # path=本机绝对路径 / script=scripts 目录文件
+    remote: str          # 远端目标路径
+
+
+@app.post("/api/preop/upload")
+async def api_preop_upload(req: PreopUploadRequest):
+    """预操作上传：后端直读本地源文件（浏览器拿不到本地路径，由同机 Server 读取）
+    - source_type=path：source 为本机绝对路径（如 D:/scripts/deploy.sh）
+    - source_type=script：source 为 ~/.ai4one/wstool/scripts/ 下的文件名"""
+    session = session_manager.get_session(req.session_id)
+    if not session or not session.is_connected:
+        raise HTTPException(status_code=404, detail="会话不存在或未连接")
+    source = (req.source or "").strip()
+    if not source:
+        raise HTTPException(status_code=400, detail="未指定源文件")
+    if req.source_type == "script":
+        src = get_app_dir() / "scripts" / source
+    else:
+        src = Path(source).expanduser()
+        if not src.is_absolute():
+            src = get_app_dir() / "scripts" / src
+    if not src.is_file():
+        raise HTTPException(status_code=404, detail=f"源文件不存在: {source}")
+    try:
+        content = src.read_bytes().decode("utf-8", errors="replace")
+        await session.write_file(req.remote, content)
+        return {"status": "uploaded", "source": str(src), "path": req.remote, "size": len(content)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+@app.get("/api/scripts")
+async def api_list_scripts():
+    """列出 ~/.ai4one/wstool/scripts/ 下的脚本文件（预操作上传下拉选择）"""
+    scripts_dir = get_app_dir() / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    scripts = sorted(p.name for p in scripts_dir.iterdir() if p.is_file())
+    return {"scripts": scripts, "dir": str(scripts_dir)}
 
 
 # ============ WebSocket（交互式终端） ============

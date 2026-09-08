@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { QuickCommand, QuickPreOp } from '../types'
+import { api } from '../lib/api'
 
 interface Props {
   onClose: () => void
@@ -17,7 +18,7 @@ const PRE_OP_LABELS: Record<QuickPreOp['type'], string> = {
 function emptyPreOp(type: QuickPreOp['type'] = 'upload'): QuickPreOp {
   if (type === 'chmod') return { type, mode: '+x', path: '' }
   if (type === 'env') return { type, key: '', value: '' }
-  return { type, remote: '' }
+  return { type, source_type: 'script', source: '', remote: '' }
 }
 
 export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) {
@@ -27,7 +28,15 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
   const [cmdType, setCmdType] = useState<'direct' | 'param'>('direct')
   const [paramHint, setParamHint] = useState('')
   const [preOps, setPreOps] = useState<QuickPreOp[]>([])
+  const [scripts, setScripts] = useState<string[]>([])
   const nameInputRef = useRef<HTMLInputElement>(null)
+
+  // 加载 scripts 目录文件列表（上传预操作下拉选择）
+  useEffect(() => {
+    api.listScripts()
+      .then((res) => setScripts(res.scripts || []))
+      .catch(() => setScripts([]))
+  }, [])
 
   // 编辑模式：填充初始值
   useEffect(() => {
@@ -54,7 +63,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
       type: cmdType,
       param_hint: cmdType === 'param' ? paramHint.trim() : '',
       pre_ops: preOps.filter((o) => {
-        if (o.type === 'upload') return o.remote?.trim()
+        if (o.type === 'upload') return o.source?.trim() && o.remote?.trim()
         if (o.type === 'chmod') return o.mode?.trim() && o.path?.trim()
         if (o.type === 'env') return o.key?.trim()
         return false
@@ -206,15 +215,47 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
               </select>
               {op.type === 'upload' && (
                 <>
+                  <select
+                    value={op.source_type || 'script'}
+                    onChange={(e) => updatePreOp(idx, { source_type: e.target.value as 'path' | 'script', source: '' })}
+                    className="qc-preop-type"
+                    title="源文件来源"
+                  >
+                    <option value="script">📁 scripts 文件</option>
+                    <option value="path">💻 本机路径</option>
+                  </select>
+                  {op.source_type === 'script' ? (
+                    <input
+                      type="text"
+                      list={`qc-scripts-${idx}`}
+                      placeholder="scripts 目录下文件名，如 deploy.sh"
+                      value={op.source || ''}
+                      onChange={(e) => updatePreOp(idx, { source: e.target.value })}
+                      className="qc-preop-input"
+                      title="填文件名，在 ~/.ai4one/wstool/scripts/ 下查找；或从下拉选择"
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      placeholder="本机绝对路径，如 D:/scripts/deploy.sh"
+                      value={op.source || ''}
+                      onChange={(e) => updatePreOp(idx, { source: e.target.value })}
+                      className="qc-preop-input"
+                      title="Server 同机直接读取该路径后上传（浏览器无需选文件）"
+                    />
+                  )}
+                  <datalist id={`qc-scripts-${idx}`}>
+                    {scripts.map((s) => <option key={s} value={s} />)}
+                  </datalist>
+                  <span className="qc-preop-note">→</span>
                   <input
                     type="text"
-                    placeholder="远端目标路径，如 /opt/app.jar"
+                    placeholder="远端目标路径，如 /opt/deploy.sh"
                     value={op.remote || ''}
                     onChange={(e) => updatePreOp(idx, { remote: e.target.value })}
                     className="qc-preop-input"
-                    title="上传到远端哪个路径（执行时选择本地文件）"
+                    title="上传到远端哪个路径"
                   />
-                  <span className="qc-preop-note">上传到</span>
                 </>
               )}
               {op.type === 'chmod' && (
@@ -270,7 +311,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
             + 添加预操作
           </button>
           <div style={{ fontSize: 10, color: '#5a6a8a', marginTop: 4 }}>
-            上传文件：执行时浏览器会弹出文件选择，文件通过 SFTP 上传后再执行命令
+            上传文件：源文件填「本机绝对路径」由 Server 直接读取，或选「scripts 文件」在 ~/.ai4one/wstool/scripts/ 下查找（可下拉选择），通过 SFTP 上传后再执行命令
           </div>
         </div>
 

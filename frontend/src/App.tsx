@@ -320,16 +320,13 @@ function App() {
     for (const op of qc.pre_ops || []) {
       if (op.type === 'upload') {
         const remote = (op.remote || '').trim()
-        if (!remote) continue
-        const file = await pickLocalFile()
-        if (!file) {
-          setStatus('已取消：未选择上传文件，命令未执行')
-          return
-        }
-        setStatus(`上传中 ${file.name} -> ${remote}...`)
+        const source = (op.source || '').trim()
+        const sourceType = op.source_type === 'path' ? 'path' : 'script'
+        if (!remote || !source) continue
+        setStatus(`上传中 ${source} -> ${remote}...`)
         try {
-          await api.sftpUpload(session_id, remote, file)
-          setStatus(`已上传 ${file.name} -> ${remote}`)
+          await api.preopUpload(session_id, source, sourceType, remote)
+          setStatus(`已上传 ${source} -> ${remote}`)
         } catch (e) {
           setStatus('上传失败，命令未执行')
           alert('预操作失败（上传文件）: ' + (e as Error).message)
@@ -348,25 +345,19 @@ function App() {
     setStatus(`已执行: ${cmd.slice(0, 60)}`)
   }, [terminals, setStatus])
 
-  // 选择本地文件（隐藏 input[type=file]，返回 File 或 null）
-  const pickLocalFile = useCallback((): Promise<File | null> => {
-    return new Promise((resolve) => {
-      const input = document.createElement('input')
-      input.type = 'file'
-      input.style.display = 'none'
-      document.body.appendChild(input)
-      input.onchange = () => {
-        const file = input.files?.[0] || null
-        document.body.removeChild(input)
-        resolve(file)
-      }
-      input.oncancel = () => {
-        document.body.removeChild(input)
-        resolve(null)
-      }
-      input.click()
-    })
-  }, [])
+  // 检查配置/脚本更新：扫描 config/data/scripts 后刷新主机与快捷指令列表
+  const handleReloadConfig = useCallback(async () => {
+    setStatus('正在扫描配置与脚本...')
+    try {
+      const res = await api.reloadConfig()
+      await Promise.all([loadHosts(), loadQuickCommands()])
+      const scripts = (res.scripts as string[]) || []
+      setStatus(`配置已刷新：主机 ${(res.data as any)?.hosts ?? '?'} 台 · 快捷指令 ${(res.data as any)?.quick_commands ?? '?'} 条 · scripts ${scripts.length} 个`)
+    } catch (e) {
+      setStatus('刷新配置失败')
+      alert('刷新配置失败: ' + (e as Error).message)
+    }
+  }, [loadHosts, loadQuickCommands])
 
   // 编辑后执行：只输入到终端，不执行，用户可编辑后手动执行
   const handleEditExecuteQuickCommand = useCallback((qc: QuickCommand) => {
@@ -508,6 +499,9 @@ function App() {
         </div>
         <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(!panelCollapsed)}>
           📋 面板
+        </button>
+        <button className="btn btn-secondary btn-sm" onClick={handleReloadConfig} title="扫描配置文件与 scripts 脚本目录并刷新">
+          🔄 检查配置
         </button>
         <button className="btn btn-primary btn-sm" onClick={() => { setEditingHost(null); setModalOpen(true) }}>+ 新建主机</button>
       </div>
