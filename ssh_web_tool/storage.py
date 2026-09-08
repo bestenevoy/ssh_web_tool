@@ -345,6 +345,17 @@ class Storage:
             return True
         return False
 
+    def reorder_quick_commands(self, ids: List[str]) -> bool:
+        """按给定 id 顺序重排快捷指令（拖拽后保存顺序）"""
+        by_id = {q["id"]: q for q in self._data["quick_commands"]}
+        ordered = [by_id[i] for i in ids if i in by_id]
+        # 补上未在 ids 中的指令（保持原相对顺序）
+        seen = set(ids)
+        ordered += [q for q in self._data["quick_commands"] if q["id"] not in seen]
+        self._data["quick_commands"] = ordered
+        self._save()
+        return True
+
     # ============ 主机类型管理 ============
 
     def list_host_types(self) -> List[dict]:

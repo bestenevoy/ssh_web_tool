@@ -704,6 +704,7 @@ async def api_unified_search(keyword: str = "", limit: int = 50):
                 'id': qc.get('id', ''),
                 'name': qc.get('name', ''),
                 'command': qc.get('command', ''),
+                'cmd_type': qc.get('type', 'direct'),  # direct=直接执行 / param=输入到终端后编辑
             })
 
     # 2. 搜索历史命令（按使用频次排序，SQLite，已忽略的不返回）
@@ -735,6 +736,17 @@ async def api_add_quick_command(req: QuickCommandRequest):
     qc = storage.add_quick_command(req.name, req.command, req.description,
                                    req.type, req.param_hint, req.pre_ops)
     return qc
+
+
+class ReorderQuickCommandsRequest(BaseModel):
+    ids: List[str]
+
+
+@app.put("/api/quick-commands/reorder")
+async def api_reorder_quick_commands(req: ReorderQuickCommandsRequest):
+    """按拖拽后的顺序保存快捷指令"""
+    storage.reorder_quick_commands(req.ids)
+    return {"status": "ok"}
 
 
 @app.put("/api/quick-commands/{qc_id}")

@@ -376,6 +376,19 @@ function App() {
     }
   }, [loadQuickCommands])
 
+  // 拖拽排序：本地先更新（拖拽立即生效），再保存到后端
+  const handleReorderQuickCommands = useCallback(async (ids: string[]) => {
+    const orderMap = new Map(quickCommands.map((q) => [q.id, q]))
+    const next = ids.map((id) => orderMap.get(id)!).filter(Boolean)
+    setQuickCommands(next)
+    try {
+      await api.reorderQuickCommands(ids)
+    } catch (e) {
+      alert('排序保存失败: ' + (e as Error).message)
+      loadQuickCommands()
+    }
+  }, [quickCommands, loadQuickCommands])
+
   const renderPanelContent = () => {
     switch (panelTab) {
       case 'quick':
@@ -387,6 +400,7 @@ function App() {
             onEdit={handleEditQuickCommand}
             onDelete={handleDeleteQuickCommand}
             onOpenAddModal={() => { setEditingQuickCommand(null); setQuickCommandModalOpen(true) }}
+            onReorder={handleReorderQuickCommands}
             disabled={!terminals.activeId}
           />
         )

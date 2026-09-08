@@ -316,6 +316,12 @@
   color: #ff9800;
 }
 
+/* 带参数快捷命令（搜索中显示） */
+.history-type-badge.quick.param {
+  background: rgba(0, 188, 212, 0.2);
+  color: #00bcd4;
+}
+
 .history-type-badge.history {
   background: rgba(76, 175, 80, 0.2);
   color: #4caf50;

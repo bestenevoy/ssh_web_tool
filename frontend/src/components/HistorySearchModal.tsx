@@ -9,7 +9,7 @@ interface HistorySearchModalProps {
 }
 
 type SearchResult =
-  | { type: 'quick'; id: string; name: string; command: string }
+  | { type: 'quick'; id: string; name: string; command: string; cmd_type?: string }
   | { type: 'history'; command: string; count: number; last_used: number }
 
 export default function HistorySearchModal({ onClose, onExecute, onInputToTerminal, onRefreshQuickCommands }: HistorySearchModalProps) {
@@ -179,12 +179,12 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
       if (showIgnored) return  // 已忽略视图不执行
       const item = results[selectedIndex]
       if (item) {
-        if (item.type === 'quick') {
-          // 快捷命令：直接执行
+        if (item.type === 'quick' && item.cmd_type !== 'param') {
+          // 快捷命令（direct）：直接执行
           onExecute(item.command)
           onClose()
         } else {
-          // 历史命令：输入到终端，可编辑
+          // 带参数快捷命令 / 历史命令：输入到终端，可编辑
           onInputToTerminal(item.command)
           onClose()
         }
@@ -321,7 +321,7 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
                       className={`history-result-item ${idx === selectedIndex ? 'selected' : ''} ${item.type}`}
                       onClick={() => {
                         setSelectedIndex(idx)
-                        if (item.type === 'quick') {
+                        if (item.type === 'quick' && item.cmd_type !== 'param') {
                           onExecute(item.command)
                           onClose()
                         } else {
@@ -332,7 +332,9 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
                     >
                       {item.type === 'quick' ? (
                         <>
-                          <span className="history-type-badge quick">⚡快捷</span>
+                          <span className={`history-type-badge quick${item.cmd_type === 'param' ? ' param' : ''}`} title={item.cmd_type === 'param' ? '带参数指令：输入到终端后编辑 {args} 再执行' : '直接执行'}>
+                            {item.cmd_type === 'param' ? '⌨️快捷' : '⚡快捷'}
+                          </span>
                           <span className="history-quick-name">{item.name}</span>
                           <span className="history-cmd-text">{item.command}</span>
                         </>

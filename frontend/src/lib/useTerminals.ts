@@ -133,12 +133,28 @@ function setupTerminalCopy(term: Terminal) {
     if (term.hasSelection()) copySelection(term)
   })
   // 2) Ctrl+C：有选区时复制并阻止发送（避免打断远端正在运行的命令）
+  //    Ctrl+V：读取剪贴板（纯文本，自动清除格式）并粘贴到终端
+  //    注意：xterm 的自定义按键 handler 是单槽，复制与粘贴必须在同一个 handler 内
   term.attachCustomKeyEventHandler((e) => {
     if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
       if (term.hasSelection()) {
         copySelection(term)
         return false  // 阻止 xterm 把 Ctrl+C 发送到终端
       }
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+      // 阻止 xterm 把 Ctrl+V 当作按键发送；从剪贴板读取纯文本后粘贴
+      if (navigator.clipboard?.readText) {
+        navigator.clipboard.readText()
+          .then((text) => {
+            if (text) term.paste(text)
+          })
+          .catch(() => {
+            // 剪贴板读取失败（如无权限）：保持终端焦点，提示用 Ctrl+Shift+V
+            console.warn('[Terminal] 剪贴板读取被拒绝，请用 Ctrl+Shift+V 粘贴')
+          })
+      }
+      return false
     }
     return true
   })

@@ -73,6 +73,8 @@ export const api = {
   updateQuickCommand: (id: string, data: Partial<QuickCommand>) =>
     request<QuickCommand>(`/api/quick-commands/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteQuickCommand: (id: string) => request(`/api/quick-commands/${id}`, { method: 'DELETE' }),
+  reorderQuickCommands: (ids: string[]) =>
+    request('/api/quick-commands/reorder', { method: 'PUT', body: JSON.stringify({ ids }) }),
 
   // SFTP
   sftpList: (session_id: string, path: string) =>
