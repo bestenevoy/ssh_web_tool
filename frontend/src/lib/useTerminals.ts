@@ -181,14 +181,14 @@ function copySelection(term: Terminal) {
 }
 
 
-// 标记终端为断开状态（ws 关闭时调用），并清理状态轮询定时器
+// 标记终端为断开状态（ws 关闭时调用）
 function markDisconnected(term: Terminal, session_id: string, setTerminals: React.Dispatch<React.SetStateAction<Map<string, TerminalInstance>>>) {
   try { term.write('\r\n\x1b[31m[连接已断开，点击顶部「🔗 重连」重新连接]\x1b[0m\r\n') } catch {}
   setTerminals((prev) => {
     const next = new Map(prev)
     const cur = next.get(session_id)
     if (cur && !cur.disconnected) {
-      if (cur.state_timer) clearInterval(cur.state_timer)
+      // state_timer 已改为批量轮询，不再需要单独清理
       next.set(session_id, { ...cur, disconnected: true, ws: null })
     }
     return next
@@ -267,11 +267,14 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
   }, [fitTerminal, sendResize])
 
   // 设置变化时更新所有终端
+  // 优化：去掉 terminals 依赖，只在 settings 变化时执行（原依赖含 terminals
+  // 导致每次 terminals Map 变化都重新遍历所有终端做设置更新）
   useEffect(() => {
     terminals.forEach((inst) => {
       updateTerminalSettings(inst)
     })
-  }, [settings, terminals, updateTerminalSettings])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, updateTerminalSettings])
 
   // 处理终端输入：维护输入行缓冲区（精确行编辑，跟踪光标位置），回车时记录完整命令到后端
   // 注意：使用 terminalsRef.current 而不是 terminals，避免闭包捕获旧状态导致新终端的 input_buffer 不记录
@@ -411,22 +414,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       }
 
       // 定期检测终端状态（用于 tab 显示 shell 类型）
-      const state_timer = setInterval(() => {
-        api.getSessionState(session_id).then((state) => {
-          setTerminals((prev) => {
-            const inst = prev.get(session_id)
-            if (inst) {
-              const newType = getShellTypeLabel(state)
-              if (inst.shell_type !== newType) {
-                const next = new Map(prev)
-                next.set(session_id, { ...inst, shell_type: newType })
-                return next
-              }
-            }
-            return prev
-          })
-        }).catch(() => {})
-      }, 3000)
+      // 已改为批量轮询（由外层 useEffect 统一处理，减少 HTTP 请求）
+      const state_timer = null
 
       ws.onmessage = (event) => {
         try {
@@ -480,11 +469,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     try {
       const { terminals: active } = await api.listActiveTerminals()
       const s = settingsRef.current
-      for (const t of active) {
-        // 跳过已连接的终端，避免重复连接
-        if (terminalsRef.current.has(t.session_id)) {
-          continue
-        }
+      // 并行恢复所有终端（原 for...of 串行创建，3 个终端延迟累加）
+      const toRestore = active.filter(t => !terminalsRef.current.has(t.session_id))
+      await Promise.all(toRestore.map(t => {
         const term = new Terminal({
           cursorBlink: true,
           theme: getTerminalTheme(s),
@@ -542,23 +529,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         // 意外断开：标记断开，不自动重连
         ws.onclose = () => markDisconnected(term, t.session_id, setTerminals)
 
-        // 定期检测终端状态
-        const state_timer = setInterval(() => {
-          api.getSessionState(t.session_id).then((state) => {
-            setTerminals((prev) => {
-              const inst = prev.get(t.session_id)
-              if (inst) {
-                const newType = getShellTypeLabel(state)
-                if (inst.shell_type !== newType) {
-                  const next = new Map(prev)
-                  next.set(t.session_id, { ...inst, shell_type: newType })
-                  return next
-                }
-              }
-              return prev
-            })
-          }).catch(() => {})
-        }, 3000)
+        // 终端状态检测已改为批量轮询（由外层 useEffect 统一处理）
+        const state_timer = null
 
         const instance: TerminalInstance = {
           session_id: t.session_id,
@@ -583,7 +555,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           return next
         })
         if (!activeId) setActiveId(t.session_id)
-      }
+        return t.session_id
+      }))
     } catch (e) {
       console.error('恢复终端失败', e)
     }
@@ -599,6 +572,34 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     }, 5000)
     return () => clearInterval(timer)
   }, [syncActiveSessions, restoreTerminals])
+
+  // 批量终端状态轮询：所有终端合并为一次 HTTP 请求（每 3 秒）
+  // 优化：原每个终端独立 setInterval 3 秒轮询，5 个终端 = 每秒 ~1.7 次 HTTP 请求
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const ids = Array.from(terminalsRef.current.keys())
+      if (ids.length === 0) return
+      api.getBatchSessionStates(ids).then((res) => {
+        const states = res.states
+        setTerminals((prev) => {
+          let changed = false
+          const next = new Map(prev)
+          for (const [sid, state] of Object.entries(states)) {
+            const inst = next.get(sid)
+            if (inst) {
+              const newType = getShellTypeLabel(state)
+              if (inst.shell_type !== newType) {
+                next.set(sid, { ...inst, shell_type: newType })
+                changed = true
+              }
+            }
+          }
+          return changed ? next : prev
+        })
+      }).catch(() => {})
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [])
 
   const switchTerminal = useCallback((session_id: string) => {
     setActiveId(session_id)
@@ -635,7 +636,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     const t = inputFlushTimerRef.current.get(session_id)
     if (t) { clearTimeout(t); inputFlushTimerRef.current.delete(session_id) }
     if (inst.ws) inst.ws.close()
-    if (inst.state_timer) clearInterval(inst.state_timer)
+    // state_timer 已改为批量轮询，不再需要单独清理
     try { await api.closeSession(session_id) } catch {}
     setTerminals((prev) => {
       const next = new Map(prev)
@@ -655,7 +656,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     if (!inst || inst.disconnected) return
     try { await api.closeSession(session_id) } catch {}
     if (inst.ws) { try { inst.ws.close() } catch {} }
-    if (inst.state_timer) clearInterval(inst.state_timer)
+    // state_timer 已改为批量轮询，不再需要单独清理
     setTerminals((prev) => {
       const next = new Map(prev)
       const cur = next.get(session_id)

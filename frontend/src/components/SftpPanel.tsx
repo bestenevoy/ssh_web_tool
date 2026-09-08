@@ -118,12 +118,14 @@ export function SftpPanel({ sessionId }: Props) {
 
   const uploadFiles = async (files: FileList) => {
     if (!sessionId) return
+    // 优化：使用 multipart sftpUpload 代替 JSON sftpWrite
+    // 原 sftpWrite 通过 file.text() 读取为字符串再 JSON 发送，二进制文件会被损坏
+    // multipart 直接以二进制 FormData 上传，后端接收 bytes 直传 SFTP
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
       try {
-        const content = await file.text()
         const path = currentPath.replace(/\/$/, '') + '/' + file.name
-        await api.sftpWrite(sessionId, path, content)
+        await api.sftpUpload(sessionId, path, file)
       } catch (e) {
         alert('上传失败 ' + file.name + ': ' + (e as Error).message)
       }

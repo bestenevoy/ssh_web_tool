@@ -4,12 +4,14 @@
 - 数据库文件：~/.ai4one/wstool/history.db（随统一数据目录）
 - 表 command_history：command(唯一) / count(使用次数) / last_used / ignored(忽略标记)
 - 提供记录、搜索、最近、忽略/恢复、JSON 迁移能力
+
+优化：使用单例连接 + WAL 模式，避免每次操作都新建/关闭连接。
 """
 import json
 import re
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import aiosqlite
 
@@ -36,28 +38,70 @@ def get_db_path() -> Path:
     return get_app_dir() / DB_NAME
 
 
+# ========== 单例连接池 ==========
+# 原：每次操作都 async with aiosqlite.connect(...) 新建+关闭连接，开销大
+# 新：全局单例连接 + WAL 模式，复用连接，减少 IO 开销
+_db_conn: Optional[aiosqlite.Connection] = None
+_db_lock = __import__('asyncio').Lock()
+
+
+async def get_db() -> aiosqlite.Connection:
+    """获取数据库单例连接（带 WAL 模式）
+
+    优化：使用全局单例连接复用，避免每次操作都新建/关闭连接。
+    WAL 模式提升并发读写性能（读不阻塞写）。
+    """
+    global _db_conn
+    if _db_conn is not None:
+        return _db_conn
+    async with _db_lock:
+        # double-check
+        if _db_conn is not None:
+            return _db_conn
+        db = get_db_path()
+        db.parent.mkdir(parents=True, exist_ok=True)
+        _db_conn = await aiosqlite.connect(db)
+        _db_conn.row_factory = aiosqlite.Row
+        # WAL 模式：提升并发读写性能
+        await _db_conn.execute("PRAGMA journal_mode=WAL")
+        # 正常同步级别：性能与安全的平衡（WAL 模式下 NORMAL 足够）
+        await _db_conn.execute("PRAGMA synchronous=NORMAL")
+        return _db_conn
+
+
+async def close_db() -> None:
+    """关闭数据库连接（程序退出时调用）"""
+    global _db_conn
+    if _db_conn is not None:
+        try:
+            await _db_conn.close()
+        except Exception:
+            pass
+        _db_conn = None
+
+
 async def init_db() -> None:
     """建表（幂等）"""
     db = get_db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(db) as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS command_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                command TEXT NOT NULL UNIQUE,
-                count INTEGER NOT NULL DEFAULT 1,
-                last_used REAL NOT NULL,
-                ignored INTEGER NOT NULL DEFAULT 0
-            )
-            """
+    conn = await get_db()
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS command_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command TEXT NOT NULL UNIQUE,
+            count INTEGER NOT NULL DEFAULT 1,
+            last_used REAL NOT NULL,
+            ignored INTEGER NOT NULL DEFAULT 0
         )
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_history_last ON command_history(last_used)"
-        )
-        await conn.commit()
-        await _purge_dirty_commands(conn)
-        await conn.commit()
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_history_last ON command_history(last_used)"
+    )
+    await conn.commit()
+    await _purge_dirty_commands(conn)
+    await conn.commit()
 
 
 # 孤立方向键/功能键残留模式：如 [T、[D、[C、[A、[B、[3~ 等（旧版本输入处理把
@@ -98,13 +142,13 @@ async def record_command(command: str) -> None:
     cmd = clean_command(command)
     if not cmd or len(cmd) > 500:
         return
-    async with aiosqlite.connect(get_db_path()) as conn:
-        await conn.execute(
-            "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
-            "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
-            (cmd, time.time()),
-        )
-        await conn.commit()
+    conn = await get_db()
+    await conn.execute(
+        "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
+        "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
+        (cmd, time.time()),
+    )
+    await conn.commit()
 
 
 async def record_echo_command(cmd: str) -> None:
@@ -118,77 +162,74 @@ async def record_echo_command(cmd: str) -> None:
     if not cmd or len(cmd) > 500:
         return
     now = time.time()
-    async with aiosqlite.connect(get_db_path()) as conn:
-        # 1. 清理前缀残留：删除 3 秒内、更短、且是 cmd 严格前缀的命令
-        await conn.execute(
-            "DELETE FROM command_history WHERE command != ? AND last_used > ? "
-            "AND length(command) < length(?) AND substr(?, 1, length(command)) = command",
-            (cmd, now - 3, cmd, cmd),
-        )
-        # 2. 去重：3 秒内已记录同命令则跳过（前端/CLI 已记过）
-        cur = await conn.execute(
-            "SELECT COUNT(*) FROM command_history WHERE command = ? AND last_used > ?",
-            (cmd, now - 3),
-        )
-        cnt = (await cur.fetchone())[0]
-        if cnt > 0:
-            await conn.commit()
-            return
-        # 3. 记录
-        await conn.execute(
-            "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
-            "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
-            (cmd, now),
-        )
+    conn = await get_db()
+    # 1. 清理前缀残留：删除 3 秒内、更短、且是 cmd 严格前缀的命令
+    await conn.execute(
+        "DELETE FROM command_history WHERE command != ? AND last_used > ? "
+        "AND length(command) < length(?) AND substr(?, 1, length(command)) = command",
+        (cmd, now - 3, cmd, cmd),
+    )
+    # 2. 去重：3 秒内已记录同命令则跳过（前端/CLI 已记过）
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM command_history WHERE command = ? AND last_used > ?",
+        (cmd, now - 3),
+    )
+    cnt = (await cur.fetchone())[0]
+    if cnt > 0:
         await conn.commit()
+        return
+    # 3. 记录
+    await conn.execute(
+        "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
+        "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
+        (cmd, now),
+    )
+    await conn.commit()
 
 
 async def search_commands(keyword: str = "", limit: int = 50, include_ignored: bool = False) -> List[Dict]:
     """搜索命令，按使用频次降序（频次相同按最后使用时间降序）；默认过滤已忽略"""
-    async with aiosqlite.connect(get_db_path()) as conn:
-        conn.row_factory = aiosqlite.Row
-        kw = keyword.strip()
-        conds: List[str] = []
-        args: List = []
-        if not include_ignored:
-            conds.append("ignored = 0")
-        if kw:
-            conds.append("command LIKE ?")
-            args.append(f"%{kw}%")
-        sql = "SELECT command, count, last_used FROM command_history"
-        if conds:
-            sql += " WHERE " + " AND ".join(conds)
-        sql += " ORDER BY count DESC, last_used DESC LIMIT ?"
-        args.append(limit)
-        cur = await conn.execute(sql, args)
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+    conn = await get_db()
+    kw = keyword.strip()
+    conds: List[str] = []
+    args: List = []
+    if not include_ignored:
+        conds.append("ignored = 0")
+    if kw:
+        conds.append("command LIKE ?")
+        args.append(f"%{kw}%")
+    sql = "SELECT command, count, last_used FROM command_history"
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY count DESC, last_used DESC LIMIT ?"
+    args.append(limit)
+    cur = await conn.execute(sql, args)
+    rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def list_recent_commands(limit: int = 100) -> List[Dict]:
     """最近使用的命令（按最后使用时间降序），过滤已忽略"""
-    async with aiosqlite.connect(get_db_path()) as conn:
-        conn.row_factory = aiosqlite.Row
-        cur = await conn.execute(
-            "SELECT command, count, last_used FROM command_history "
-            "WHERE ignored = 0 ORDER BY last_used DESC LIMIT ?",
-            (limit,),
-        )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+    conn = await get_db()
+    cur = await conn.execute(
+        "SELECT command, count, last_used FROM command_history "
+        "WHERE ignored = 0 ORDER BY last_used DESC LIMIT ?",
+        (limit,),
+    )
+    rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def list_ignored_commands(limit: int = 200) -> List[Dict]:
     """已忽略的命令列表（供恢复管理）"""
-    async with aiosqlite.connect(get_db_path()) as conn:
-        conn.row_factory = aiosqlite.Row
-        cur = await conn.execute(
-            "SELECT command, count, last_used FROM command_history "
-            "WHERE ignored = 1 ORDER BY last_used DESC LIMIT ?",
-            (limit,),
-        )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+    conn = await get_db()
+    cur = await conn.execute(
+        "SELECT command, count, last_used FROM command_history "
+        "WHERE ignored = 1 ORDER BY last_used DESC LIMIT ?",
+        (limit,),
+    )
+    rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def ignore_command(command: str) -> bool:
@@ -196,12 +237,12 @@ async def ignore_command(command: str) -> bool:
     cmd = command.strip()
     if not cmd:
         return False
-    async with aiosqlite.connect(get_db_path()) as conn:
-        cur = await conn.execute(
-            "UPDATE command_history SET ignored = 1 WHERE command = ?", (cmd,)
-        )
-        await conn.commit()
-        return cur.rowcount > 0
+    conn = await get_db()
+    cur = await conn.execute(
+        "UPDATE command_history SET ignored = 1 WHERE command = ?", (cmd,)
+    )
+    await conn.commit()
+    return cur.rowcount > 0
 
 
 async def unignore_command(command: str) -> bool:
@@ -209,12 +250,12 @@ async def unignore_command(command: str) -> bool:
     cmd = command.strip()
     if not cmd:
         return False
-    async with aiosqlite.connect(get_db_path()) as conn:
-        cur = await conn.execute(
-            "UPDATE command_history SET ignored = 0 WHERE command = ?", (cmd,)
-        )
-        await conn.commit()
-        return cur.rowcount > 0
+    conn = await get_db()
+    cur = await conn.execute(
+        "UPDATE command_history SET ignored = 0 WHERE command = ?", (cmd,)
+    )
+    await conn.commit()
+    return cur.rowcount > 0
 
 
 async def migrate_from_json(json_path: Path) -> int:
@@ -232,18 +273,18 @@ async def migrate_from_json(json_path: Path) -> int:
     hist = data.get("command_history") or {}
     if not hist:
         return 0
-    async with aiosqlite.connect(get_db_path()) as conn:
-        cur = await conn.execute("SELECT COUNT(*) FROM command_history")
-        existing = (await cur.fetchone())[0]
-        if existing > 0:
-            return 0
-        for cmd, info in hist.items():
-            clean = clean_command(cmd)
-            if not clean or _GARBAGE_RE.match(clean):
-                continue  # 跳过控制字符残留垃圾（如 [T、[D 等）
-            await conn.execute(
-                "INSERT OR IGNORE INTO command_history (command, count, last_used) VALUES (?, ?, ?)",
-                (clean, info.get("count", 1), info.get("last_used", time.time())),
-            )
-        await conn.commit()
-        return len(hist)
+    conn = await get_db()
+    cur = await conn.execute("SELECT COUNT(*) FROM command_history")
+    existing = (await cur.fetchone())[0]
+    if existing > 0:
+        return 0
+    for cmd, info in hist.items():
+        clean = clean_command(cmd)
+        if not clean or _GARBAGE_RE.match(clean):
+            continue  # 跳过控制字符残留垃圾（如 [T、[D 等）
+        await conn.execute(
+            "INSERT OR IGNORE INTO command_history (command, count, last_used) VALUES (?, ?, ?)",
+            (clean, info.get("count", 1), info.get("last_used", time.time())),
+        )
+    await conn.commit()
+    return len(hist)

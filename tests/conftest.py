@@ -105,8 +105,14 @@ def fake_sessions(monkeypatch):
 
 @pytest.fixture()
 def fake_history_db(monkeypatch, tmp_path):
-    """把 history.db 指到临时目录并初始化，避免污染真实历史库"""
+    """把 history.db 指到临时目录并初始化，避免污染真实历史库
+    
+    重要：需要重置单例连接 _db_conn，否则会复用上一个测试的数据库连接
+    """
     import ssh_web_tool.history_db as history_db
+
+    # 重置单例连接（避免复用上一个测试的数据库文件）
+    history_db._db_conn = None
 
     def _fake_path():
         return tmp_path / "history.db"
@@ -118,4 +124,11 @@ def fake_history_db(monkeypatch, tmp_path):
 
     import asyncio
     asyncio.run(_init())
-    return history_db
+
+    # 测试结束后清理单例连接
+    async def _close():
+        await history_db.close_db()
+
+    yield history_db
+    asyncio.run(_close())
+    history_db._db_conn = None

@@ -267,6 +267,14 @@ class TrayIcon:
 
     def exit_app(self):
         print("[tray] 通过托盘菜单退出")
+        # 先关闭历史数据库单例连接（WAL 文件 checkpoint），避免残留 -wal/-shm
+        # 托盘线程无 running loop，用 asyncio.run 同步执行
+        try:
+            import asyncio
+            from ssh_web_tool import history_db
+            asyncio.run(history_db.close_db())
+        except Exception:
+            pass
         os._exit(0)  # noqa: PLR1722
 
     # ---------- 窗口过程 ----------

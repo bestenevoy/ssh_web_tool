@@ -32,6 +32,20 @@ from ssh_web_tool.external_sessions import external_hub
 
 app = FastAPI(title="SSH Web Tool", version="2.0.0")
 
+
+@app.on_event("shutdown")
+async def _shutdown_cleanup():
+    """程序退出前关闭数据库单例连接。
+
+    history_db 使用全局单例 aiosqlite 连接（非 daemon worker 线程），
+    若不显式关闭，开发模式 Ctrl+C / uvicorn 异常退出时进程会挂住无法退出。
+    （托盘"退出"走 os._exit 不经此路径，由 tray.exit_app 自行清理。）
+    """
+    try:
+        await history_db.close_db()
+    except Exception:
+        pass
+
 # PyInstaller 打包兼容：静态文件从临时目录读取，数据文件保存在 EXE 所在目录
 def get_resource_path(relative_path: str) -> Path:
     """获取资源文件路径（兼容 PyInstaller 打包）"""
@@ -101,12 +115,17 @@ class EventBus:
         self._history.append(event)
         if len(self._history) > self._max_history:
             self._history = self._history[-self._max_history:]
-        # 广播给所有订阅者
+        # 并行广播给所有订阅者（原串行 await 会因慢客户端阻塞其他客户端）
+        if not self._subscribers:
+            return
+        results = await asyncio.gather(
+            *[ws.send_json(event) for ws in self._subscribers],
+            return_exceptions=True
+        )
+        # 清理失败的订阅者
         dead = set()
-        for ws in self._subscribers:
-            try:
-                await ws.send_json(event)
-            except Exception:
+        for ws, result in zip(self._subscribers, results):
+            if isinstance(result, Exception):
                 dead.add(ws)
         for ws in dead:
             self._subscribers.discard(ws)
@@ -135,6 +154,7 @@ class RunCommandRequest(BaseModel):
     command: str
     timeout: int = 30
     process: bool = False  # True=强制独立进程执行（不注入到Web终端），False=默认自动（有shell就注入+捕获）
+    capture_exit_code: bool = True  # False=跳过 echo $? 获取退出码（节省1-2秒），退出码返回 None
 
 
 class HostRequest(BaseModel):
@@ -398,7 +418,7 @@ async def api_run_command(session_id: str, req: RunCommandRequest):
         try:
             # 确保输出读取器在运行
             await session.start_output_reader()
-            code, stdout, stderr = await session.inject_and_capture(req.command, total_timeout=req.timeout)
+            code, stdout, stderr = await session.inject_and_capture(req.command, total_timeout=req.timeout, capture_exit_code=req.capture_exit_code)
             return {"returncode": code, "stdout": stdout, "stderr": stderr, "mode": "inject"}
         except asyncio.TimeoutError:
             raise HTTPException(status_code=408, detail="命令执行超时")
@@ -432,6 +452,29 @@ async def api_get_session_state(session_id: str):
     state["session_id"] = session_id
     state["connected"] = session.is_connected
     return state
+
+
+@app.post("/api/sessions/states")
+async def api_get_session_states(session_ids: List[str]):
+    """批量获取多个终端状态（合并为单一 HTTP 请求，减少轮询开销）
+
+    优化：原前端每个终端每 3 秒单独轮询 /api/sessions/{id}/state，
+    5 个终端 = 每秒约 1.7 次 HTTP 请求；改为一次 POST 批量获取。
+    """
+    results = {}
+    for sid in session_ids:
+        session = session_manager.get_session(sid)
+        if not session:
+            results[sid] = {"state": "not_found"}
+            continue
+        if not session.has_shell:
+            results[sid] = {"state": "no_shell"}
+            continue
+        state = session.get_terminal_state()
+        state["session_id"] = sid
+        state["connected"] = session.is_connected
+        results[sid] = state
+    return {"states": results}
 
 
 @app.get("/api/sessions/{session_id}/logs")
@@ -899,15 +942,23 @@ async def api_sftp_delete(session_id: str, req: SftpDeleteRequest):
 
 @app.post("/api/sftp/{session_id}/upload")
 async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = File(...)):
-    """上传文件到远程服务器"""
+    """上传文件到远程服务器（multipart，支持二进制文件）
+
+    优化：原代码将 bytes decode 为 utf-8 字符串后写入，
+    二进制文件（图片/压缩包/可执行文件）会被损坏。
+    改为直接写入 bytes，通过 write_file_bytes 方法。
+    """
     session = session_manager.get_session(session_id)
     if not session or not session.is_connected:
         raise HTTPException(status_code=404, detail="会话不存在或未连接")
     try:
         content = await file.read()
-        if isinstance(content, bytes):
-            content = content.decode("utf-8", errors="replace")
         await session.write_file(remote_path, content)
+        await event_bus.publish(
+            "sftp_upload", "api",
+            f"[{session_id}] SFTP 上传: {remote_path} ({len(content)} bytes)",
+            session_id=session_id, path=remote_path, size=len(content)
+        )
         return {"status": "uploaded", "path": remote_path, "size": len(content)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
@@ -1046,6 +1097,10 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     async def read_output():
         try:
             while True:
+                # 会话级通知（shell 异常等）优先推送，发送后清空（take 只取一次）
+                notice = session.take_shell_notice()
+                if notice:
+                    await websocket.send_json({"type": "info", "data": notice})
                 data = await listener.get()
                 await websocket.send_json({"type": "output", "data": data})
         except Exception:
@@ -1053,36 +1108,10 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
 
     read_task = asyncio.create_task(read_output())
 
-    # 定期检测连接状态（每 15 秒检测一次，如果断开自动重连）
-    async def monitor_connection():
-        try:
-            while True:
-                await asyncio.sleep(15)
-                # 检测 SSH 连接是否活着
-                if not session.is_alive():
-                    print(f"[WebSocket] 检测到 SSH 连接断开，尝试自动重连: {session_id}")
-                    try:
-                        if await session.reconnect():
-                            print(f"[WebSocket] 自动重连成功: {session_id}")
-                        else:
-                            print(f"[WebSocket] 自动重连失败: {session_id}")
-                    except Exception as e:
-                        print(f"[WebSocket] 重连异常: {e}")
-                # 检测 shell 是否活着（如果有 shell）
-                elif session._has_shell and not session.is_shell_alive():
-                    # 不自动重启 shell：重启会中断正在运行的全屏程序（vi/vim 等），
-                    # 且 shell 可能只是被检测逻辑误判；只通知前端，由用户决定是否重连
-                    print(f"[WebSocket] 检测到 shell 状态异常，不自动重启: {session_id}")
-                    try:
-                        await websocket.send_json({"type": "info", "data": "检测到终端 shell 状态异常，如需恢复请点击顶部重连"})
-                    except Exception:
-                        pass
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            print(f"[WebSocket] 连接监控异常: {e}")
-
-    monitor_task = asyncio.create_task(monitor_connection())
+    # 全局连接监控已由 SessionManager 统一管理（start_global_monitor），
+    # 不再为每个 WebSocket 连接创建独立监控协程
+    session_manager.start_global_monitor()
+    monitor_task = None  # 保留变量名以兼容 finally 块的 cancel
 
     # 处理单条消息的函数
     async def handle_message(raw: str):
@@ -1140,15 +1169,17 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
             pass
     finally:
         read_task.cancel()
-        monitor_task.cancel()
+        if monitor_task:
+            monitor_task.cancel()
         try:
             await read_task
         except (asyncio.CancelledError, Exception):
             pass
-        try:
-            await monitor_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        if monitor_task:
+            try:
+                await monitor_task
+            except (asyncio.CancelledError, Exception):
+                pass
         # 移除监听器，但不停止输出读取器（可能有其他监听器如 CLI 注入捕获）
         session.remove_output_listener(listener)
         # 注意：不关闭 session，由后端统一维护，24小时无活动自动清理

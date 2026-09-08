@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import type { Host, HostType } from '../types'
 
 interface Props {
@@ -22,7 +22,7 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
 }
 
-export function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -230,4 +230,4 @@ export function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, 
       )}
     </div>
   )
-}
+})

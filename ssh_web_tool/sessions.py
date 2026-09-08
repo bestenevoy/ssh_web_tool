@@ -12,6 +12,8 @@ import uuid
 import time
 import re
 import threading
+import logging
+from logging.handlers import TimedRotatingFileHandler
 from typing import Dict, List, Optional, Tuple
 import asyncssh
 
@@ -32,6 +34,10 @@ class SSHSession:
 
     # 日志目录
     LOG_DIR = os.path.join(get_data_dir(), "logs")
+    # 日志轮转保留天数
+    LOG_BACKUP_DAYS = 7
+    # 已创建的 logger 缓存（避免同一 session_id 重复创建 handler）
+    _logger_cache: Dict[str, logging.Logger] = {}
 
     def __init__(self, session_id: str, host: str, port: int, username: str,
                  host_id: str = "", terminal_name: str = ""):
@@ -54,9 +60,9 @@ class SSHSession:
         self._output_listeners: List[asyncio.Queue] = []
         self._output_buffer: List[str] = []  # 终端输出缓冲区（用于状态检测）
         self._reader_task: Optional[asyncio.Task] = None
-        # 日志持久化
+        # 日志持久化：使用 logging 模块 + TimedRotatingFileHandler（按天轮转，保留 7 天）
         self._log_file = os.path.join(self.LOG_DIR, f"{session_id}.log")
-        self._log_fp = None  # 日志文件句柄
+        self._logger = self._get_or_create_logger(session_id)
         # 待处理的终端尺寸（resize 消息在 PTY 创建前到达时保存）
         self._pending_size: Optional[Tuple[int, int]] = None
         # resize 事件：PTY 创建后等待第一个 resize 消息，确保 shell 第一帧输出使用正确尺寸
@@ -75,6 +81,22 @@ class SSHSession:
         self._echo_buf = ''          # 输出行缓冲（可能被数据块截断，留到下一块补齐）
         self._echo_last_cmd = ''     # 最近一次解析记录的命令（去重防重复记录）
         self._echo_last_time = 0.0   # 最近一次记录时间
+        # 状态检测缓存：增量清洗后的缓冲区（避免每次 get_terminal_state 全量正则）
+        self._clean_buffer = ''      # 已清洗 ANSI 的输出缓冲区（与 _output_buffer 同步）
+        self._clean_buffer_dirty = False  # 标记是否有新输出需要重新计算状态
+        # 会话级通知（如 shell 异常提示）：由全局监控协程写入，WebSocket read_output 循环取出推送。
+        # 不直接走 _broadcast_output，避免提示文本混入 run_command 的注入捕获/echo 解析
+        self._shell_notice: Optional[str] = None
+
+    def set_shell_notice(self, msg: str) -> None:
+        """设置会话级通知（全局监控协程调用）"""
+        self._shell_notice = msg
+
+    def take_shell_notice(self) -> Optional[str]:
+        """取出并清空会话级通知（WebSocket read_output 循环调用，只取一次）"""
+        n = self._shell_notice
+        self._shell_notice = None
+        return n
 
     @property
     def is_connected(self) -> bool:
@@ -300,7 +322,15 @@ class SSHSession:
         if total > 8000:
             combined = ''.join(self._output_buffer)
             self._output_buffer = [combined[-8000:]]
-        # 日志持久化：追加写入文件
+            # 缓冲区压缩后同步更新清洗缓冲区
+            self._clean_buffer = self._clean_ansi(combined)[-8000:]
+        else:
+            # 增量清洗：只清洗新增数据块，避免每次全量正则
+            self._clean_buffer += self._clean_ansi(data)
+            if len(self._clean_buffer) > 8000:
+                self._clean_buffer = self._clean_buffer[-8000:]
+        self._clean_buffer_dirty = True
+        # 日志持久化：通过 logging 模块写入
         self._write_log(data)
         # 广播给所有监听器：put_nowait 不阻塞；队列满时丢最旧保最新，
         # 避免慢监听器（前端 ws 阻塞）拖住整个广播链（日志/echo 解析/其他监听器）
@@ -310,14 +340,42 @@ class SSHSession:
             except asyncio.QueueFull:
                 self._drop_oldest(q, data)
 
+    @classmethod
+    def _get_or_create_logger(cls, session_id: str) -> logging.Logger:
+        """获取或创建会话专属 logger（带 TimedRotatingFileHandler，按天轮转保留 7 天）
+
+        使用 logging 模块代替手动 open()+write()+flush()：
+        - logging 模块内置缓冲，不需要每次 flush
+        - TimedRotatingFileHandler 自动按天轮转，超过 7 天的日志自动删除
+        - 线程安全
+        """
+        if session_id in cls._logger_cache:
+            return cls._logger_cache[session_id]
+        os.makedirs(cls.LOG_DIR, exist_ok=True)
+        log_file = os.path.join(cls.LOG_DIR, f"{session_id}.log")
+        logger = logging.getLogger(f"ssh_session.{session_id}")
+        logger.setLevel(logging.INFO)
+        # 避免重复添加 handler（logger 会被全局注册）
+        if not logger.handlers:
+            handler = TimedRotatingFileHandler(
+                log_file,
+                when='midnight',       # 每天午夜轮转
+                interval=1,
+                backupCount=cls.LOG_BACKUP_DAYS,  # 保留 7 天
+                encoding='utf-8',
+            )
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            handler.setLevel(logging.INFO)
+            logger.addHandler(handler)
+            # 不向上传播到 root logger（避免重复输出到 server.log）
+            logger.propagate = False
+        cls._logger_cache[session_id] = logger
+        return logger
+
     def _write_log(self, data: str):
-        """将输出追加写入日志文件"""
+        """将终端输出写入日志（通过 logging 模块，自动缓冲 + 按天轮转）"""
         try:
-            os.makedirs(self.LOG_DIR, exist_ok=True)
-            if self._log_fp is None:
-                self._log_fp = open(self._log_file, 'a', encoding='utf-8')
-            self._log_fp.write(data)
-            self._log_fp.flush()
+            self._logger.info(data)
         except Exception:
             pass  # 日志写入失败不影响主流程
 
@@ -463,6 +521,8 @@ class SSHSession:
         # 使用独立的输出监听器捕获新输出（不受历史输出影响）
         listener = self.add_output_listener()
         captured_parts = []
+        # 增量清洗后的文本（避免每次新输出都全量拼接+清洗 captured_parts）
+        cleaned_recent = ''
 
         try:
             # 发送命令
@@ -482,14 +542,18 @@ class SSHSession:
                     has_output = True
                     last_output_time = time.time()
 
-                    # 多提示符检测：匹配任意一种已知提示符即认为完成
-                    recent = self._clean_ansi(''.join(captured_parts)[-2000:])
-                    if self._match_any_prompt(recent):
+                    # 增量清洗：只清洗新增的 data 块，与之前结果拼接
+                    # 原代码每次都 ''.join(captured_parts)[-2000:] + 全量 _clean_ansi
+                    cleaned_recent += self._clean_ansi(data)
+                    if len(cleaned_recent) > 2000:
+                        cleaned_recent = cleaned_recent[-2000:]
+                    if self._match_any_prompt(cleaned_recent):
                         await asyncio.sleep(0.15)  # 确保提示符后内容写入
                         # 读取队列中剩余的输出
                         while not listener.empty():
                             try:
-                                captured_parts.append(listener.get_nowait())
+                                extra = listener.get_nowait()
+                                captured_parts.append(extra)
                             except Exception:
                                 break
                         break
@@ -571,12 +635,12 @@ class SSHSession:
         """
         获取终端当前状态（基于输出缓冲区最后几行分析）
         判断是否在 Python/MySQL/分页器/普通 shell 等交互模式
+
+        优化：使用 _broadcast_output 中增量维护的 _clean_buffer 缓存，
+        避免每次调用都对 8000 字符缓冲区做 3 次正则替换。
         """
-        buffer_text = ''.join(self._output_buffer)
-        # 去除 ANSI 转义序列（颜色、光标移动等），再做状态分析
-        clean_text = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', buffer_text)
-        clean_text = re.sub(r'\x1b\][\s\S]*?(\x07|\x1b\\)', '', clean_text)  # OSC 序列
-        clean_text = re.sub(r'\x1b[=><]', '', clean_text)  # 其他转义
+        # 直接使用增量清洗后的缓冲区（在 _broadcast_output 中维护）
+        clean_text = self._clean_buffer
 
         lines = clean_text.split('\n')
         # 去掉末尾空行（输出通常以 \n 结尾，split 后最后一个元素是空字符串）
@@ -694,7 +758,12 @@ class SSHSession:
         return self._sftp
 
     async def list_directory(self, path: str = "/") -> List[dict]:
-        """列出目录内容"""
+        """列出目录内容
+
+        优化：直接使用 readdir 返回的 item.attrs 字段，不再逐文件 stat。
+        原 N+1 问题：readdir 已返回文件属性，却对每个文件再发一次 stat 请求，
+        100 个文件 = 101 次 SFTP 往返；现在只需 1 次 readdir。
+        """
         sftp = await self.get_sftp()
         try:
             items = await sftp.readdir(path)
@@ -704,13 +773,13 @@ class SSHSession:
         result = []
         for item in items:
             try:
-                stat = await sftp.stat(os.path.join(path, item.filename))
+                attrs = item.attrs
                 result.append({
                     "name": item.filename,
-                    "type": "dir" if stat.type == 2 else "file",  # 2=directory
-                    "size": stat.size or 0,
-                    "mtime": stat.mtime or 0,
-                    "mode": oct(stat.permissions) if stat.permissions else "",
+                    "type": "dir" if (attrs.type or 0) == 2 else "file",  # 2=directory
+                    "size": attrs.size or 0,
+                    "mtime": attrs.mtime or 0,
+                    "mode": oct(attrs.permissions) if attrs.permissions else "",
                 })
             except Exception:
                 result.append({
@@ -969,20 +1038,47 @@ class SSHSession:
             self.conn = None
         self._connected = False
         self._has_shell = False
-        # 关闭日志文件
-        if self._log_fp:
-            try:
-                self._log_fp.close()
-            except Exception:
-                pass
-            self._log_fp = None
+        # 关闭日志 handler 并清理 logger 缓存
+        self._close_logger()
+
+    def _close_logger(self):
+        """关闭会话专属 logger 的 handler 并清理缓存"""
+        sid = self.session_id
+        logger = self.__class__._logger_cache.pop(sid, None)
+        if logger:
+            for h in logger.handlers[:]:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+                logger.removeHandler(h)
 
 
 class SessionManager:
-    """SSH 会话池（后端统一维护所有连接，前端断开不影响）"""
+    """SSH 会话池（后端统一维护所有连接，前端断开不影响）
+
+    优化：维护 host_id -> List[session_id] 反向索引，
+    get_sessions_by_host / get_host_terminal_count 从 O(N) 遍历降为 O(1) 查找。
+    """
 
     def __init__(self):
         self._sessions: Dict[str, SSHSession] = {}
+        # 反向索引：host_id -> set of session_id（加速 get_sessions_by_host / get_host_terminal_count）
+        self._host_index: Dict[str, set] = {}
+
+    def _add_to_index(self, session: SSHSession):
+        """将会话加入反向索引"""
+        if session.host_id:
+            self._host_index.setdefault(session.host_id, set()).add(session.session_id)
+
+    def _remove_from_index(self, session: SSHSession):
+        """从反向索引移除会话"""
+        if session.host_id:
+            sids = self._host_index.get(session.host_id)
+            if sids:
+                sids.discard(session.session_id)
+                if not sids:
+                    del self._host_index[session.host_id]
 
     def create_session(self, host: str, port: int, username: str,
                        host_id: str = "", terminal_name: str = "") -> str:
@@ -993,6 +1089,7 @@ class SessionManager:
             terminal_name = self._get_next_terminal_name(host_id)
         session = SSHSession(session_id, host, port, username, host_id, terminal_name)
         self._sessions[session_id] = session
+        self._add_to_index(session)
         return session_id
 
     def create_session_with_id(self, session_id: str, host: str, port: int, username: str,
@@ -1004,6 +1101,7 @@ class SessionManager:
             terminal_name = self._get_next_terminal_name(host_id)
         session = SSHSession(session_id, host, port, username, host_id, terminal_name)
         self._sessions[session_id] = session
+        self._add_to_index(session)
         return session_id
 
     def _get_next_terminal_name(self, host_id: str) -> str:
@@ -1019,8 +1117,11 @@ class SessionManager:
         return self._sessions.get(session_id)
 
     def get_sessions_by_host(self, host_id: str) -> List[SSHSession]:
-        """获取某主机的所有会话"""
-        return [s for s in self._sessions.values() if s.host_id == host_id]
+        """获取某主机的所有会话（通过反向索引 O(1) 查找）"""
+        sids = self._host_index.get(host_id)
+        if not sids:
+            return []
+        return [self._sessions[sid] for sid in sids if sid in self._sessions]
 
     def get_active_terminals(self) -> List[SSHSession]:
         """获取所有有交互式终端的活跃会话
@@ -1035,10 +1136,16 @@ class SessionManager:
         return result
 
     def get_host_terminal_count(self, host_id: str) -> int:
-        """获取某主机的活跃终端数（检测真实连接状态，不只是标志位）"""
+        """获取某主机的活跃终端数（检测真实连接状态，不只是标志位）
+        优化：通过反向索引直接获取该主机会话，避免遍历全部会话
+        """
+        sids = self._host_index.get(host_id)
+        if not sids:
+            return 0
         count = 0
-        for s in self._sessions.values():
-            if s.host_id == host_id and s.is_alive():
+        for sid in sids:
+            s = self._sessions.get(sid)
+            if s and s.is_alive():
                 count += 1
         return count
 
@@ -1060,10 +1167,54 @@ class SessionManager:
             for s in self._sessions.values()
         ]
 
+    # 全局连接监控协程（单例，避免每个 WebSocket 连接创建一个监控任务）
+    _monitor_task: Optional[asyncio.Task] = None
+
+    def start_global_monitor(self):
+        """启动全局连接监控协程（只启动一次，检查所有会话）
+
+        优化：原每个 WebSocket 连接创建一个 monitor_task，N 个连接 = N 个监控协程；
+        改为全局单例，每 15 秒遍历所有会话检查连接和 shell 状态。
+        shell 异常通知通过 _broadcast_output 推送给所有监听者。
+        """
+        if self._monitor_task is not None and not self._monitor_task.done():
+            return  # 已在运行
+        self._monitor_task = asyncio.create_task(self._global_monitor_loop())
+
+    async def _global_monitor_loop(self):
+        """全局监控循环：每 15 秒检查所有会话的连接和 shell 状态"""
+        try:
+            while True:
+                await asyncio.sleep(15)
+                for session in list(self._sessions.values()):
+                    try:
+                        if not session.is_alive():
+                            print(f"[Monitor] 检测到 SSH 连接断开，尝试自动重连: {session.session_id}")
+                            try:
+                                if await session.reconnect():
+                                    print(f"[Monitor] 自动重连成功: {session.session_id}")
+                                else:
+                                    print(f"[Monitor] 自动重连失败: {session.session_id}")
+                            except Exception as e:
+                                print(f"[Monitor] 重连异常: {e}")
+                        elif session._has_shell and not session.is_shell_alive():
+                            print(f"[Monitor] 检测到 shell 状态异常: {session.session_id}")
+                            # 设置会话级通知（不通过 _broadcast_output！否则提示文本会进入
+                            # run_command 的注入捕获监听器/echo 解析缓冲，污染命令返回的 stdout）
+                            # 由各 WebSocket 的 read_output 循环 take 后单独推送给前端
+                            session.set_shell_notice("检测到终端 shell 状态异常，如需恢复请点击顶部重连")
+                    except Exception as e:
+                        print(f"[Monitor] 监控异常 {session.session_id}: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[Monitor] 全局监控异常: {e}")
+
     async def remove_session(self, session_id: str) -> bool:
         """移除并关闭会话"""
         session = self._sessions.pop(session_id, None)
         if session:
+            self._remove_from_index(session)
             await session.close()
             return True
         return False
@@ -1076,6 +1227,7 @@ class SessionManager:
         """
         session = self._sessions.pop(session_id, None)
         if session:
+            self._remove_from_index(session)
             session._connected = False
             session.last_active = time.time()
             return True

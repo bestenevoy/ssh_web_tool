@@ -54,6 +54,12 @@ export const api = {
       body: JSON.stringify({ command, timeout }),
     }),
   getSessionState: (session_id: string) => request<TerminalState>(`/api/sessions/${session_id}/state`),
+  // 批量获取终端状态（减少 HTTP 请求次数）
+  getBatchSessionStates: (session_ids: string[]) =>
+    request<{ states: Record<string, TerminalState & { state?: string }> }>('/api/sessions/states', {
+      method: 'POST',
+      body: JSON.stringify(session_ids),
+    }),
   getHistoryLogs: (session_id: string, offset = 0, limit = 2000) =>
     request<{ session_id: string; offset: number; limit: number; content: string }>(
       `/api/sessions/${session_id}/logs?offset=${offset}&limit=${limit}`
