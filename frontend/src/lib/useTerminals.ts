@@ -258,10 +258,13 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     const buf = inst.input_buffer
     const cur = inst.input_cursor
 
-    // 回车：清空输入缓冲区。
-    // 历史记录不再由前端键盘输入 buffer 记录——那会丢失 Tab 补全/历史翻查后的
-    // 真实命令；改由后端解析终端回显行统一记录（见 sessions.py _parse_echo_line）。
+    // 回车：先由前端按键盘输入即时记录（兜底，保证任何 PS1 环境下都有历史），
+    // 后端随后解析终端回显行（含 Tab 补全/历史翻查后的真实命令）：
+    // record_echo_command 会清理 3 秒内的前缀残留（如 cd /va）并去重，以后端为准
     if (data === '\r' || data === '\n' || data === '\r\n') {
+      if (buf.trim()) {
+        api.recordCommand(buf.trim()).catch(() => {})
+      }
       inst.input_buffer = ''
       inst.input_cursor = 0
       return

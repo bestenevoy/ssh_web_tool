@@ -34,14 +34,6 @@ function App() {
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
   const [quickCommandModalOpen, setQuickCommandModalOpen] = useState(false)
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null)
-  const [showPasswordPlaintext, setShowPasswordPlaintext] = useState(false)
-
-  // 获取全局配置（如密码是否明文展示）
-  useEffect(() => {
-    api.getConfig()
-      .then((cfg) => setShowPasswordPlaintext(!!cfg.show_password_plaintext))
-      .catch(() => setShowPasswordPlaintext(false))
-  }, [])
 
   const { settings, toggleTheme, setFontFamily, setFontSize } = useSettings()
   const terminals = useTerminals(settings)
@@ -218,10 +210,11 @@ function App() {
 
   const handleCopyConnection = useCallback((host: Host) => {
     const cmd = `ssh ${host.username}@${host.host} -p ${host.port}`
-    // 密码已脱敏，不下发到前端，复制时只带连接命令
-    const text = `${cmd}\n（密码已脱敏，不在前端展示）`
+    const text = host.password
+      ? `${cmd}\npassword: ${host.password}`
+      : cmd
     navigator.clipboard.writeText(text)
-      .then(() => alert('已复制连接信息（密码已脱敏，不在前端展示）'))
+      .then(() => alert('已复制连接信息'))
       .catch(() => {
         const ta = document.createElement('textarea')
         ta.value = text
@@ -586,7 +579,6 @@ function App() {
         host={editingHost}
         groups={groups}
         hostTypes={hostTypes}
-        showPasswordPlaintext={showPasswordPlaintext}
         onClose={() => { setModalOpen(false); setEditingHost(null); focusActiveTerminal() }}
         onSave={handleSaveHost}
         onAddGroup={handleAddGroup}

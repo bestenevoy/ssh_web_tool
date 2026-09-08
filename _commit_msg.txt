@@ -1,12 +1,11 @@
-﻿fix: 会话恢复误报"已恢复已有终端会话"（shell 已死但本地标志仍在）
+﻿fix: 修复历史命令记录缺失/脏记录，恢复密码明文展示
 
-- 根因: websocket_ssh 恢复判断只看 _has_shell + process is not None（本地标志），
-  SSH transport 还活着但 shell channel 已死（远端 shell 被 kill/网络异常窗口期）时，
-  误报"已恢复已有终端会话"，实际输入报 channel not open
-- 修复:
-  - is_alive()/is_shell_alive() 增加 channel 层检查（asyncssh process._channel.is_closing()）
-  - WS 恢复分支: is_shell_alive() 才报"已恢复"；否则提示并 restart_shell() 重启
-  - get_active_terminals() 按真实存活过滤（外部镜像会话除外），前端不恢复已死会话
-- 实测: 远端 kill -9 $$ 杀 shell 后重连 → 显示"检测到终端已断开，正在重新启动 shell..."，
-  新 shell 可用；不再误报"已恢复"
-- docs: 新增踩坑记录（本地标志 ≠ 真实状态）
+- 前端回车恢复即时记录（兜底）+ 后端回显解析为主：
+  record_echo_command 清理 3 秒内前缀残留（cd /va vs cd /var）并去重
+- 提示符解析：循环剥离一行内多个提示符（阿里云 shell 清屏重绘），
+  自定义 PS1 宽松兜底（行首到第一个 $/#），宽松失败返回空串
+- 恢复密码明文展示：删除 show_password_plaintext 脱敏开关，
+  后端明文下发（_sanitize_host 保留原值），前端密码框恢复明文，
+  复制连接信息包含密码
+- docs: 补录第 32 条教训（回显解析空白 + 多提示符脏记录），
+  更新密码安全说明

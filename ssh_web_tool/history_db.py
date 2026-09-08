@@ -107,6 +107,42 @@ async def record_command(command: str) -> None:
         await conn.commit()
 
 
+async def record_echo_command(cmd: str) -> None:
+    """
+    记录从终端回显解析出的"实际执行命令"（权威来源，含 Tab 补全/历史翻查结果）：
+    1. 先删除 3 秒内记录的该命令的严格前缀残留（前端键盘输入版，如 cd /va vs cd /var）
+    2. 3 秒内已记录同命令则跳过（前端/CLI 已即时记录过，避免重复计数）
+    3. 否则正常记录
+    """
+    cmd = clean_command(cmd)
+    if not cmd or len(cmd) > 500:
+        return
+    now = time.time()
+    async with aiosqlite.connect(get_db_path()) as conn:
+        # 1. 清理前缀残留：删除 3 秒内、更短、且是 cmd 严格前缀的命令
+        await conn.execute(
+            "DELETE FROM command_history WHERE command != ? AND last_used > ? "
+            "AND length(command) < length(?) AND substr(?, 1, length(command)) = command",
+            (cmd, now - 3, cmd, cmd),
+        )
+        # 2. 去重：3 秒内已记录同命令则跳过（前端/CLI 已记过）
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM command_history WHERE command = ? AND last_used > ?",
+            (cmd, now - 3),
+        )
+        cnt = (await cur.fetchone())[0]
+        if cnt > 0:
+            await conn.commit()
+            return
+        # 3. 记录
+        await conn.execute(
+            "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
+            "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
+            (cmd, now),
+        )
+        await conn.commit()
+
+
 async def search_commands(keyword: str = "", limit: int = 50, include_ignored: bool = False) -> List[Dict]:
     """搜索命令，按使用频次降序（频次相同按最后使用时间降序）；默认过滤已忽略"""
     async with aiosqlite.connect(get_db_path()) as conn:

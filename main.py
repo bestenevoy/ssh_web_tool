@@ -211,11 +211,8 @@ async def index():
 
 @app.get("/api/config")
 async def api_get_config():
-    """返回前端展示所需的全局配置（如密码是否明文展示）"""
-    cfg = load_config()
-    return {
-        "show_password_plaintext": bool(cfg.get("show_password_plaintext", False)),
-    }
+    """返回前端展示所需的全局配置"""
+    return {}
 
 
 # ============ SSH 会话 API ============
@@ -430,12 +427,10 @@ async def api_get_session_logs(session_id: str, offset: int = 0, limit: int = 20
 # ============ 主机配置 API（持久化） ============
 
 def _sanitize_host(h: dict) -> dict:
-    """脱敏主机信息：密码/私钥等敏感字段不下发到前端（前端只作展示与编辑，不保存密码明文）"""
+    """主机信息（本地工具：密码等敏感字段明文下发，便于前端展示/编辑确认）"""
     out = dict(h)
     for key in ("password", "mgmt_password", "private_key", "passphrase"):
-        has = bool((h.get(key) or "").strip())
-        out[key] = ""
-        out[f"has_{key}"] = has
+        out[f"has_{key}"] = bool((h.get(key) or "").strip())
     return out
 
 

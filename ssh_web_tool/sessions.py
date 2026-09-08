@@ -189,17 +189,40 @@ class SSHSession:
 
     @classmethod
     def _extract_echo_command(cls, line: str) -> str:
-        """从一行输出中提取提示符之后的命令文本；非提示符行返回空串"""
+        """从一行输出中提取提示符之后的命令文本；非提示符行返回空串
+        - 已知提示符**循环剥离**：阿里云等 shell 每次 readline 重绘都会清屏重写，
+          一行内可能出现多个连续提示符（root@host:~# root@host:~# cmd）
+        - 自定义 PS1 宽松兜底（仅当未识别出已知提示符时）：行首到第一个 $/# 之间
+          为提示符标识（如 root@host#、[user@host ~]$），其后是命令；
+          宽松匹配失败 = 普通输出行，不记录"""
         s = line.strip()
         if not s:
-            return ''
-        m = cls._ECHO_PROMPT_RE.match(s)
-        if not m:
             return ''
         # python 续行提示符(...)：是上一命令的延续内容，不作为独立命令记录
         if s.startswith('...'):
             return ''
-        cmd = s[m.end():].strip()
+        # 1. 精确已知提示符：循环剥离（readline 清屏重绘可能一行内多个提示符）
+        stripped = False
+        cmd = s
+        while True:
+            m = cls._ECHO_PROMPT_RE.match(cmd)
+            if not m:
+                break
+            stripped = True
+            rest = cmd[m.end():]
+            if not rest.strip():
+                return ''  # 只剩提示符（空命令回车）
+            cmd = rest
+        # 2. 未识别出已知提示符时，才尝试自定义 PS1 宽松匹配；失败 = 普通输出行
+        if not stripped:
+            m2 = re.match(r'^[\[\]~\w@.\- :/\\]*?[#$]\s*', cmd)
+            if not m2:
+                return ''
+            rest2 = cmd[m2.end():].strip()
+            if not rest2:
+                return ''  # 提示符后无内容（空命令回车）
+            cmd = rest2
+        cmd = cmd.strip()
         if not cmd or len(cmd) > 500:
             return ''
         return cmd
@@ -246,10 +269,12 @@ class SSHSession:
             pass
 
     async def _record_echo(self, cmd: str):
-        """异步记录回显命令（不阻塞输出广播循环）"""
+        """异步记录回显命令（不阻塞输出广播循环）
+        record_echo_command 内部：清理键盘输入版前缀残留（如 cd /va）、
+        3 秒内同命令去重（前端/CLI 已即时记录过则不重复）"""
         try:
-            from .history_db import record_command
-            await record_command(cmd)
+            from .history_db import record_echo_command
+            await record_echo_command(cmd)
         except Exception:
             pass
 

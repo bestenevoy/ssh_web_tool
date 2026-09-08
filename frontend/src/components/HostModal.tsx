@@ -6,13 +6,12 @@ interface Props {
   host: Host | null
   groups: string[]
   hostTypes: HostType[]
-  showPasswordPlaintext?: boolean  // 全局配置：是否明文展示密码（默认 false=掩码）
   onClose: () => void
   onSave: (data: Partial<Host>) => void
   onAddGroup?: (name: string) => void
 }
 
-export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext = false, onClose, onSave, onAddGroup }: Props) {
+export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAddGroup }: Props) {
   const [name, setName] = useState('')
   const [hostAddr, setHostAddr] = useState('')
   const [port, setPort] = useState(22)
@@ -116,7 +115,7 @@ export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext
       mgmt_port: mgmtPort,
       mgmt_username: mgmtUsername,
     }
-    // 编辑模式下密码留空表示不修改（后端不回显明文，也不会下发明文）
+    // 编辑模式下密码留空表示不修改（明文回显，修改后提交新值）
     if (!isEdit || password) payload.password = password
     if (!isEdit || mgmtPassword) payload.mgmt_password = mgmtPassword
     onSave({
@@ -181,7 +180,7 @@ export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext
           <div className="form-group">
             <label>SSH 密码{host?.has_password ? '（已设置）' : ''}</label>
             <input
-              type={showPasswordPlaintext ? 'text' : 'password'}
+              type='text'
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={host ? '留空则不修改密码' : '如：password123'}
@@ -257,7 +256,7 @@ export function HostModal({ open, host, groups, hostTypes, showPasswordPlaintext
             <div className="form-group">
               <label>管理密码{host?.has_mgmt_password ? '（已设置）' : ''}</label>
               <input
-                type={showPasswordPlaintext ? 'text' : 'password'}
+                type='text'
                 value={mgmtPassword}
                 onChange={(e) => setMgmtPassword(e.target.value)}
                 placeholder={host ? '留空则不修改密码' : '如：admin123'}

@@ -93,7 +93,6 @@ DEFAULT_CONFIG: Dict = {
         "auto_find_free_port": True,    # 端口被占用时自动寻找空闲端口
     },
     "open_browser": True,               # 启动后延迟自动打开浏览器
-    "show_password_plaintext": False,   # 前端是否明文展示密码（false=掩码显示，true=明文显示）
 }
 
 
@@ -148,8 +147,6 @@ def load_config() -> Dict:
                     cfg["server"][key] = value
         if "open_browser" in user_cfg and isinstance(user_cfg["open_browser"], bool):
             cfg["open_browser"] = user_cfg["open_browser"]
-        if "show_password_plaintext" in user_cfg and isinstance(user_cfg["show_password_plaintext"], bool):
-            cfg["show_password_plaintext"] = user_cfg["show_password_plaintext"]
     except (json.JSONDecodeError, OSError) as e:
         print(f"[config] 配置文件解析失败，使用默认配置: {e}")
     return cfg
