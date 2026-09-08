@@ -237,7 +237,7 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
               <div key={idx} data-index={idx}>
                 <div className="history-result-item ignored-item" onClick={() => setSelectedIndex(idx)}>
                   <span className="history-type-badge ignored">🚫已忽略</span>
-                  <span className="history-cmd-text">{item.command}</span>
+                  <span className="history-cmd-text" title={item.command}>{item.command}</span>
                   <span className="history-cmd-count" title={`使用 ${item.count} 次`}>
                     ×{item.count}
                   </span>
@@ -335,13 +335,13 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
                           <span className={`history-type-badge quick${item.cmd_type === 'param' ? ' param' : ''}`} title={item.cmd_type === 'param' ? '带参数指令：输入到终端后编辑 {args} 再执行' : '直接执行'}>
                             {item.cmd_type === 'param' ? '⌨️快捷' : '⚡快捷'}
                           </span>
-                          <span className="history-quick-name">{item.name}</span>
-                          <span className="history-cmd-text">{item.command}</span>
+                          <span className="history-quick-name" title={item.name}>{item.name}</span>
+                          <span className="history-cmd-text" title={item.command}>{item.command}</span>
                         </>
                       ) : (
                         <>
                           <span className="history-type-badge history">🕐历史</span>
-                          <span className="history-cmd-text">{item.command}</span>
+                          <span className="history-cmd-text" title={item.command}>{item.command}</span>
                           <span className="history-cmd-count" title={`使用 ${item.count} 次`}>
                             ×{item.count}
                           </span>

@@ -258,11 +258,10 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     const buf = inst.input_buffer
     const cur = inst.input_cursor
 
-    // 回车：记录当前输入行（实际执行的完整命令）到后端全局历史，清空缓冲区
+    // 回车：清空输入缓冲区。
+    // 历史记录不再由前端键盘输入 buffer 记录——那会丢失 Tab 补全/历史翻查后的
+    // 真实命令；改由后端解析终端回显行统一记录（见 sessions.py _parse_echo_line）。
     if (data === '\r' || data === '\n' || data === '\r\n') {
-      if (buf.trim()) {
-        api.recordCommand(buf.trim()).catch(() => {})
-      }
       inst.input_buffer = ''
       inst.input_cursor = 0
       return

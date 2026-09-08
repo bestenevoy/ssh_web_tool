@@ -1,7 +1,11 @@
-﻿fix: Ctrl+V 粘贴触发两次（xterm 原生 paste 事件 + term.paste 重复）
+﻿feat: 历史命令改由后端解析终端回显记录（记录实际执行命令，含 Tab 补全）+ 搜索显示优化
 
-- 根因: attachCustomKeyEventHandler 返回 false 时，xterm 的 _keyDown 只是 return，
-  并未 preventDefault；浏览器默认行为继续生成原生 paste 事件，xterm textarea 的
-  handlePasteEvent 监听器把剪贴板内容再发送一次，加上自定义的 term.paste 共两次
-- 修复: Ctrl+V 分支先 e.preventDefault() 阻断浏览器默认行为（不再产生原生 paste 事件），
-  只保留 term.paste 一次
+- 问题: 前端只记录键盘输入，Tab 补全/方向键历史翻查/Ctrl+R 选中后，shell 侧写入输出流
+  的补全内容前端拿不到，历史里存的是未补全的输入
+- 修复: 后端从输出流解析"提示符之后到换行前的文本"= 实际执行的命令，统一 record_command
+  - 保留 \r 判断 Tab 补全行内覆盖（取最后一次 \r 后内容）
+  - ... python 续行提示符不提取；3 秒内同命令去重（防与前端/CLI 注入重复记录）
+  - 异步记录不阻塞输出广播
+- 前端: 回车不再用键盘输入 buffer 记录（交给后端回显解析）；快捷命令执行仍即时记录
+- 搜索显示: 快捷命令名称完整显示（可换行）；所有命令/名称加 title 悬浮显示完整内容
+- docs: 新增踩坑记录（前端记录历史丢失 Tab 补全）

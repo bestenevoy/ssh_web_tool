@@ -327,17 +327,16 @@
   color: #4caf50;
 }
 
-/* 快捷命令名称 */
+/* 快捷命令名称：完整显示（不截断），过长时允许换行；命令内容太长则鼠标悬浮查看 */
 .history-quick-name {
   font-size: 12px;
   font-weight: 600;
   color: #ff9800;
   margin-right: 10px;
   flex-shrink: 0;
-  max-width: 100px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* 保存为快捷命令按钮 */

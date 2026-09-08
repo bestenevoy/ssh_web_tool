@@ -71,6 +71,10 @@ class SSHSession:
         self._reconnecting = False
         self._reconnect_count = 0
         self._max_reconnect = 5  # 最大自动重连次数
+        # 命令回显解析（从终端输出流提取"提示符后的实际命令"，含 Tab 补全/历史翻查结果）
+        self._echo_buf = ''          # 输出行缓冲（可能被数据块截断，留到下一块补齐）
+        self._echo_last_cmd = ''     # 最近一次解析记录的命令（去重防重复记录）
+        self._echo_last_time = 0.0   # 最近一次记录时间
 
     @property
     def is_connected(self) -> bool:
@@ -154,8 +158,105 @@ class SSHSession:
         if q in self._output_listeners:
             self._output_listeners.remove(q)
 
+    # ============ 命令回显解析（后端统一记录实际执行的命令） ============
+
+    # 提示符正则：匹配 bash/zsh/sh (user@host:path$ / #)、python (>>>)、
+    # mysql/sqlite/redis/mongo/postgres 等交互式程序的提示符。
+    # 不匹配单独的 ">"（node 提示符，太通用容易误判普通输出行）。
+    _ECHO_PROMPT_RE = re.compile(
+        r'^(?:'
+        r'[\w.-]+@[\w.-]+:[^#$\n]*[#$]'   # shell: user@host:path$ 或 user@host:path#
+        r'|>>>'                            # python
+        r'|\.\.\.'                         # python 续行（跳过）
+        r'|mysql>'                         # mysql
+        r'|sqlite>'                        # sqlite
+        r'|[\d.]+:\d+>'                    # redis: 127.0.0.1:6379>
+        r'|[a-zA-Z_][\w.-]*>'              # 通用: xxx> (mongo, postgres 等)
+        r')\s*'
+    )
+
+    # 清 ANSI 但保留 \r\n（回显解析需要 \r 判断行内覆盖）
+    _ANSI_KEEP_CR_RE = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
+    _OSC_KEEP_CR_RE = re.compile(r'\x1b\][\s\S]*?(\x07|\x1b\\)')
+
+    @classmethod
+    def _clean_ansi_keep_cr(cls, text: str) -> str:
+        """清理 ANSI 转义序列，但保留 \r\n（区别于 _clean_ansi 会去掉 \r）"""
+        text = cls._ANSI_KEEP_CR_RE.sub('', text)
+        text = cls._OSC_KEEP_CR_RE.sub('', text)
+        text = re.sub(r'\x1b[=><]', '', text)
+        return text
+
+    @classmethod
+    def _extract_echo_command(cls, line: str) -> str:
+        """从一行输出中提取提示符之后的命令文本；非提示符行返回空串"""
+        s = line.strip()
+        if not s:
+            return ''
+        m = cls._ECHO_PROMPT_RE.match(s)
+        if not m:
+            return ''
+        # python 续行提示符(...)：是上一命令的延续内容，不作为独立命令记录
+        if s.startswith('...'):
+            return ''
+        cmd = s[m.end():].strip()
+        if not cmd or len(cmd) > 500:
+            return ''
+        return cmd
+
+    def _parse_echo_line(self, data: str):
+        """
+        从输出流解析"命令回显行"并记录到全局历史（由后端统一记录）。
+
+        原理：交互式 shell（pty echo / readline）会把用户实际输入的命令回显在
+        提示符之后（root@host:~$ cd /var），Tab 补全、历史翻查（方向键/Ctrl+R）
+        后的最终内容都会体现在这行里；前端只记录键盘输入，会丢失补全内容。
+        """
+        if not self._has_shell or self.process is None:
+            return
+        try:
+            text = self._clean_ansi_keep_cr(data)
+            self._echo_buf += text
+            if len(self._echo_buf) > 4000:
+                self._echo_buf = ''  # 异常情况下防止无限增长
+                return
+            if '\n' not in self._echo_buf:
+                return
+            parts = self._echo_buf.split('\n')
+            self._echo_buf = parts[-1]  # 最后一段不完整，留到下一块
+            for raw in parts[:-1]:
+                line = raw.rstrip('\r')
+                if '\r' in line:
+                    # 行内多次 \r 覆盖（Tab 补全会重写整行）：只保留最后一次覆盖后的内容
+                    line = line.rsplit('\r', 1)[-1]
+                cmd = self._extract_echo_command(line)
+                if not cmd:
+                    continue
+                now = time.time()
+                # 去重：与 3 秒内刚记录过的相同命令（防止与前端/CLI 注入重复记录）
+                if cmd == self._echo_last_cmd and now - self._echo_last_time < 3:
+                    continue
+                self._echo_last_cmd = cmd
+                self._echo_last_time = now
+                try:
+                    asyncio.create_task(self._record_echo(cmd))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    async def _record_echo(self, cmd: str):
+        """异步记录回显命令（不阻塞输出广播循环）"""
+        try:
+            from .history_db import record_command
+            await record_command(cmd)
+        except Exception:
+            pass
+
     async def _broadcast_output(self, data: str):
         """广播输出给所有监听器，并维护缓冲区（用于状态检测）和日志持久化"""
+        # 解析命令回显（实际执行的命令）并记录历史
+        self._parse_echo_line(data)
         # 维护缓冲区（保留最后 8000 字符）
         self._output_buffer.append(data)
         total = sum(len(s) for s in self._output_buffer)
