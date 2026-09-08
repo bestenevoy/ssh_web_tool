@@ -301,22 +301,13 @@ function App() {
   }, [terminals])
 
 
-  // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）
-  const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null) => {
-    if (!terminals.activeId) return
+  // 依次执行预操作（上传 → chmod → env），返回是否全部成功；
+  // direct 直接执行 与 param/编辑后执行 共用：先完成预操作再发送命令
+  const runPreOps = useCallback(async (qc: QuickCommand): Promise<boolean> => {
+    if (!terminals.activeId) return false
     const inst = terminals.terminals.get(terminals.activeId)
-    if (!inst || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) return
+    if (!inst || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) return false
     const session_id = inst.session_id
-
-    // 参数替换：{args} 占位符替换，无占位符则追加到末尾
-    let cmd = qc.command
-    if (param !== null) {
-      cmd = cmd.includes('{args}')
-        ? cmd.split('{args}').join(param)
-        : (cmd + ' ' + param).trim()
-    }
-
-    // 依次执行预操作（命令通过终端发送，SFTP 上传通过后端 API 完成后才继续）
     for (const op of qc.pre_ops || []) {
       if (op.type === 'upload') {
         const remote = (op.remote || '').trim()
@@ -330,7 +321,7 @@ function App() {
         } catch (e) {
           setStatus('上传失败，命令未执行')
           alert('预操作失败（上传文件）: ' + (e as Error).message)
-          return
+          return false
         }
       } else if (op.type === 'chmod') {
         if (!op.mode || !op.path) continue
@@ -340,10 +331,25 @@ function App() {
         terminals.sendCommand(`export ${op.key}=${op.value ?? ''}`, true)
       }
     }
+    return true
+  }, [terminals, setStatus])
+
+
+  // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）
+  const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null) => {
+    if (!(await runPreOps(qc))) return
+
+    // 参数替换：{args} 占位符替换，无占位符则追加到末尾
+    let cmd = qc.command
+    if (param !== null) {
+      cmd = cmd.includes('{args}')
+        ? cmd.split('{args}').join(param)
+        : (cmd + ' ' + param).trim()
+    }
 
     terminals.sendCommand(cmd, true)
     setStatus(`已执行: ${cmd.slice(0, 60)}`)
-  }, [terminals, setStatus])
+  }, [runPreOps, terminals, setStatus])
 
   // 检查配置/脚本更新：扫描 config/data/scripts 后刷新主机与快捷指令列表
   const handleReloadConfig = useCallback(async () => {
@@ -359,10 +365,11 @@ function App() {
     }
   }, [loadHosts, loadQuickCommands])
 
-  // 编辑后执行：只输入到终端，不执行，用户可编辑后手动执行
-  const handleEditExecuteQuickCommand = useCallback((qc: QuickCommand) => {
+  // 编辑后执行：先执行预操作（上传/chmod/env），再把命令输入到终端不执行，用户可编辑 {args} 后手动执行
+  const handleEditExecuteQuickCommand = useCallback(async (qc: QuickCommand) => {
+    if (!(await runPreOps(qc))) return
     terminals.sendCommand(qc.command, false)
-  }, [terminals])
+  }, [runPreOps, terminals])
 
   // 打开编辑快捷指令弹窗
   const handleEditQuickCommand = useCallback((qc: QuickCommand) => {

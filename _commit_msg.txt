@@ -1,1 +1,6 @@
-﻿fix: 静态页面禁用缓存（Cache-Control: no-store），避免旧页面缓存导致功能不一致
+﻿fix: 带参数(param)快捷指令执行时也先执行上传等预操作
+
+- 预操作循环抽为 runPreOps 公共函数：
+  直接执行（executeQuickCommand）与 编辑后执行/带参数点击
+  （handleEditExecuteQuickCommand）共用，先完成上传/chmod/env 再发送命令
+- param 类型点击：先执行预操作，再把含 {args} 的命令输入到终端供编辑
