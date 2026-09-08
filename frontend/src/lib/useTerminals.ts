@@ -184,18 +184,21 @@ function setupTerminalCopy(term: Terminal, onAltR?: () => void) {
   })
 }
 
-const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
+const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_screen: boolean = true) => {
     if (ws && ws.readyState === WebSocket.OPEN && term) {
-      // 1. 清除 xterm.js 缓冲区（丢弃可能使用错误尺寸渲染的内容）
-      term.reset()
-      // 2. 延迟到下一帧启用自动换行（DECSET 7），确保 term.reset() 完成后生效
-      // reset 可能会重置自动换行模式，导致输入到行尾时光标回到行首覆盖内容
+      // clean_screen=true（默认）：清除 xterm 缓冲区 + 发送 Ctrl+L 让 shell 清屏重绘
+      // 用于恢复/重连场景；首次连接传 false，避免清掉主机 banner/MOTD 等登录信息
+      if (clean_screen) {
+        // 1. 清除 xterm.js 缓冲区（丢弃可能使用错误尺寸渲染的内容）
+        term.reset()
+        // 3. 发送 Ctrl+L（换页符），告诉 shell 清屏并重绘提示符
+        ws.send(JSON.stringify({ type: 'input', data: '\x0c' }))
+      }
+      // 2. 延迟到下一帧启用自动换行（DECSET 7）
       requestAnimationFrame(() => {
         term.write('\x1b[?7h')  // 启用自动换行
         console.log('[Terminal] autowrap enabled, size:', term.cols, 'x', term.rows)
       })
-      // 3. 发送 Ctrl+L（换页符），告诉 shell 清屏并重绘提示符
-      ws.send(JSON.stringify({ type: 'input', data: '\x0c' }))
       // 4. 发送 resize 消息，应用新尺寸
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
       console.log('[Terminal] resync size:', term.cols, 'x', term.rows)
@@ -312,7 +315,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
         setTimeout(doResize, 50)
         setTimeout(doResize, 200)
         // 加载历史输出
-        api.getHistoryLogs(session_id, 0, 3000).then((res) => {
+        // 加载完整历史日志（含主机登录 banner/MOTD），offset 用大值表示从文件开头读
+        api.getHistoryLogs(session_id, 999999, 8000).then((res) => {
           if (res.content) {
             term.write(res.content)
             term.write('\r\n\x1b[33m[--- 历史输出加载完成 ---]\x1b[0m\r\n')
@@ -430,7 +434,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
           setTimeout(doResize, 50)
           setTimeout(doResize, 200)
           // 加载历史输出
-          api.getHistoryLogs(t.session_id, 0, 3000).then((res) => {
+          api.getHistoryLogs(t.session_id, 999999, 8000).then((res) => {
             if (res.content) {
               term.write(res.content)
               term.write('\r\n\x1b[33m[--- 历史输出加载完成 ---]\x1b[0m\r\n')
@@ -606,7 +610,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
         requestAnimationFrame(() => {
           if (inst.container) {
             fitTerminal(inst)
-            resyncTerminal(inst.term, inst.ws)
+            // 首次打开不清屏不重置：保留主机登录 banner/MOTD 等连接信息
+            resyncTerminal(inst.term, inst.ws, false)
           }
         })
         // 延迟再次调用，确保字体加载完成
