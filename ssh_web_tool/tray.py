@@ -249,7 +249,8 @@ class TrayIcon:
                 user32.PostQuitMessage(0)
                 return 0
             if msg == WM_TRAYICON:
-                if lparam == WM_LBUTTONDBLCLK or lparam == WM_LBUTTONUP:
+                # 单击不打开页面（易误操作）；双击或右键菜单打开
+                if lparam == WM_LBUTTONDBLCLK:
                     self.open_web()
                     return 0
                 if lparam == WM_RBUTTONUP:
