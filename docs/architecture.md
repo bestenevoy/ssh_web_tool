@@ -59,7 +59,7 @@ ssh-web-tool/
 ├── uv.lock                  # UV 依赖锁定文件
 ├── build_exe.bat            # Windows 一键打包脚本入口（调用 build.ps1）
 ├── build.ps1                # 打包脚本：前端构建 + PyInstaller 打包 EXE + 打包劫持包（wheel）
-├── data.json                # 运行时生成的主机配置文件
+├── data.json                # 运行时生成的主机配置文件（实际存放于 ~/.ai4one/wstool/）
 ├── logs/                    # 终端历史日志（按会话 ID 分文件）
 ├── docs/                    # 文档（本目录）
 ├── ssh_web_tool/            # 核心 Python 包

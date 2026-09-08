@@ -35,7 +35,7 @@ python main.py
 
 ## 配置文件（config.json）
 
-服务监听端口等启动参数通过 `config.json` 配置（首次启动自动生成，放在 EXE/脚本同级目录）：
+服务监听端口等启动参数通过 `config.json` 配置（首次启动自动生成，统一放在用户目录 `~/.ai4one/wstool/`，`config.json` / `data.json` / `logs/` 均在该目录）：
 
 ```json
 {
@@ -57,7 +57,7 @@ python main.py
 
 - 修改配置后**重启程序生效**；启动时会打印实际使用的端口。
 - 前端页面、API 均使用相对路径，端口变化后浏览器地址自动跟随，无需改前端。
-- `config.json` 为本地配置（不入库），模板见 `config.example.json`。
+- `config.json` 为本地配置（不入库），模板见 `config.example.json`；程序首次运行会自动把旧位置（EXE 目录/项目根）已有的配置与数据迁移到 `~/.ai4one/wstool/`，仅复制不覆盖。
 
 ## 添加主机
 

@@ -52,7 +52,7 @@ python -m PyInstaller --noconfirm --clean --onefile --noconsole --name SSHWebToo
     --add-data "static;static" --add-data "config.example.json;." `
     --hidden-import asyncssh `
     --hidden-import paramiko `
-    --exclude-module playwright 
+    --exclude-module playwright `
     main.py
 
 # ---- [3] 打包劫持包 + 整理产物 ----
