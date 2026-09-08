@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import type { Host } from '../types'
 import { api } from './api'
 import type { TerminalSettings } from './useSettings'
+import { reflowForCols } from './reflow'
 
 export interface TerminalInstance {
   session_id: string
@@ -402,7 +403,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         api.getHistoryLogs(session_id, 999999, 8000).then(async (res) => {
           if (res.content) {
             await ensureFit(session_id, term, fitAddon, ws)
-            term.write(res.content)
+            // 历史日志按 pty 当时宽度换行；窄窗口直接写入会 soft-wrap 碎片化，
+            // 写入前按当前 cols 重新折行（ANSI 0 宽度计）
+            term.write(reflowForCols(res.content, term.cols))
           }
         }).catch(() => {})
       }
@@ -519,7 +522,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           api.getHistoryLogs(t.session_id, 999999, 8000).then(async (res) => {
             if (res.content) {
               await ensureFit(t.session_id, term, fitAddon, ws)
-              term.write(res.content)
+              term.write(reflowForCols(res.content, term.cols))
             }
           }).catch(() => {})
         }
