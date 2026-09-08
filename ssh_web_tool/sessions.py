@@ -148,8 +148,9 @@ class SSHSession:
     # ============ 输出广播机制 ============
 
     def add_output_listener(self) -> asyncio.Queue:
-        """注册输出监听器，返回一个 Queue，后续输出会写入这个队列"""
-        q: asyncio.Queue = asyncio.Queue()
+        """注册输出监听器，返回一个 Queue，后续输出会写入这个队列
+        有界队列（约 100 块 ≈ 400KB）：消费慢的监听器（前端 ws 慢）不会无限堆积内存"""
+        q: asyncio.Queue = asyncio.Queue(maxsize=100)
         self._output_listeners.append(q)
         return q
 
@@ -157,6 +158,17 @@ class SSHSession:
         """移除输出监听器"""
         if q in self._output_listeners:
             self._output_listeners.remove(q)
+
+    def _drop_oldest(self, q: asyncio.Queue, data: str):
+        """队列满时丢弃最旧的一条再放入最新数据（终端语义：保留最新内容）"""
+        try:
+            q.get_nowait()
+        except Exception:
+            pass
+        try:
+            q.put_nowait(data)
+        except Exception:
+            pass
 
     # ============ 命令回显解析（后端统一记录实际执行的命令） ============
 
@@ -290,9 +302,13 @@ class SSHSession:
             self._output_buffer = [combined[-8000:]]
         # 日志持久化：追加写入文件
         self._write_log(data)
-        # 广播给所有监听器
+        # 广播给所有监听器：put_nowait 不阻塞；队列满时丢最旧保最新，
+        # 避免慢监听器（前端 ws 阻塞）拖住整个广播链（日志/echo 解析/其他监听器）
         for q in self._output_listeners:
-            await q.put(data)
+            try:
+                q.put_nowait(data)
+            except asyncio.QueueFull:
+                self._drop_oldest(q, data)
 
     def _write_log(self, data: str):
         """将输出追加写入日志文件"""
@@ -504,24 +520,6 @@ class SSHSession:
             lines = lines[:-1]
         return '\n'.join(lines).strip()
 
-    async def inject_command(self, command: str) -> bool:
-        """
-        将命令写入交互式终端的 stdin（像手动输入一样）
-        - 命令和输出会实时显示在 Web 终端中
-        - 适用于任何交互程序（shell/Python/MySQL/vim 等），不会发送标记命令干扰
-        - 只负责发送，不等待输出，不返回执行结果
-        """
-        if not self.has_shell or self.process is None:
-            raise RuntimeError("该会话没有交互式终端，请先在 Web 端打开终端")
-        self.process.stdin.write(f"{command}\n")
-        self.last_active = time.time()
-        try:
-            from .history_db import record_command
-            await record_command(command)
-        except Exception:
-            pass  # 历史记录失败不影响命令执行
-        return True
-
     async def inject_and_capture(self, command: str, idle_timeout: float = 0.5,
                                   total_timeout: int = 30,
                                   prompt_pattern: str = r'[\w.-]+@[\w.-]+:.+[#$]\s*$',
@@ -535,34 +533,37 @@ class SSHSession:
         - 适用于 shell 环境中连续执行命令；非 shell 环境退出码返回 None
         返回 (退出码, stdout, stderr)，退出码为 None 表示无法获取（非 shell 环境）
         """
-        if not self.has_shell or self.process is None:
-            # 自动启动交互式 shell（不依赖前端页面，CLI 可独立使用）
-            await self.start_interactive_shell()
-            await asyncio.sleep(1.5)
+        # 并发安全：注入类命令与独立进程命令共用 _cmd_lock，
+        # 防止多个命令同时写 stdin / 输出捕获串台（前端连点/API 并发调用）
+        async with self._cmd_lock:
+            if not self.has_shell or self.process is None:
+                # 自动启动交互式 shell（不依赖前端页面，CLI 可独立使用）
+                await self.start_interactive_shell()
+                await asyncio.sleep(1.5)
 
-        # 1. 执行命令并捕获输出
-        output = await self._inject_and_wait(
-            command, idle_timeout=idle_timeout, total_timeout=total_timeout
-        )
+            # 1. 执行命令并捕获输出
+            output = await self._inject_and_wait(
+                command, idle_timeout=idle_timeout, total_timeout=total_timeout
+            )
 
-        # 2. 自动获取退出码（仅在 shell 环境中）
-        exit_code = None
-        if capture_exit_code:
-            try:
-                state = self.get_terminal_state()
-                # 仅在普通 shell 环境中获取退出码（Python/MySQL/vim 等不适用）
-                if state.get('in_shell') and not state.get('in_python') and not state.get('in_mysql') and not state.get('in_pager'):
-                    exit_output = await self._inject_and_wait("echo $?", total_timeout=10)
-                    # 解析退出码（取最后一行的数字）
-                    for line in reversed(exit_output.split('\n')):
-                        line = line.strip()
-                        if line.isdigit():
-                            exit_code = int(line)
-                            break
-            except Exception:
-                pass  # 获取退出码失败不影响主流程
+            # 2. 自动获取退出码（仅在 shell 环境中）
+            exit_code = None
+            if capture_exit_code:
+                try:
+                    state = self.get_terminal_state()
+                    # 仅在普通 shell 环境中获取退出码（Python/MySQL/vim 等不适用）
+                    if state.get('in_shell') and not state.get('in_python') and not state.get('in_mysql') and not state.get('in_pager'):
+                        exit_output = await self._inject_and_wait("echo $?", total_timeout=10)
+                        # 解析退出码（取最后一行的数字）
+                        for line in reversed(exit_output.split('\n')):
+                            line = line.strip()
+                            if line.isdigit():
+                                exit_code = int(line)
+                                break
+                except Exception:
+                    pass  # 获取退出码失败不影响主流程
 
-        return exit_code, output, ""
+            return exit_code, output, ""
 
     # ============ 终端状态检测 ============
 
@@ -671,8 +672,15 @@ class SSHSession:
         """
         if not self.has_shell or self.process is None:
             raise RuntimeError("该会话没有交互式终端，请先在 Web 端打开终端")
-        self.process.stdin.write(command + "\n")
-        self.last_active = time.time()
+        # 并发安全：与 inject_and_capture / run_command 互斥，避免 stdin 交错
+        async with self._cmd_lock:
+            self.process.stdin.write(command + "\n")
+            self.last_active = time.time()
+        try:
+            from .history_db import record_command
+            await record_command(command)
+        except Exception:
+            pass  # 历史记录失败不影响命令执行
         return True
 
     # ============ SFTP 文件管理 ============
@@ -748,15 +756,16 @@ class SSHSession:
         return data
 
     async def write_file(self, path: str, content) -> bool:
-        """写入文件内容"""
+        """写入文件内容
+        - content 为 str：文本模式写入（自动 UTF-8 编码）
+        - content 为 bytes：二进制模式写入（不做解码，避免二进制文件损坏）"""
         sftp = await self.get_sftp()
-        # asyncssh 的 write 方法期望 str，内部会自动 encode
         if isinstance(content, bytes):
-            content = content.decode("utf-8")
-        elif not isinstance(content, str):
-            content = str(content)
-        async with sftp.open(path, 'w') as f:
-            await f.write(content)
+            async with sftp.open(path, 'wb') as f:
+                await f.write(content)
+        else:
+            async with sftp.open(path, 'w') as f:
+                await f.write(str(content))
         return True
 
     async def delete_file(self, path: str) -> bool:

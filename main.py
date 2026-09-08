@@ -933,7 +933,11 @@ async def api_preop_upload(req: PreopUploadRequest):
     if not source:
         raise HTTPException(status_code=400, detail="未指定源文件")
     if req.source_type == "script":
-        src = get_app_dir() / "scripts" / source
+        # 只接受 scripts 目录内的文件名：拒绝路径穿越（../ 等读任意文件）
+        name = Path(source).name
+        if name != source:
+            raise HTTPException(status_code=400, detail="script 类型只接受文件名，不能包含路径")
+        src = get_app_dir() / "scripts" / name
     else:
         src = Path(source).expanduser()
         if not src.is_absolute():
@@ -941,9 +945,10 @@ async def api_preop_upload(req: PreopUploadRequest):
     if not src.is_file():
         raise HTTPException(status_code=404, detail=f"源文件不存在: {source}")
     try:
-        content = src.read_bytes().decode("utf-8", errors="replace")
-        await session.write_file(req.remote, content)
-        return {"status": "uploaded", "source": str(src), "path": req.remote, "size": len(content)}
+        # 以 bytes 读取并二进制写入：文本/二进制文件均无损（不再 utf-8 替换损坏）
+        data = src.read_bytes()
+        await session.write_file(req.remote, data)
+        return {"status": "uploaded", "source": str(src), "path": req.remote, "size": len(data)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
@@ -1022,8 +1027,9 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                         pending_msg = raw
                 except json.JSONDecodeError:
                     pending_msg = raw
-        except (asyncio.TimeoutError, Exception):
-            pass  # 超时，使用默认尺寸
+        except asyncio.TimeoutError:
+            pass  # 前端 0.5s 内未发 resize，使用默认尺寸
+        # 其他异常（如 WebSocketDisconnect）不吞掉，交给外层统一处理
 
         try:
             await session.start_interactive_shell(cols=initial_cols, rows=initial_rows)

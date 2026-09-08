@@ -74,10 +74,14 @@ class Storage:
         }
 
     def _save(self):
-        """保存数据到文件"""
+        """保存数据到文件（原子写：先写临时文件再 os.replace，崩溃/断电不会损坏 data.json）"""
         try:
-            with open(self.data_file, "w", encoding="utf-8") as f:
+            tmp_file = self.data_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self.data_file)
         except Exception as e:
             print(f"保存数据文件失败: {e}")
 

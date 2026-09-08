@@ -1,8 +1,13 @@
-﻿fix: 连接时历史输出按错误宽度折行错乱；去掉无意义的恢复/加载提示
+﻿fix: 审查发现的4个真实Bug修复
 
-- 写入历史输出（banner/MOTD）前先等待容器就绪并 fit + 发送 resize
-  （ensureFit 最多重试约 600ms）：历史内容按默认 80 列写入后，
-  fit 到实际宽度已写入行不会重新折行，导致中间信息位置错乱
-- 去掉终端内"[--- 历史输出加载完成 ---]"标记（无实际意义）
-- 后端去掉 ws 连接时"已恢复已有终端会话"提示（恢复逻辑保留，
-  恢复内容由前端历史输出直接体现）
+1. 预操作上传二进制文件损坏：read_bytes 后不再 utf-8 替换解码，
+   write_file 支持 bytes 二进制写入（'wb' 模式），文本/二进制均无损
+2. 注入模式命令执行无锁：inject_command / inject_and_capture 与
+   run_command 共用 _cmd_lock，避免并发写 stdin 输出串台；
+   顺带删除重复定义的 inject_command（后定义覆盖前定义的隐患）
+3. 输出广播无界队列：改为有界队列(maxsize=100) + put_nowait，
+   慢监听器丢最旧保最新，不再阻塞整个广播链（日志/echo/其他监听器）
+4. data.json 非原子写：临时文件 + fsync + os.replace 原子替换，
+   崩溃/断电不再损坏数据文件
+5. 顺手：script 上传源拒绝路径穿越（../ 等）；ws 首个消息
+   except (TimeoutError, Exception) 收窄为 TimeoutError（不吞断开异常）
