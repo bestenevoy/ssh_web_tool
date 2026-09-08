@@ -10,6 +10,7 @@ interface Props {
   groups: string[]
   onSwitch: (id: string) => void
   onClose: (id: string) => void
+  onDisconnect: (id: string) => void
   onNew: () => void
 }
 
@@ -22,7 +23,7 @@ const SHELL_TYPE_STYLES: Record<string, { label: string; color: string; bg: stri
   other: { label: '··', color: '#999', bg: 'rgba(153,153,153,0.15)' },
 }
 
-export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, onSwitch, onClose, onNew }: Props) {
+export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, onSwitch, onClose, onDisconnect, onNew }: Props) {
   const [groupFilter, setGroupFilter] = useState('')
   const [hostFilter, setHostFilter] = useState('')
 
@@ -57,9 +58,9 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, on
           return (
             <div
               key={t.session_id}
-              className={`tab${t.session_id === activeId ? ' active' : ''}`}
+              className={`tab${t.session_id === activeId ? ' active' : ''}${t.disconnected ? ' disconnected' : ''}`}
               onClick={() => onSwitch(t.session_id)}
-              title={`${t.host_name} · ${t.terminal_name}${group ? ` · ${group}` : ''}`}
+              title={`${t.host_name} · ${t.terminal_name}${group ? ` · ${group}` : ''}${t.disconnected ? '（已断开）' : ''}`}
             >
               <span className="type-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: getTypeColor(t.type), display: 'inline-block' }} />
               <span className="tab-title">{t.host_name} · {t.terminal_name}</span>
@@ -78,6 +79,13 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, on
               >
                 {shellStyle.label}
               </span>
+              {!t.disconnected && (
+                <span
+                  className="tab-disconnect"
+                  title="断开连接（保留标签，可重新连接）"
+                  onClick={(e) => { e.stopPropagation(); onDisconnect(t.session_id) }}
+                >⏻</span>
+              )}
               <span className="tab-close" onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}>✕</span>
             </div>
           )

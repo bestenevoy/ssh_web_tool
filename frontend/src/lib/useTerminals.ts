@@ -19,6 +19,7 @@ export interface TerminalInstance {
   container: HTMLDivElement | null
   state_timer: ReturnType<typeof setInterval> | null
   input_buffer: string  // 当前输入行缓冲区（用于记录命令历史）
+  disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
 }
 
 // 获取 shell 类型标签
@@ -51,6 +52,9 @@ function getTerminalTheme(settings: TerminalSettings) {
 export function useTerminals(settings: TerminalSettings) {
   const [terminals, setTerminals] = useState<Map<string, TerminalInstance>>(new Map())
   const [activeId, setActiveId] = useState<string | null>(null)
+  // 连接防抖：同一时间只允许一个连接建立中，避免快速点击多个主机并发连接
+  const [connecting, setConnecting] = useState(false)
+  const connectingRef = useRef(false)
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map())
   // 快捷键处理函数（外部设置，用于打开搜索弹窗等）
   const shortcutHandlerRef = useRef<(() => void) | null>(null)
@@ -125,6 +129,21 @@ function copySelection(term: Terminal) {
       document.body.removeChild(ta)
     } catch { /* ignore */ }
   }
+}
+
+
+// 标记终端为断开状态（ws 关闭时调用），并清理状态轮询定时器
+function markDisconnected(term: Terminal, session_id: string, setTerminals: React.Dispatch<React.SetStateAction<Map<string, TerminalInstance>>>) {
+  try { term.write('\r\n\x1b[31m[连接已断开，点击标签上的 ⏻ 可重新连接]\x1b[0m\r\n') } catch {}
+  setTerminals((prev) => {
+    const next = new Map(prev)
+    const cur = next.get(session_id)
+    if (cur && !cur.disconnected) {
+      if (cur.state_timer) clearInterval(cur.state_timer)
+      next.set(session_id, { ...cur, disconnected: true, ws: null })
+    }
+    return next
+  })
 }
 
 function setupTerminalCopy(term: Terminal, onAltR?: () => void) {
@@ -238,6 +257,14 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
   }, [])
 
   const createTerminal = useCallback(async (host: Host, terminal_name?: string) => {
+    // 连接防抖：已有连接正在建立时拒绝新的连接请求
+    if (connectingRef.current) {
+      const err = new Error('已有连接正在建立中，请稍候再试')
+      ;(err as any).isConnecting = true
+      throw err
+    }
+    connectingRef.current = true
+    setConnecting(true)
     try {
       const result = await api.connectHost(host.id, terminal_name)
       const session_id = result.session_id
@@ -323,6 +350,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
         }
       }
 
+      // WebSocket 意外断开（网络中断/后端主动关闭）：标记断开，不自动重连
+      ws.onclose = () => markDisconnected(term, session_id, setTerminals)
+
       const instance: TerminalInstance = {
         session_id,
         host_id: host.id,
@@ -336,6 +366,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
         container: null,
         state_timer,
         input_buffer: '',
+        disconnected: false,
       }
 
       setTerminals((prev) => {
@@ -348,6 +379,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
     } catch (e) {
       console.error('创建终端失败', e)
       throw e
+    } finally {
+      connectingRef.current = false
+      setConnecting(false)
     }
   }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput])
 
@@ -379,16 +413,6 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
           handleTerminalInput(t.session_id, data)
         })
         setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
-
-        // 检测快捷键 Alt+R（终端获得焦点时也能触发）
-        term.onKey(({ domEvent }) => {
-          if (domEvent.altKey && (domEvent.key === 'r' || domEvent.key === 'R')) {
-            domEvent.preventDefault()
-            if (shortcutHandlerRef.current) {
-              shortcutHandlerRef.current()
-            }
-          }
-        })
 
         ws.onopen = () => {
           term.focus()
@@ -426,6 +450,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
           }
         }
 
+        // 意外断开：标记断开，不自动重连
+        ws.onclose = () => markDisconnected(term, t.session_id, setTerminals)
+
         // 定期检测终端状态
         const state_timer = setInterval(() => {
           api.getSessionState(t.session_id).then((state) => {
@@ -457,6 +484,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
           container: null,
           state_timer,
           input_buffer: '',
+          disconnected: false,
         }
 
         setTerminals((prev) => {
@@ -525,6 +553,21 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
       setActiveId(remaining.length > 0 ? remaining[0] : null)
     }
   }, [terminals, activeId])
+
+  // 手动断开：关闭 WebSocket + 后端会话（后端删除后不会再被自动恢复），保留标签等待重连
+  const disconnectTerminal = useCallback(async (session_id: string) => {
+    const inst = terminals.get(session_id)
+    if (!inst || inst.disconnected) return
+    try { await api.closeSession(session_id) } catch {}
+    if (inst.ws) { try { inst.ws.close() } catch {} }
+    if (inst.state_timer) clearInterval(inst.state_timer)
+    setTerminals((prev) => {
+      const next = new Map(prev)
+      const cur = next.get(session_id)
+      if (cur) next.set(session_id, { ...cur, disconnected: true, ws: null })
+      return next
+    })
+  }, [terminals])
 
   const sendCommand = useCallback((command: string, execute: boolean = true) => {
     if (!activeId) return
@@ -607,11 +650,13 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
   return {
     terminals,
     activeId,
+    connecting,
     activeSessions,
     createTerminal,
     restoreTerminals,
     switchTerminal,
     closeTerminal,
+    disconnectTerminal,
     sendCommand,
     registerContainer,
     focusActiveTerminal,

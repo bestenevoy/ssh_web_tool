@@ -177,11 +177,21 @@ body {
 .tab.active { background: var(--bg-primary); color: var(--accent); border-color: var(--border-color); }
 .tab .tab-title { overflow: hidden; text-overflow: ellipsis; }
 .tab .tab-close { font-size: 13px; opacity: .5; cursor: pointer; padding: 0 2px; border-radius: 2px; }
+.tab-disconnect { font-size: 13px; opacity: .55; cursor: pointer; padding: 0 2px; border-radius: 2px; margin-left: 2px; }
+.tab-disconnect:hover { opacity: 1; color: #ff9800; }
+.tab.disconnected { opacity: .6; }
+.tab.disconnected .tab-title { text-decoration: line-through; }
 .tab .tab-close:hover { opacity: 1; background: var(--accent); color: #fff; }
 .tab-new { padding: 5px 10px; font-size: 14px; color: var(--text-muted); cursor: pointer; border-radius: 4px; }
 .tab-new:hover { color: var(--text-secondary); background: var(--bg-hover); }
 
 .terminal-container { flex: 1; position: relative; overflow: hidden; }
+.terminal-instance.disconnected { display: flex; align-items: center; justify-content: center; }
+.terminal-disconnected { text-align: center; color: var(--text-muted); }
+.terminal-disconnected .icon { font-size: 40px; margin-bottom: 8px; }
+.terminal-disconnected .text { font-size: 15px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.terminal-disconnected .hint { font-size: 12px; margin-bottom: 14px; }
+.disconnected-actions { display: flex; gap: 8px; justify-content: center; }
 .terminal-instance {
   position: absolute; top: 0; left: 0; right: 0; bottom: 0;
   display: none; padding: 0;

@@ -106,7 +106,12 @@ function App() {
   const activeHostId: string | null = terminals.activeId ? terminals.terminals.get(terminals.activeId)?.host_id || null : null
 
   const handleHostClick = useCallback((host: Host) => {
-    const existing = Array.from(terminals.terminals.values()).find((t) => t.host_id === host.id)
+    // 连接防抖：已有连接正在建立时忽略新点击，避免并发连接
+    if (terminals.connecting) {
+      setStatus('正在连接其他主机，请稍候...')
+      return
+    }
+    const existing = Array.from(terminals.terminals.values()).find((t) => t.host_id === host.id && !t.disconnected)
     if (existing) {
       terminals.switchTerminal(existing.session_id)
       setStatus(`已连接 ${host.host} [${existing.session_id}]`)
@@ -121,6 +126,10 @@ function App() {
           setTimeout(() => loadHosts(), 800)
         })
         .catch((e) => {
+          if ((e as any)?.isConnecting) {
+            setStatus('正在连接其他主机，请稍候...')
+            return
+          }
           setStatus('连接失败')
           alert('SSH连接失败: ' + (e as Error).message)
         })
@@ -151,6 +160,34 @@ function App() {
     terminals.closeTerminal(session_id, closeBackend)
       .then(() => loadHosts())
   }, [terminals, loadHosts])
+
+  // 手动断开当前终端连接（保留标签，可重新连接）
+  const handleDisconnectTerminal = useCallback((session_id: string) => {
+    terminals.disconnectTerminal(session_id).then(() => loadHosts())
+  }, [terminals, loadHosts])
+
+  // 重新连接：对同一主机建立新会话，成功后移除旧标签
+  const handleReconnectTerminal = useCallback(async (session_id: string) => {
+    if (terminals.connecting) {
+      setStatus('正在连接其他主机，请稍候...')
+      return
+    }
+    const inst = terminals.terminals.get(session_id)
+    if (!inst) return
+    const host = hosts.find((h) => h.id === inst.host_id)
+    if (!host) { alert('找不到该主机信息'); return }
+    setStatus(`正在重新连接 ${host.host}...`)
+    try {
+      await terminals.createTerminal(host)
+      await terminals.closeTerminal(session_id, false)
+      loadHosts()
+      setTimeout(() => loadHosts(), 800)
+    } catch (e) {
+      if ((e as any)?.isConnecting) { setStatus('正在连接其他主机，请稍候...'); return }
+      setStatus('重新连接失败')
+      alert('重新连接失败: ' + (e as Error).message)
+    }
+  }, [terminals, hosts, loadHosts])
 
   const handleSaveHost = useCallback(async (data: Partial<Host>) => {
     try {
@@ -497,12 +534,15 @@ function App() {
             groups={groups}
             onSwitch={terminals.switchTerminal}
             onClose={handleCloseTerminal}
+            onDisconnect={handleDisconnectTerminal}
             onNew={handleNewTerminal}
           />
           <TerminalView
             terminals={terminals.terminals}
             activeId={terminals.activeId}
             registerContainer={terminals.registerContainer}
+            onReconnect={handleReconnectTerminal}
+            onCloseTab={handleCloseTerminal}
           />
         </div>
 
