@@ -999,16 +999,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                         print(f"[WebSocket] 重连异常: {e}")
                 # 检测 shell 是否活着（如果有 shell）
                 elif session._has_shell and not session.is_shell_alive():
-                    print(f"[WebSocket] 检测到 shell 退出，尝试重新启动: {session_id}")
+                    # 不自动重启 shell：重启会中断正在运行的全屏程序（vi/vim 等），
+                    # 且 shell 可能只是被检测逻辑误判；只通知前端，由用户决定是否重连
+                    print(f"[WebSocket] 检测到 shell 状态异常，不自动重启: {session_id}")
                     try:
-                        session.process = None
-                        session._has_shell = False
-                        await session.start_interactive_shell(
-                            cols=session._last_cols, rows=session._last_rows
-                        )
-                        print(f"[WebSocket] shell 重启成功: {session_id}")
-                    except Exception as e:
-                        print(f"[WebSocket] shell 重启失败: {e}")
+                        await websocket.send_json({"type": "info", "data": "检测到终端 shell 状态异常，如需恢复请点击顶部重连"})
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -1033,30 +1030,21 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         if msg_type == "input":
             data = msg.get("data", "")
             if data:
-                # 直接尝试写入，失败时再检测并重连
+                # 直接尝试写入；若 shell 尚未就绪（启动中/重启窗口），短暂等待后重试
                 try:
+                    for _ in range(30):
+                        if session.process is not None:
+                            break
+                        await asyncio.sleep(0.1)
                     if session.process is None:
-                        raise RuntimeError("process is None")
+                        raise RuntimeError("终端 shell 尚未就绪，请稍候再输入")
                     session.process.stdin.write(data)
                     session.last_active = time.time()
                 except Exception as e:
-                    print(f"[WebSocket] 输入失败，尝试重连: {e}")
-                    await websocket.send_json({"type": "error", "data": f"终端输入失败，正在尝试自动重连... ({e})"})
-                    # 尝试自动重连
-                    try:
-                        if await session.reconnect():
-                            await websocket.send_json({"type": "info", "data": "自动重连成功，可以继续输入"})
-                            # 重连成功后重新发送这次输入
-                            try:
-                                if session.process:
-                                    session.process.stdin.write(data)
-                                    session.last_active = time.time()
-                            except Exception as e2:
-                                await websocket.send_json({"type": "error", "data": f"重连后输入仍失败: {e2}"})
-                        else:
-                            await websocket.send_json({"type": "error", "data": "自动重连失败，请关闭此标签重新连接主机"})
-                    except Exception as e2:
-                        await websocket.send_json({"type": "error", "data": f"重连异常: {e2}"})
+                    # 不再自动重连：重连会中断正在运行的全屏程序（如 vi/vim），
+                    # 且用户已确认不想要自动重连行为；只提示错误，让用户手动处理
+                    print(f"[WebSocket] 输入失败: {e}")
+                    await websocket.send_json({"type": "error", "data": f"终端输入失败: {e}"})
         elif msg_type == "resize":
             cols = msg.get("cols", 120)
             rows = msg.get("rows", 40)
