@@ -457,6 +457,22 @@ function App() {
         <button className="btn btn-secondary btn-sm" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} title="折叠主机列表">☰</button>
         <span className="logo">SSH Web Tool</span>
         <span className="status">{status}</span>
+        {terminals.activeId && (() => {
+          const activeInst = terminals.terminals.get(terminals.activeId!)
+          return activeInst?.disconnected ? (
+            <button
+              className="btn btn-primary btn-sm conn-action-btn"
+              onClick={() => handleReconnectTerminal(terminals.activeId!)}
+              title="重新连接当前主机"
+            >🔗 重连</button>
+          ) : (
+            <button
+              className="btn btn-secondary btn-sm conn-action-btn"
+              onClick={() => handleDisconnectTerminal(terminals.activeId!)}
+              title="断开当前终端连接（保留标签，可重新连接）"
+            >⛓️‍💥 断开</button>
+          )
+        })()}
         <div style={{ flex: 1 }} />
         {/* 终端设置 */}
         <div className="topbar-settings">
@@ -534,7 +550,6 @@ function App() {
             groups={groups}
             onSwitch={terminals.switchTerminal}
             onClose={handleCloseTerminal}
-            onDisconnect={handleDisconnectTerminal}
             onNew={handleNewTerminal}
           />
           <TerminalView

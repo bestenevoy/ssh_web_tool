@@ -10,7 +10,6 @@ interface Props {
   groups: string[]
   onSwitch: (id: string) => void
   onClose: (id: string) => void
-  onDisconnect: (id: string) => void
   onNew: () => void
 }
 
@@ -23,7 +22,7 @@ const SHELL_TYPE_STYLES: Record<string, { label: string; color: string; bg: stri
   other: { label: '··', color: '#999', bg: 'rgba(153,153,153,0.15)' },
 }
 
-export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, onSwitch, onClose, onDisconnect, onNew }: Props) {
+export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, onSwitch, onClose, onNew }: Props) {
   const [groupFilter, setGroupFilter] = useState('')
   const [hostFilter, setHostFilter] = useState('')
 
@@ -79,13 +78,6 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, on
               >
                 {shellStyle.label}
               </span>
-              {!t.disconnected && (
-                <span
-                  className="tab-disconnect"
-                  title="断开连接（保留标签，可重新连接）"
-                  onClick={(e) => { e.stopPropagation(); onDisconnect(t.session_id) }}
-                >⏻</span>
-              )}
               <span className="tab-close" onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}>✕</span>
             </div>
           )

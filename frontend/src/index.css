@@ -177,8 +177,7 @@ body {
 .tab.active { background: var(--bg-primary); color: var(--accent); border-color: var(--border-color); }
 .tab .tab-title { overflow: hidden; text-overflow: ellipsis; }
 .tab .tab-close { font-size: 13px; opacity: .5; cursor: pointer; padding: 0 2px; border-radius: 2px; }
-.tab-disconnect { font-size: 13px; opacity: .55; cursor: pointer; padding: 0 2px; border-radius: 2px; margin-left: 2px; }
-.tab-disconnect:hover { opacity: 1; color: #ff9800; }
+.conn-action-btn { margin-left: 10px; }
 .tab.disconnected { opacity: .6; }
 .tab.disconnected .tab-title { text-decoration: line-through; }
 .tab .tab-close:hover { opacity: 1; background: var(--accent); color: #fff; }

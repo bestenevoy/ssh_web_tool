@@ -134,7 +134,7 @@ function copySelection(term: Terminal) {
 
 // 标记终端为断开状态（ws 关闭时调用），并清理状态轮询定时器
 function markDisconnected(term: Terminal, session_id: string, setTerminals: React.Dispatch<React.SetStateAction<Map<string, TerminalInstance>>>) {
-  try { term.write('\r\n\x1b[31m[连接已断开，点击标签上的 ⏻ 可重新连接]\x1b[0m\r\n') } catch {}
+  try { term.write('\r\n\x1b[31m[连接已断开，点击顶部「🔗 重连」重新连接]\x1b[0m\r\n') } catch {}
   setTerminals((prev) => {
     const next = new Map(prev)
     const cur = next.get(session_id)
