@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from ssh_web_tool.sessions import session_manager, SSHSession
 from ssh_web_tool.storage import storage
 from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
-from ssh_web_tool.config import load_config
+from ssh_web_tool.config import load_config, get_app_dir
 from ssh_web_tool.external_sessions import external_hub
 
 app = FastAPI(title="SSH Web Tool", version="2.0.0")
@@ -40,11 +40,8 @@ def get_resource_path(relative_path: str) -> Path:
     return Path(__file__).parent / relative_path
 
 def get_data_path(relative_path: str) -> Path:
-    """获取数据文件路径（保存在 EXE/脚本所在目录，不随打包丢失）"""
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 打包后，数据文件保存在 EXE 所在目录
-        return Path(sys.executable).parent / relative_path
-    return Path(__file__).parent / relative_path
+    """获取数据文件路径（统一存放在 ~/.ai4one/wstool，不随打包丢失）"""
+    return get_app_dir() / relative_path
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = get_resource_path("static")
@@ -1171,9 +1168,13 @@ def main():
 
     from ssh_web_tool.config import (
         load_config, resolve_server_config, ensure_config_file, CONFIG_FILE_NAME,
-        find_config_file, get_app_dir,
+        find_config_file, get_app_dir, ensure_data_dir, migrate_legacy_data,
     )
     from ssh_web_tool.tray import start_tray, acquire_single_instance
+
+    # 统一数据目录：~/.ai4one/wstool；首次运行迁移旧位置（EXE 目录/项目根）的数据
+    ensure_data_dir()
+    migrate_legacy_data()
 
     # 单实例：已有一个实例在运行则打开其 Web 页面并退出
     if not acquire_single_instance():

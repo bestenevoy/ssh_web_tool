@@ -18,6 +18,7 @@ config.example.json 模板），用户修改后重启即可生效。
       提示用户修改配置文件。
 """
 import json
+import shutil
 import socket
 import sys
 from pathlib import Path
@@ -25,6 +26,64 @@ from typing import Dict, Optional
 
 CONFIG_FILE_NAME = "config.json"
 EXAMPLE_FILE_NAME = "config.example.json"
+
+# 统一数据目录：~/.ai4one/wstool（配置文件、数据、日志全部存放于此）
+DATA_DIR_NAME = ".ai4one"
+DATA_DIR_SUB = "wstool"
+
+
+def get_app_dir() -> Path:
+    """获取数据/配置目录：~/.ai4one/wstool
+
+    配置文件（config.json）、数据（data.json）、日志（logs/）、
+    运行时端口（.running_port）统一存放在用户家目录，方便集中管理。
+    """
+    return Path.home() / DATA_DIR_NAME / DATA_DIR_SUB
+
+
+def ensure_data_dir() -> Path:
+    """确保数据目录存在（幂等）"""
+    d = get_app_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_example_path() -> Optional[Path]:
+    """config.example.json 模板所在位置（打包后随资源目录 _MEIPASS）"""
+    if getattr(sys, 'frozen', False):
+        p = Path(sys._MEIPASS) / EXAMPLE_FILE_NAME
+        return p if p.is_file() else None
+    p = Path(__file__).resolve().parent.parent / EXAMPLE_FILE_NAME
+    return p if p.is_file() else None
+
+
+def migrate_legacy_data() -> None:
+    """首次运行：把旧位置（EXE 目录 / 项目根目录）的配置与数据迁移到新目录
+
+    仅当新目录中不存在同名文件时复制，不覆盖已有数据。
+    """
+    d = get_app_dir()
+    roots = []
+    if getattr(sys, 'frozen', False):
+        roots.append(Path(sys.executable).parent)
+    roots.append(Path(__file__).resolve().parent.parent)
+    for root in roots:
+        for name in (CONFIG_FILE_NAME, "data.json"):
+            src = root / name
+            if src.is_file() and not (d / name).exists():
+                try:
+                    shutil.copy2(src, d / name)
+                    print(f"[config] 已迁移 {src.name} -> {d}")
+                except OSError as e:
+                    print(f"[config] 迁移 {src} 失败: {e}")
+        src_logs = root / "logs"
+        dst_logs = d / "logs"
+        if src_logs.is_dir() and not dst_logs.exists():
+            try:
+                shutil.copytree(src_logs, dst_logs)
+                print(f"[config] 已迁移日志目录 -> {dst_logs}")
+            except OSError as e:
+                print(f"[config] 迁移日志目录失败: {e}")
 
 # 默认配置（无配置文件时的兜底值）
 DEFAULT_CONFIG: Dict = {
@@ -38,31 +97,15 @@ DEFAULT_CONFIG: Dict = {
 }
 
 
-def get_app_dir() -> Path:
-    """获取程序所在目录（EXE 同级，或项目根目录）"""
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 打包后，配置/数据保存在 EXE 所在目录
-        return Path(sys.executable).parent
-    # 脚本模式：本文件位于 <项目根>/ssh_web_tool/config.py
-    return Path(__file__).resolve().parent.parent
-
-
 def find_config_file() -> Optional[Path]:
-    """按优先级查找配置文件，找不到返回 None"""
-    candidates = []
-    if getattr(sys, 'frozen', False):
-        candidates.append(Path(sys.executable).parent / CONFIG_FILE_NAME)
-    candidates.append(Path.cwd() / CONFIG_FILE_NAME)
-    candidates.append(get_app_dir() / CONFIG_FILE_NAME)
-    for p in candidates:
-        if p.is_file():
-            return p
-    return None
+    """查找配置文件（统一在数据目录 ~/.ai4one/wstool 中）"""
+    p = get_app_dir() / CONFIG_FILE_NAME
+    return p if p.is_file() else None
 
 
 def ensure_config_file() -> Path:
     """
-    若没有任何配置文件，则在程序目录生成默认配置。
+    若数据目录中没有配置文件，则生成默认配置。
 
     优先复制 config.example.json 模板（便于用户看到可配置项说明），
     没有模板则写入内置默认值。已有配置文件时直接返回，不重复生成。
@@ -71,11 +114,9 @@ def ensure_config_file() -> Path:
     if existing is not None:
         return existing
     target = get_app_dir() / CONFIG_FILE_NAME
-    if target.is_file():
-        return target
     try:
-        example = get_app_dir() / EXAMPLE_FILE_NAME
-        if example.is_file():
+        example = get_example_path()
+        if example is not None:
             target.write_text(example.read_text(encoding="utf-8-sig"), encoding="utf-8")
         else:
             target.write_text(

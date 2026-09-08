@@ -49,7 +49,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ''
 Write-Host '=== [2/3] 打包独立 EXE（SSHWebTool.exe，约需 1-3 分钟）==='
 python -m PyInstaller --noconfirm --clean --onefile --noconsole --name SSHWebTool `
-    --add-data "static;static" `
+    --add-data "static;static" --add-data "config.example.json;." `
     --hidden-import asyncssh `
     --hidden-import paramiko `
     --exclude-module playwright 
