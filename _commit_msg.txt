@@ -1,11 +1,1 @@
-﻿feat: 上传预操作支持本机路径/scripts 文件，新增"检查配置更新"
-
-- 预操作上传源文件两种方式：
-  * 本机绝对路径：Server 同机直读后 SFTP 上传（浏览器无需选文件）
-  * scripts 文件：填文件名自动在 ~/.ai4one/wstool/scripts/ 下查找，
-    弹窗内支持下拉选择（/api/scripts）
-- 新增 POST /api/preop/upload（后端直读源文件）、GET /api/scripts
-- 新增 POST /api/config/reload：扫描 config/data/scripts 并重载
-- Web 顶栏新增"🔄 检查配置"按钮；托盘菜单新增"检查配置/脚本更新"
-  （调 reload API 后 MessageBox 反馈结果）
-- storage.reload() 重新从磁盘加载 data.json
+﻿fix: 静态页面禁用缓存（Cache-Control: no-store），避免旧页面缓存导致功能不一致

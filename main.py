@@ -203,8 +203,11 @@ class SftpDeleteRequest(BaseModel):
 
 @app.get("/")
 async def index():
-    """主页：网页 UI"""
-    return FileResponse(str(STATIC_DIR / "index.html"))
+    """主页：网页 UI（禁用缓存，确保每次打开/刷新都加载最新构建，避免旧页面缓存导致功能不一致）"""
+    return FileResponse(
+        str(STATIC_DIR / "index.html"),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
 
 
 # ============ 配置 API ============
