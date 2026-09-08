@@ -929,9 +929,15 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
             return
 
     # 如果会话已有交互式终端（页面重开恢复），直接复用 process
+    # 注意：必须验证 shell 真实存活（channel/进程未关闭），否则 transport 还活着但
+    # channel 已死（远端 shell 被 kill/网络异常）时会误报"已恢复"，实际无法输入
     pending_msg = None  # 初始化：如果第一个消息不是 resize，保存下来在消息循环中处理
-    if session._has_shell and session.process is not None:
+    if session._has_shell and session.process is not None and session.is_shell_alive():
         await websocket.send_json({"type": "info", "data": "已恢复已有终端会话"})
+    elif session._has_shell and session.process is not None:
+        # shell 标志在但实际已死：重启 shell（恢复场景无运行中程序，安全）
+        await websocket.send_json({"type": "info", "data": "检测到终端已断开，正在重新启动 shell..."})
+        await session.restart_shell()
     else:
         # shell 未启动，需要启动
         if session._has_shell and session.process is None:

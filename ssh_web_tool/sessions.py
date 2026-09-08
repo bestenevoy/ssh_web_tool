@@ -781,20 +781,38 @@ class SSHSession:
         try:
             # 检查连接对象是否还活着
             if hasattr(self.conn, '_transport') and self.conn._transport:
-                return not self.conn._transport.is_closing()
+                if self.conn._transport.is_closing():
+                    return False
             # 备用方法：检查 conn 是否有 is_closing 方法
-            if hasattr(self.conn, 'is_closing'):
-                return not self.conn.is_closing()
+            elif hasattr(self.conn, 'is_closing') and self.conn.is_closing():
+                return False
+            # 补充：检查 shell channel 是否仍可用（transport 可能短暂保持但 channel 已关）
+            if self._has_shell and self.process is not None:
+                ch = getattr(self.process, '_channel', None)
+                if ch is not None:
+                    try:
+                        if ch.is_closing():
+                            return False
+                    except Exception:
+                        pass
             return True
         except Exception:
             return False
 
     def is_shell_alive(self) -> bool:
-        """检测 shell 进程是否活着"""
+        """检测 shell 进程/channel 是否真的活着（不只是标志位）"""
         if not self._has_shell or self.process is None:
             return False
         try:
-            # 优先检查内部进程对象是否存在
+            # 0. channel 层检查：channel 已关闭则 shell 不可用
+            ch = getattr(self.process, '_channel', None)
+            if ch is not None:
+                try:
+                    if ch.is_closing():
+                        return False
+                except Exception:
+                    pass
+            # 1. 优先检查内部进程对象是否存在
             if hasattr(self.process, '_process') and self.process._process is not None:
                 # 检查内部进程是否已退出
                 if hasattr(self.process._process, 'returncode'):
@@ -810,6 +828,29 @@ class SSHSession:
             print(f"[SSHSystem] is_shell_alive 检测异常: {e}")
             # 检测异常时默认认为活着，避免阻止输入
             return True
+
+    async def restart_shell(self, cols: int = 0, rows: int = 0) -> bool:
+        """
+        重启交互式 shell（仅用于恢复场景：页面重开/重新连接时检测到 shell 已死，
+        此时用户看不到终端、没有正在运行的程序，重启是安全的）
+        """
+        if self.process:
+            try:
+                self.process.close()
+            except Exception:
+                pass
+            self.process = None
+        self._has_shell = False
+        if not cols or not rows:
+            cols, rows = self._last_cols, self._last_rows
+        try:
+            await self.start_interactive_shell(cols=cols, rows=rows)
+            await self._broadcast_output("\r\n\x1b[33m[终端已重新启动]\x1b[0m\r\n")
+            return True
+        except Exception as e:
+            print(f"[SSHSystem] 重启 shell 失败: {e}")
+            await self._broadcast_output(f"\r\n\x1b[31m[终端重启失败] {e}\x1b[0m\r\n")
+            return False
 
     async def reconnect(self) -> bool:
         """自动重连 SSH 并恢复 shell（如果之前有 shell）"""
@@ -948,8 +989,16 @@ class SessionManager:
         return [s for s in self._sessions.values() if s.host_id == host_id]
 
     def get_active_terminals(self) -> List[SSHSession]:
-        """获取所有有交互式终端的活跃会话"""
-        return [s for s in self._sessions.values() if s.is_connected and s.has_shell]
+        """获取所有有交互式终端的活跃会话
+        - 外部镜像会话（paramiko/asyncssh 劫持）：保持原有判断（is_connected + has_shell）
+        - 内部会话：额外验证 shell 真实存活（channel/进程未关闭），避免前端恢复已死的会话"""
+        result = []
+        for s in self._sessions.values():
+            if not (s.is_connected and s.has_shell):
+                continue
+            if getattr(s, '_external', False) or s.is_shell_alive():
+                result.append(s)
+        return result
 
     def get_host_terminal_count(self, host_id: str) -> int:
         """获取某主机的活跃终端数（检测真实连接状态，不只是标志位）"""

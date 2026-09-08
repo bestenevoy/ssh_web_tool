@@ -191,6 +191,16 @@
   - **注意**：bash 补全目录会回显为 `cd /var/`（带尾斜杠）——这是实际执行的命令，属正常
 - **预防**：涉及「用户实际敲了什么」的统计/记录，一律以**终端回显**为准，不要用前端输入缓冲
 
+### 31. 会话"活着"必须查真实状态，不能只看本地标志
+- **现象**：实际 shell 已死，页面仍显示"已恢复已有终端会话"，输入报 `channel not open`
+- **根因**：`websocket_ssh` 恢复判断只看 `_has_shell and process is not None`（本地标志），
+  SSH transport 还活着但 shell channel 已死（远端 shell 被 kill、网络异常窗口期）时误报恢复
+- **修复**：`is_alive()`/`is_shell_alive()` 增加 **channel 层检查**（asyncssh `process._channel.is_closing()`）；
+  WS 恢复分支验证 `is_shell_alive()` 才报"已恢复"，否则走 `restart_shell()` 重启；
+  `get_active_terminals()` 也按真实存活过滤（外部镜像会话除外），前端不再恢复已死的会话
+- **预防**：判断连接/会话可用性时：`_connected`/`_has_shell` 只是"曾经连接过"的标记，
+  必须叠加 transport/channel/进程的实时状态检查；**本地标志≠真实状态**
+
 ## 附：一键自检清单（改动前过一遍）
 
 1. 前端输入相关改动：ESC 序列整段处理？合并窗口？闭包是否用了 ref？
