@@ -28,14 +28,14 @@ DEFAULT_HOST_TYPES = [
     {"key": "other", "label": "其他", "color": "#795548"},
 ]
 
-# 默认快速指令
+# 默认快速指令（param_hint 字段已废弃：前端类型已删除，参数说明放在 description 中）
 DEFAULT_QUICK_COMMANDS = [
-    {"id": "qc_1", "name": "系统信息", "command": "uname -a && uptime", "type": "direct", "param_hint": "", "pre_ops": []},
-    {"id": "qc_2", "name": "磁盘使用", "command": "df -h", "type": "direct", "param_hint": "", "pre_ops": []},
-    {"id": "qc_3", "name": "内存使用", "command": "free -h", "type": "direct", "param_hint": "", "pre_ops": []},
-    {"id": "qc_4", "name": "查看进程", "command": "ps aux --sort=-%mem | head -10", "type": "direct", "param_hint": "", "pre_ops": []},
-    {"id": "qc_5", "name": "查看监听端口", "command": "netstat -tlnp 2>/dev/null || ss -tlnp", "type": "direct", "param_hint": "", "pre_ops": []},
-    {"id": "qc_6", "name": "查看日志(最近20行)", "command": "tail -n 20 /var/log/messages 2>/dev/null || journalctl -n 20 --no-pager", "type": "direct", "param_hint": "", "pre_ops": []},
+    {"id": "qc_1", "name": "系统信息", "command": "uname -a && uptime", "type": "direct", "pre_ops": []},
+    {"id": "qc_2", "name": "磁盘使用", "command": "df -h", "type": "direct", "pre_ops": []},
+    {"id": "qc_3", "name": "内存使用", "command": "free -h", "type": "direct", "pre_ops": []},
+    {"id": "qc_4", "name": "查看进程", "command": "ps aux --sort=-%mem | head -10", "type": "direct", "pre_ops": []},
+    {"id": "qc_5", "name": "查看监听端口", "command": "netstat -tlnp 2>/dev/null || ss -tlnp", "type": "direct", "pre_ops": []},
+    {"id": "qc_6", "name": "查看日志(最近20行)", "command": "tail -n 20 /var/log/messages 2>/dev/null || journalctl -n 20 --no-pager", "type": "direct", "pre_ops": []},
 ]
 
 
@@ -303,22 +303,19 @@ class Storage:
     # ============ 快速指令管理 ============
 
     def list_quick_commands(self) -> List[dict]:
-        """获取所有快速指令（兼容旧数据：自动补全 type/param_hint/pre_ops 字段）"""
+        """获取所有快速指令（兼容旧数据：自动补全 type/pre_ops 字段）"""
         commands = self._data.get("quick_commands", [])
         for qc in commands:
             qc.setdefault("type", "direct")
-            qc.setdefault("param_hint", "")
             qc.setdefault("pre_ops", [])
         return commands
 
     def add_quick_command(self, name: str, command: str, description: str = "",
-                          cmd_type: str = "direct", param_hint: str = "",
-                          pre_ops: Optional[list] = None) -> dict:
+                          cmd_type: str = "direct", pre_ops: Optional[list] = None) -> dict:
         """新增快速指令
 
         Args:
-            cmd_type: "direct" 直接执行 / "param" 带参数（执行前弹输入框，替换命令中的 {args} 占位符）
-            param_hint: 带参数类型的参数说明（如"输入文件路径"）
+            cmd_type: "direct" 直接执行 / "param" 带参数（输入后不执行，命令含 {args} 供编辑）
             pre_ops: 预操作列表 [{"type": "upload"|"chmod"|"env", ...}]
         """
         qc = {
@@ -327,7 +324,6 @@ class Storage:
             "command": command,
             "description": description,
             "type": cmd_type if cmd_type in ("direct", "param") else "direct",
-            "param_hint": param_hint or "",
             "pre_ops": pre_ops or [],
         }
         self._data["quick_commands"].append(qc)
@@ -335,8 +331,7 @@ class Storage:
         return qc
 
     def update_quick_command(self, qc_id: str, name: str, command: str, description: str = "",
-                             cmd_type: str = "direct", param_hint: str = "",
-                             pre_ops: Optional[list] = None) -> Optional[dict]:
+                             cmd_type: str = "direct", pre_ops: Optional[list] = None) -> Optional[dict]:
         """更新快速指令"""
         for qc in self._data["quick_commands"]:
             if qc["id"] == qc_id:
@@ -344,7 +339,6 @@ class Storage:
                 qc["command"] = command
                 qc["description"] = description
                 qc["type"] = cmd_type if cmd_type in ("direct", "param") else "direct"
-                qc["param_hint"] = param_hint or ""
                 qc["pre_ops"] = pre_ops or []
                 self._save()
                 return qc

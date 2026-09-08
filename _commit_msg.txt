@@ -1,13 +1,24 @@
-﻿fix: 审查发现的4个真实Bug修复
+﻿test: 建立可扩展测试框架 + 清理 param_hint 废弃字段
 
-1. 预操作上传二进制文件损坏：read_bytes 后不再 utf-8 替换解码，
-   write_file 支持 bytes 二进制写入（'wb' 模式），文本/二进制均无损
-2. 注入模式命令执行无锁：inject_command / inject_and_capture 与
-   run_command 共用 _cmd_lock，避免并发写 stdin 输出串台；
-   顺带删除重复定义的 inject_command（后定义覆盖前定义的隐患）
-3. 输出广播无界队列：改为有界队列(maxsize=100) + put_nowait，
-   慢监听器丢最旧保最新，不再阻塞整个广播链（日志/echo/其他监听器）
-4. data.json 非原子写：临时文件 + fsync + os.replace 原子替换，
-   崩溃/断电不再损坏数据文件
-5. 顺手：script 上传源拒绝路径穿越（../ 等）；ws 首个消息
-   except (TimeoutError, Exception) 收窄为 TimeoutError（不吞断开异常）
+新增 pytest 测试体系（tests/，pytest + pytest-asyncio）：
+- unit/：纯逻辑无 IO（storage 原子写、history_db、命令回显解析）
+- api/：TestClient + 内存会话 mock（不连真实 SSH）
+- e2e/：真实 SSH（默认 skip，--e2e 启用）
+- conftest：import main 前隔离数据目录；client fixture 每测试全新数据文件
+- run_tests.ps1 / pytest.ini / tests/README.md：一键运行与扩展说明
+
+回归测试覆盖已修复的 4 个 Bug：
+- 预操作上传二进制无损（含 e2e 真实 SSH 版）
+- 注入命令并发锁（inject_and_capture 事务串行）
+- 输出广播有界队列（丢最旧保最新，不阻塞广播链）
+- data.json 原子写（无 .tmp 残留 + 崩溃容错）
+- 顺带：script 路径穿越 400
+
+清理 param_hint 废弃字段（前端 types 已删，storage/main 残留）：
+- storage.add/update_quick_command 不再写该字段，DEFAULT 同步清理
+- main.py QuickCommandRequest 移除字段、handler 不再透传
+
+约定（写入 docs/development-lessons.md #33）：
+以后修复任何 Bug 必须同步添加回归测试，全量测试通过才算修复完成
+
+测试结果：47 passed + 3 e2e passed（真实 SSH 8.137.52.71）

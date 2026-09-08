@@ -173,9 +173,8 @@ class QuickCommandRequest(BaseModel):
     name: str
     command: str
     description: str = ""
-    # 指令类型：direct 直接执行 / param 带参数（执行前弹输入框，替换命令中的 {args} 占位符）
+    # 指令类型：direct 直接执行 / param 带参数（输入后不执行，命令含 {args} 供编辑）
     type: str = "direct"
-    param_hint: str = ""
     # 预操作（执行命令前依次执行）：[{"type": "upload", "remote": "/path"}, {"type": "chmod", "mode": "+x", "path": "/path"}, {"type": "env", "key": "VAR", "value": "x"}]
     pre_ops: list = []
 
@@ -750,7 +749,7 @@ async def api_list_quick_commands():
 async def api_add_quick_command(req: QuickCommandRequest):
     """新增快速指令"""
     qc = storage.add_quick_command(req.name, req.command, req.description,
-                                   req.type, req.param_hint, req.pre_ops)
+                                   req.type, req.pre_ops)
     return qc
 
 
@@ -769,7 +768,7 @@ async def api_reorder_quick_commands(req: ReorderQuickCommandsRequest):
 async def api_update_quick_command(qc_id: str, req: QuickCommandRequest):
     """更新快速指令"""
     qc = storage.update_quick_command(qc_id, req.name, req.command, req.description,
-                                      req.type, req.param_hint, req.pre_ops)
+                                      req.type, req.pre_ops)
     if not qc:
         raise HTTPException(status_code=404, detail="快速指令不存在")
     return qc

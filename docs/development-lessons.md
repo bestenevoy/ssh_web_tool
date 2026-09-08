@@ -210,6 +210,17 @@
 - **修复 2**：提示符剥离改为**循环剥离**（`while` 连续剥掉所有行首提示符）
 - **预防**：解析终端回显要假设"一行可含多个提示符（清屏重绘）"；宽松匹配只在精确失败时兜底且失败必须返回空；双通道（前端兜底 + 后端回显）比单通道可靠
 
+### 33. 修复 Bug 必须同时添加回归测试（强制约定）
+- **约定**：任何 Bug 修复（包括顺手清理）都必须在本测试框架内留下对应回归测试，否则视为修复不完整；"已修好"的标准 = 对应测试 + 全量测试套件通过
+- **测试框架**（`tests/`，pytest + pytest-asyncio）：
+  - `unit/`：纯逻辑无 IO（storage 原子写、history_db、回显解析）
+  - `api/`：TestClient + 内存会话 mock（不连真实 SSH），回归类测试放这里
+  - `e2e/`：真实 SSH（默认 skip，`--e2e` + `WSTOOL_E2E_HOST/PASSWORD` 启用）
+  - conftest 在 import main 前把 storage 指向临时目录；`client` fixture 每测试换全新数据文件（**防测试间数据污染**）
+- **运行**：`python -m pytest tests`（快速）或 `.\tests\run_tests.ps1 -All`
+- **已落地的回归**：二进制上传无损（Bug：utf-8 replace 损坏）、注入命令并发锁、广播有界队列、data.json 原子写、script 路径穿越 400
+- **教训**：写 API 测试时先核对真实返回结构（如 `GET /api/hosts` 返回 `{hosts, groups, host_types}` 而非 list）；`is_connected` 是只读 property 要设 `_connected`；mock 实例方法直接赋属性即可，不要 `.__get__()` 绑定（会错位传 self）
+
 ## 附：一键自检清单（改动前过一遍）
 
 1. 前端输入相关改动：ESC 序列整段处理？合并窗口？闭包是否用了 ref？
@@ -219,3 +230,4 @@
 5. build 前：8765 端口进程停了吗？
 6. 提交：消息用 `-F` 文件（避免引号坑）？两端都 push？
 7. 发布：tag 两端都推？Release 资产验证了？
+8. **修 Bug：回归测试写了吗？全量测试过了吗？**（`python -m pytest tests`）

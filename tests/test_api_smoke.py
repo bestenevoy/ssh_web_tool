@@ -38,11 +38,12 @@ assert r.status_code == 200
 print('4. 排序 API OK')
 
 # 5. 快捷指令新字段
-r = c.post('/api/quick-commands', json={'name': '部署', 'command': 'sh deploy.sh {args}', 'type': 'param', 'param_hint': '环境', 'pre_ops': [{'type': 'chmod', 'mode': '+x', 'path': '/a.sh'}]})
+r = c.post('/api/quick-commands', json={'name': '部署', 'command': 'sh deploy.sh {args}', 'type': 'param', 'pre_ops': [{'type': 'chmod', 'mode': '+x', 'path': '/a.sh'}]})
 assert r.status_code == 200, r.text
 qc = r.json()
 assert qc['type'] == 'param' and qc['pre_ops'][0]['type'] == 'chmod'
-r = c.put(f"/api/quick-commands/{qc['id']}", json={'name': '部署2', 'command': 'echo {args}', 'type': 'param', 'param_hint': 'x', 'pre_ops': []})
+assert 'param_hint' not in qc  # 字段已废弃，新数据不再写入
+r = c.put(f"/api/quick-commands/{qc['id']}", json={'name': '部署2', 'command': 'echo {args}', 'type': 'param', 'pre_ops': []})
 assert r.status_code == 200
 print('5. 快捷指令 API OK')
 
