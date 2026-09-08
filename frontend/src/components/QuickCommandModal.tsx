@@ -26,7 +26,6 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
   const [command, setCommand] = useState('')
   const [description, setDescription] = useState('')
   const [cmdType, setCmdType] = useState<'direct' | 'param'>('direct')
-  const [paramHint, setParamHint] = useState('')
   const [preOps, setPreOps] = useState<QuickPreOp[]>([])
   const [scripts, setScripts] = useState<string[]>([])
   const nameInputRef = useRef<HTMLInputElement>(null)
@@ -45,7 +44,6 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
       setCommand(editing.command)
       setDescription(editing.description || '')
       setCmdType(editing.type || 'direct')
-      setParamHint(editing.param_hint || '')
       setPreOps(editing.pre_ops?.map((o) => ({ ...o })) || [])
     }
   }, [editing])
@@ -61,7 +59,6 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
       command: command.trim(),
       description: description.trim(),
       type: cmdType,
-      param_hint: cmdType === 'param' ? paramHint.trim() : '',
       pre_ops: preOps.filter((o) => {
         if (o.type === 'upload') return o.source?.trim() && o.remote?.trim()
         if (o.type === 'chmod') return o.mode?.trim() && o.path?.trim()
@@ -167,16 +164,8 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
 
         {cmdType === 'param' && (
           <div className="form-group">
-            <label>参数说明（提示语）</label>
-            <input
-              type="text"
-              placeholder="例如：输入目标环境（prod/test）"
-              value={paramHint}
-              onChange={(e) => setParamHint(e.target.value)}
-              onKeyDown={handleKeyDown}
-            />
-            <div style={{ fontSize: 10, color: '#5a6a8a', marginTop: 4 }}>
-              命令中使用 {`{args}`} 表示参数位置；未包含 {`{args}`} 时参数自动追加到命令末尾
+            <div style={{ fontSize: 11, color: '#5a6a8a' }}>
+              命令中使用 {`{args}`} 表示参数位置；未包含 {`{args}`} 时参数自动追加到命令末尾。
             </div>
           </div>
         )}

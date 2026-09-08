@@ -88,9 +88,8 @@ export interface QuickCommand {
   name: string
   command: string
   description?: string
-  // 指令类型：direct 直接执行 / param 带参数（执行前弹输入框，替换命令中的 {args} 占位符）
+  // 指令类型：direct 直接执行 / param 带参数（点击后输入到终端，替换命令中的 {args} 占位符）
   type?: 'direct' | 'param'
-  param_hint?: string
   pre_ops?: QuickPreOp[]
 }
 
