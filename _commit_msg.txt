@@ -1,1 +1,1 @@
-﻿fix: 输入合并窗口 15ms 调大至 50ms（进一步减少存储阵列 SSH 通信次数）
+﻿docs: 新增开发踩坑记录 development-lessons.md，修正 troubleshooting 中过时的重连策略描述
