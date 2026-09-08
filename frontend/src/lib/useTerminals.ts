@@ -65,7 +65,7 @@ export function useTerminals(settings: TerminalSettings) {
   // 保存最新的 terminals 引用，用于回调中（解决闭包捕获旧状态导致 input_buffer 不记录的问题）
   const terminalsRef = useRef(terminals)
   terminalsRef.current = terminals
-  // 输入合并发送：键盘输入按 15ms 窗口合并后一次 WS 发送，避免逐字符通信
+  // 输入合并发送：键盘输入按 50ms 窗口合并后一次 WS 发送，避免逐字符通信
   // （存储阵列等慢速 SSH 服务在大量小包时可能挂死 channel，合并大幅减少 write 次数）
   const inputSendBufferRef = useRef<Map<string, string>>(new Map())
   const inputFlushTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
@@ -87,7 +87,7 @@ export function useTerminals(settings: TerminalSettings) {
     const buf = inputSendBufferRef.current.get(session_id) || ''
     inputSendBufferRef.current.set(session_id, buf + data)
     if (!inputFlushTimerRef.current.has(session_id)) {
-      inputFlushTimerRef.current.set(session_id, setTimeout(() => flushInputBuffer(session_id), 15))
+      inputFlushTimerRef.current.set(session_id, setTimeout(() => flushInputBuffer(session_id), 50))
     }
   }, [flushInputBuffer])
 
