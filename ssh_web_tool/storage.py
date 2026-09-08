@@ -426,25 +426,8 @@ class Storage:
 
     # ============ 全局命令历史（跨终端，记录使用频次） ============
 
-    def record_command(self, command: str):
-        """记录一条命令，增加使用次数"""
-        cmd = command.strip()
-        if not cmd or len(cmd) > 500:
-            return  # 忽略空命令和过长的命令
-        history = self._data.setdefault("command_history", {})
-        if cmd in history:
-            history[cmd]["count"] += 1
-            history[cmd]["last_used"] = time.time()
-        else:
-            history[cmd] = {"count": 1, "last_used": time.time()}
-        self._save()
-
     def search_commands(self, keyword: str = "", limit: int = 50) -> list:
-        """
-        搜索命令，按使用频次降序排序（频次相同按最后使用时间降序）
-        - keyword: 搜索关键词（空则返回全部）
-        - limit: 最多返回多少条
-        """
+        """历史命令已迁移至 SQLite（见 history_db.py），此方法保留以兼容旧数据访问"""
         history = self._data.get("command_history", {})
         kw = keyword.lower().strip()
         results = []
@@ -455,12 +438,11 @@ class Storage:
                     "count": info.get("count", 1),
                     "last_used": info.get("last_used", 0),
                 })
-        # 按使用频次降序，频次相同按最后使用时间降序
         results.sort(key=lambda x: (-x["count"], -x["last_used"]))
         return results[:limit]
 
     def list_recent_commands(self, limit: int = 100) -> list:
-        """获取最近使用的命令（按最后使用时间降序）"""
+        """历史命令已迁移至 SQLite（见 history_db.py），此方法保留以兼容旧数据访问"""
         history = self._data.get("command_history", {})
         results = [
             {"command": cmd, "count": info.get("count", 1), "last_used": info.get("last_used", 0)}

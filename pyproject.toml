@@ -12,7 +12,8 @@ license = { text = "MIT" }
 authors = [
     { name = "bestenevoy" },
 ]
-keywords = ["ssh", "web", "terminal", "xshell", "paramiko", "asyncssh", "sftp"]
+keywords = ["ssh", "web", "terminal", "xshell", "paramiko", "aiosqlite,
+    asyncssh", "sftp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Web Environment",

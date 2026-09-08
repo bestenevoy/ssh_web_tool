@@ -122,4 +122,14 @@ export const api = {
         | { type: 'history'; command: string; count: number; last_used: number }
       >
     }>(`/api/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}`),
+
+  // 历史命令忽略/恢复
+  ignoreHistoryCommand: (command: string) =>
+    request<{ status: string }>('/api/history/ignore', { method: 'POST', body: JSON.stringify({ command }) }),
+  unignoreHistoryCommand: (command: string) =>
+    request<{ status: string }>('/api/history/unignore', { method: 'POST', body: JSON.stringify({ command }) }),
+  listIgnoredCommands: (limit: number = 200) =>
+    request<{ commands: Array<{ command: string; count: number; last_used: number }> }>(
+      `/api/history/ignored?limit=${limit}`
+    ),
 }

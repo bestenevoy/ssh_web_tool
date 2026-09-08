@@ -27,6 +27,7 @@ from ssh_web_tool.sessions import session_manager, SSHSession
 from ssh_web_tool.storage import storage
 from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
 from ssh_web_tool.config import load_config, get_app_dir
+from ssh_web_tool import history_db
 from ssh_web_tool.external_sessions import external_hub
 
 app = FastAPI(title="SSH Web Tool", version="2.0.0")
@@ -364,7 +365,7 @@ async def api_run_command(session_id: str, req: RunCommandRequest):
         raise HTTPException(status_code=400, detail="SSH 未连接")
 
     # 记录命令到全局历史（跨终端，按使用频次排序）
-    storage.record_command(req.command)
+    await history_db.record_command(req.command)
 
     # 判断使用哪种模式
     use_inject = (not req.process) and session.has_shell
@@ -640,22 +641,47 @@ class RecordCommandRequest(BaseModel):
 @app.post("/api/history/record")
 async def api_record_command(req: RecordCommandRequest):
     """记录一条命令到全局历史（增加使用频次）"""
-    storage.record_command(req.command)
+    await history_db.record_command(req.command)
     return {"status": "ok"}
 
 
 @app.get("/api/history/search")
-async def api_search_commands(keyword: str = "", limit: int = 50):
-    """搜索全局命令历史，按使用频次降序排序（频次相同按最后使用时间降序）"""
-    results = storage.search_commands(keyword, limit)
+async def api_search_commands(keyword: str = "", limit: int = 50, include_ignored: bool = False):
+    """搜索全局命令历史（SQLite），按使用频次降序（频次相同按最后使用时间降序）；默认过滤已忽略"""
+    results = await history_db.search_commands(keyword, limit, include_ignored=include_ignored)
     return {"keyword": keyword, "commands": results}
 
 
 @app.get("/api/history/recent")
 async def api_recent_commands(limit: int = 100):
-    """获取最近使用的命令（按最后使用时间降序）"""
-    results = storage.list_recent_commands(limit)
+    """获取最近使用的命令（按最后使用时间降序），已忽略的不返回"""
+    results = await history_db.list_recent_commands(limit)
     return {"commands": results}
+
+
+@app.get("/api/history/ignored")
+async def api_ignored_commands(limit: int = 200):
+    """获取已忽略的命令列表（用于恢复管理）"""
+    results = await history_db.list_ignored_commands(limit)
+    return {"commands": results}
+
+
+class IgnoreCommandRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/history/ignore")
+async def api_ignore_command(req: IgnoreCommandRequest):
+    """忽略一条命令（搜索/最近命令不再显示）"""
+    ok = await history_db.ignore_command(req.command)
+    return {"status": "ok" if ok else "not_found"}
+
+
+@app.post("/api/history/unignore")
+async def api_unignore_command(req: IgnoreCommandRequest):
+    """恢复一条被忽略的命令"""
+    ok = await history_db.unignore_command(req.command)
+    return {"status": "ok" if ok else "not_found"}
 
 
 @app.get("/api/search")
@@ -680,8 +706,8 @@ async def api_unified_search(keyword: str = "", limit: int = 50):
                 'command': qc.get('command', ''),
             })
 
-    # 2. 搜索历史命令（按使用频次排序）
-    history_commands = storage.search_commands(keyword, limit)
+    # 2. 搜索历史命令（按使用频次排序，SQLite，已忽略的不返回）
+    history_commands = await history_db.search_commands(keyword, limit)
     for hc in history_commands:
         # 避免和快捷命令重复（相同命令只显示一次，优先显示快捷命令）
         if not any(r['type'] == 'quick' and r['command'] == hc['command'] for r in results):
@@ -1175,6 +1201,15 @@ def main():
     # 统一数据目录：~/.ai4one/wstool；首次运行迁移旧位置（EXE 目录/项目根）的数据
     ensure_data_dir()
     migrate_legacy_data()
+
+    # 历史命令数据库：建表 + 从 data.json 迁移存量命令（幂等）
+    try:
+        asyncio.run(history_db.init_db())
+        migrated = asyncio.run(history_db.migrate_from_json(get_app_dir() / "data.json"))
+        if migrated:
+            print(f"[history] 已从 data.json 迁移 {migrated} 条历史命令到 SQLite")
+    except Exception as e:
+        print(f"[history] 初始化历史数据库失败: {e}")
 
     # 单实例：已有一个实例在运行则打开其 Web 页面并退出
     if not acquire_single_instance():
