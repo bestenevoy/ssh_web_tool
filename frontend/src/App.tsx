@@ -178,8 +178,9 @@ function App() {
     if (!host) { alert('找不到该主机信息'); return }
     setStatus(`正在重新连接 ${host.host}...`)
     try {
-      await terminals.createTerminal(host)
-      await terminals.closeTerminal(session_id, false)
+      // 先建新会话（保留原标签名），再关闭旧标签；keepActive=true 避免 activeId 跳回第一个 Tab
+      await terminals.createTerminal(host, inst.terminal_name)
+      await terminals.closeTerminal(session_id, false, true)
       loadHosts()
       setTimeout(() => loadHosts(), 800)
     } catch (e) {

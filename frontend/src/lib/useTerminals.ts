@@ -295,7 +295,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
 
       ws.onopen = () => {
-        term.reset()
+        // 不做 term.reset()：历史加载会显示主机登录 banner，reset 会把它清掉
         term.focus()
         console.log('[Terminal] ws.onopen, initial size:', term.cols, 'x', term.rows)
         const doResize = () => {
@@ -303,9 +303,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           if (container) {
             try { fitAddon.fit() } catch (e) { console.error('fit failed', e) }
             console.log('[Terminal] after fit, size:', term.cols, 'x', term.rows)
-            // 使用 resyncTerminal：reset + 启用自动换行 + Ctrl+L + resize
-            // 确保自动换行被启用，防止输入到行尾时光标回到行首覆盖
-            resyncTerminal(term, ws)
+            // resyncTerminal 传 false：不清屏不重置（历史加载负责显示 banner/MOTD）
+            // 只启用自动换行 + 发送 resize，确保输入到行尾时光标正常换行
+            resyncTerminal(term, ws, false)
           } else {
             console.log('[Terminal] container not found, skip resize')
           }
@@ -426,8 +426,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
             if (container) {
               try { fitAddon.fit() } catch (e) { console.error('fit failed', e) }
               console.log('[Terminal] restore after fit, size:', term.cols, 'x', term.rows)
-              // 恢复终端时也使用 resyncTerminal，确保自动换行被启用
-              resyncTerminal(term, ws)
+              // 恢复终端时 resyncTerminal 传 false：不清屏不重置，保留历史日志（含 banner）
+              resyncTerminal(term, ws, false)
             }
           }
           doResize()
@@ -539,7 +539,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     if (inst && inst.term) inst.term.focus()
   }, [terminals, activeId])
 
-  const closeTerminal = useCallback(async (session_id: string, closeBackend: boolean) => {
+  const closeTerminal = useCallback(async (session_id: string, closeBackend: boolean, keepActive: boolean = false) => {
     const inst = terminals.get(session_id)
     if (!inst) return
     if (inst.ws) inst.ws.close()
@@ -552,7 +552,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       next.delete(session_id)
       return next
     })
-    if (activeId === session_id) {
+    // keepActive=true：关闭当前标签时不切换 activeId（用于重连流程，新会话已激活）
+    if (!keepActive && activeId === session_id) {
       const remaining = Array.from(terminals.keys()).filter((id) => id !== session_id)
       setActiveId(remaining.length > 0 ? remaining[0] : null)
     }
