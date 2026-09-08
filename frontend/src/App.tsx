@@ -148,8 +148,9 @@ function App() {
   }, [terminals, hosts, loadHosts])
 
   const handleCloseTerminal = useCallback((session_id: string) => {
-    const closeBackend = confirm('关闭终端标签？\n\n选择「确定」：同时关闭后端SSH连接\n选择「取消」：仅关闭标签，后端连接保持（可在页面重开时恢复）')
-    terminals.closeTerminal(session_id, closeBackend)
+    const ok = confirm('关闭终端标签？\n\n将同时关闭后端 SSH 连接，重开页面不会恢复该会话。')
+    if (!ok) return
+    terminals.closeTerminal(session_id)
       .then(() => loadHosts())
   }, [terminals, loadHosts])
 
@@ -172,7 +173,7 @@ function App() {
     try {
       // 先建新会话（保留原标签名），再关闭旧标签；keepActive=true 避免 activeId 跳回第一个 Tab
       await terminals.createTerminal(host, inst.terminal_name)
-      await terminals.closeTerminal(session_id, false, true)
+      await terminals.closeTerminal(session_id, true)
       loadHosts()
       setTimeout(() => loadHosts(), 800)
     } catch (e) {

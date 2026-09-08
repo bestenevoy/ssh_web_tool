@@ -600,7 +600,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     if (inst && inst.term) inst.term.focus()
   }, [terminals, activeId])
 
-  const closeTerminal = useCallback(async (session_id: string, closeBackend: boolean, keepActive: boolean = false) => {
+  // 关闭终端标签：同时删除后端会话（不保留"仅关闭标签"的连接），
+  // 这样重开页面不会恢复已关闭的会话；只有后端仍真实存活的连接（整关页面但程序未退）才会被恢复
+  const closeTerminal = useCallback(async (session_id: string, keepActive: boolean = false) => {
     const inst = terminals.get(session_id)
     if (!inst) return
     // 清理输入合并缓冲与定时器
@@ -609,9 +611,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     if (t) { clearTimeout(t); inputFlushTimerRef.current.delete(session_id) }
     if (inst.ws) inst.ws.close()
     if (inst.state_timer) clearInterval(inst.state_timer)
-    if (closeBackend) {
-      try { await api.closeSession(session_id) } catch {}
-    }
+    try { await api.closeSession(session_id) } catch {}
     setTerminals((prev) => {
       const next = new Map(prev)
       next.delete(session_id)

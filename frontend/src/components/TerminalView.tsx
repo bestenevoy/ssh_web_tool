@@ -56,7 +56,7 @@ export function TerminalView({ terminals, activeId, registerContainer, onReconne
         <div className="empty-state">
           <div className="icon">🖥️</div>
           <div className="text">选择左侧主机开始 SSH 连接</div>
-          <div className="hint">支持多标签终端 · 后端统一维护连接 · 页面关闭不中断</div>
+          <div className="hint">支持多标签终端 · 关闭标签同时关闭 SSH 连接 · 整关页面后重开会自动恢复仍连接的会话</div>
         </div>
       )}
     </div>
