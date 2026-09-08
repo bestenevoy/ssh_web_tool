@@ -163,14 +163,14 @@ jobs:
           set -e
           API="https://gitee.com/api/v5/repos/lookingstars/ssh_web_tool"
           TOKEN="$GITEE_TOKEN"
-          # 查询该 tag 是否已有发行版
+          # 查询该 tag 是否已有发行版（Gitee 对不存在返回 200 + null，需判空）
           HTTP=$(curl -s -o /tmp/release.json -w "%{http_code}" "$API/releases/tags/$TAG?access_token=$TOKEN" || true)
-          if [ "$HTTP" = "200" ]; then
-            REL_ID=$(python3 -c "import json;print(json.load(open('/tmp/release.json'))['id'])")
+          REL_ID=$(python3 -c "import json;d=json.load(open('/tmp/release.json'));print(d['id'] if isinstance(d,dict) and d.get('id') else '')" 2>/dev/null || true)
+          if [ -n "$REL_ID" ]; then
             echo "发行版已存在 id=$REL_ID"
           else
             curl -s -X POST "$API/releases" -H "Content-Type: application/json" \
-              -d "{\"access_token\":\"$TOKEN\",\"tag_name\":\"$TAG\",\"name\":\"Release $TAG\",\"body\":\"由 GitHub Actions 自动发布\",\"prerelease\":false}" \
+              -d "{\"access_token\":\"$TOKEN\",\"tag_name\":\"$TAG\",\"name\":\"Release $TAG\",\"body\":\"由 GitHub Actions 自动发布\",\"target_commitish\":\"master\",\"prerelease\":false}" \
               -o /tmp/release.json
             REL_ID=$(python3 -c "import json;print(json.load(open('/tmp/release.json'))['id'])")
             echo "发行版已创建 id=$REL_ID"
