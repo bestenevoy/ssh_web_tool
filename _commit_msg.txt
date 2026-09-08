@@ -1,1 +1,7 @@
-﻿docs: 新增开发踩坑记录 development-lessons.md，修正 troubleshooting 中过时的重连策略描述
+﻿fix: Ctrl+V 粘贴触发两次（xterm 原生 paste 事件 + term.paste 重复）
+
+- 根因: attachCustomKeyEventHandler 返回 false 时，xterm 的 _keyDown 只是 return，
+  并未 preventDefault；浏览器默认行为继续生成原生 paste 事件，xterm textarea 的
+  handlePasteEvent 监听器把剪贴板内容再发送一次，加上自定义的 term.paste 共两次
+- 修复: Ctrl+V 分支先 e.preventDefault() 阻断浏览器默认行为（不再产生原生 paste 事件），
+  只保留 term.paste 一次

@@ -189,6 +189,9 @@ function setupTerminalCopy(term: Terminal, onAltR?: () => void) {
       return false
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+      // 关键：必须 preventDefault 阻止浏览器默认行为——否则 xterm textarea 的原生 paste
+      // 事件监听（handlePasteEvent）会再触发一次粘贴，加上 term.paste 共两次
+      e.preventDefault()
       // 阻止 xterm 把 Ctrl+V 当作按键发送；从剪贴板读取纯文本后粘贴
       if (navigator.clipboard?.readText) {
         navigator.clipboard.readText()
