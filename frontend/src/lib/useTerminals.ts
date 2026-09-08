@@ -148,11 +148,7 @@ function markDisconnected(term: Terminal, session_id: string, setTerminals: Reac
 }
 
 function setupTerminalCopy(term: Terminal, onAltR?: () => void) {
-  // 1) 选中终端内容立即复制（无需 Ctrl+C）
-  term.onSelectionChange(() => {
-    if (term.hasSelection()) copySelection(term)
-  })
-  // 2) Ctrl+C：有选区时复制并阻止发送（避免打断远端正在运行的命令）
+  // 1) Ctrl+C：有选区时复制并阻止发送（避免打断远端正在运行的命令）
   //    Ctrl+V：读取剪贴板（纯文本，自动清除格式）并粘贴到终端
   //    注意：xterm 的自定义按键 handler 是单槽，复制与粘贴必须在同一个 handler 内
   term.attachCustomKeyEventHandler((e) => {
