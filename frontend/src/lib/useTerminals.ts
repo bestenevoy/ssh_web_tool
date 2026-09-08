@@ -65,6 +65,31 @@ export function useTerminals(settings: TerminalSettings) {
   // 保存最新的 terminals 引用，用于回调中（解决闭包捕获旧状态导致 input_buffer 不记录的问题）
   const terminalsRef = useRef(terminals)
   terminalsRef.current = terminals
+  // 输入合并发送：键盘输入按 15ms 窗口合并后一次 WS 发送，避免逐字符通信
+  // （存储阵列等慢速 SSH 服务在大量小包时可能挂死 channel，合并大幅减少 write 次数）
+  const inputSendBufferRef = useRef<Map<string, string>>(new Map())
+  const inputFlushTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // 合并发送 flush：把缓冲的输入一次性发给后端
+  const flushInputBuffer = useCallback((session_id: string) => {
+    const b = inputSendBufferRef.current.get(session_id) || ''
+    inputSendBufferRef.current.delete(session_id)
+    inputFlushTimerRef.current.delete(session_id)
+    if (!b) return
+    const inst = terminalsRef.current.get(session_id)
+    if (inst && inst.ws && inst.ws.readyState === WebSocket.OPEN) {
+      inst.ws.send(JSON.stringify({ type: 'input', data: b }))
+    }
+  }, [])
+
+  // 把输入字符追加到合并缓冲（逐字符记录历史，合并后发送）
+  const appendInput = useCallback((session_id: string, data: string) => {
+    const buf = inputSendBufferRef.current.get(session_id) || ''
+    inputSendBufferRef.current.set(session_id, buf + data)
+    if (!inputFlushTimerRef.current.has(session_id)) {
+      inputFlushTimerRef.current.set(session_id, setTimeout(() => flushInputBuffer(session_id), 15))
+    }
+  }, [flushInputBuffer])
 
   // 后端所有活跃终端列表（包括 CLI/Python 包创建的，Web 页面统一显示）
   const [activeSessions, setActiveSessions] = useState<any[]>([])
@@ -318,10 +343,10 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       const ws = new WebSocket(`${wsProto}//${location.host}/ws/ssh/${session_id}`)
 
       term.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'input', data }))
-        }
+        // 逐字符更新命令历史缓冲（保持 ESC 序列完整）
         handleTerminalInput(session_id, data)
+        // 合并发送：15ms 窗口内积累后一次 WS 发送，减少 SSH 通信次数
+        appendInput(session_id, data)
       })
       setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
 
@@ -419,7 +444,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       connectingRef.current = false
       setConnecting(false)
     }
-  }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput])
+  }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, appendInput])
 
   const restoreTerminals = useCallback(async () => {
     try {
@@ -443,10 +468,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         const ws = new WebSocket(`${wsProto}//${location.host}/ws/ssh/${t.session_id}`)
 
         term.onData((data) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'input', data }))
-          }
           handleTerminalInput(t.session_id, data)
+          appendInput(t.session_id, data)
         })
         setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
 
@@ -534,7 +557,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     } catch (e) {
       console.error('恢复终端失败', e)
     }
-  }, [activeId, fitTerminal, sendResize, handleTerminalInput])
+  }, [activeId, fitTerminal, sendResize, handleTerminalInput, appendInput])
 
   // 定期同步活跃终端列表，并自动恢复新创建的终端（CLI/Python 包创建的）
   useEffect(() => {
@@ -575,6 +598,10 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
   const closeTerminal = useCallback(async (session_id: string, closeBackend: boolean, keepActive: boolean = false) => {
     const inst = terminals.get(session_id)
     if (!inst) return
+    // 清理输入合并缓冲与定时器
+    inputSendBufferRef.current.delete(session_id)
+    const t = inputFlushTimerRef.current.get(session_id)
+    if (t) { clearTimeout(t); inputFlushTimerRef.current.delete(session_id) }
     if (inst.ws) inst.ws.close()
     if (inst.state_timer) clearInterval(inst.state_timer)
     if (closeBackend) {
