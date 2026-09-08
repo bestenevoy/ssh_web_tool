@@ -127,6 +127,28 @@ export function useTerminals(settings: TerminalSettings) {
     }
   }, [])
 
+  // 等待容器注册且尺寸就绪后 fit（最多约 600ms），fit 成功后发送 resize 到后端。
+  // 用于写入历史输出前确保终端宽高正确——否则历史内容按默认 80 列折行，
+  // fit 到实际宽度后已写入的行不会重新折行，导致 banner/MOTD 显示错乱
+  const ensureFit = useCallback((session_id: string, term: Terminal, fitAddon: FitAddon, ws: WebSocket | null, maxRetry = 12): Promise<void> => {
+    return new Promise((resolve) => {
+      const attempt = (left: number) => {
+        const container = containersRef.current.get(session_id)
+        if (container && container.clientWidth > 0) {
+          try {
+            fitAddon.fit()
+            sendResize(term, ws)
+            resolve()
+            return
+          } catch { /* 容器未完全就绪，继续重试 */ }
+        }
+        if (left <= 0) resolve()
+        else setTimeout(() => attempt(left - 1), 50)
+      }
+      attempt(maxRetry)
+    })
+  }, [sendResize])
+
   // 终端重同步：清除缓冲区 + 启用自动换行 + 发送 Ctrl+L 让 shell 重绘 + 发送 resize
   // 用于初始连接时，确保 shell 第一帧输出使用正确的终端尺寸
   // 终端复制：选中内容立即复制；Ctrl+C 有选区时复制（不发送 SIGINT 到远端）
@@ -375,12 +397,12 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         // 延迟再次调用，确保容器已注册且 xterm.js 渲染完成
         setTimeout(doResize, 50)
         setTimeout(doResize, 200)
-        // 加载历史输出
-        // 加载完整历史日志（含主机登录 banner/MOTD），offset 用大值表示从文件开头读
-        api.getHistoryLogs(session_id, 999999, 8000).then((res) => {
+        // 加载完整历史日志（含主机登录 banner/MOTD）：先确保 fit（宽高就绪）再写入，
+        // 避免历史内容按默认宽度折行导致显示错乱；不追加"加载完成"标记（无实际意义）
+        api.getHistoryLogs(session_id, 999999, 8000).then(async (res) => {
           if (res.content) {
+            await ensureFit(session_id, term, fitAddon, ws)
             term.write(res.content)
-            term.write('\r\n\x1b[33m[--- 历史输出加载完成 ---]\x1b[0m\r\n')
           }
         }).catch(() => {})
       }
@@ -449,7 +471,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       connectingRef.current = false
       setConnecting(false)
     }
-  }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, appendInput])
+  }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, appendInput, ensureFit])
 
   const restoreTerminals = useCallback(async () => {
     try {
@@ -493,11 +515,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           doResize()
           setTimeout(doResize, 50)
           setTimeout(doResize, 200)
-          // 加载历史输出
-          api.getHistoryLogs(t.session_id, 999999, 8000).then((res) => {
+          // 加载历史输出：先确保 fit 再写入（避免按默认宽度折行错乱），不追加"加载完成"标记
+          api.getHistoryLogs(t.session_id, 999999, 8000).then(async (res) => {
             if (res.content) {
+              await ensureFit(t.session_id, term, fitAddon, ws)
               term.write(res.content)
-              term.write('\r\n\x1b[33m[--- 历史输出加载完成 ---]\x1b[0m\r\n')
             }
           }).catch(() => {})
         }
@@ -562,7 +584,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     } catch (e) {
       console.error('恢复终端失败', e)
     }
-  }, [activeId, fitTerminal, sendResize, handleTerminalInput, appendInput])
+  }, [activeId, fitTerminal, sendResize, handleTerminalInput, appendInput, ensureFit])
 
   // 定期同步活跃终端列表，并自动恢复新创建的终端（CLI/Python 包创建的）
   useEffect(() => {
