@@ -19,6 +19,7 @@ export interface TerminalInstance {
   container: HTMLDivElement | null
   state_timer: ReturnType<typeof setInterval> | null
   input_buffer: string  // 当前输入行缓冲区（用于记录命令历史）
+  input_cursor: number  // 输入行光标位置（行编辑用，精确跟踪命令内容）
   disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
 }
 
@@ -225,38 +226,72 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     })
   }, [settings, terminals, updateTerminalSettings])
 
-  // 处理终端输入，维护输入行缓冲区，遇到回车时记录命令到后端
+  // 处理终端输入：维护输入行缓冲区（精确行编辑，跟踪光标位置），回车时记录完整命令到后端
   // 注意：使用 terminalsRef.current 而不是 terminals，避免闭包捕获旧状态导致新终端的 input_buffer 不记录
   const handleTerminalInput = useCallback((session_id: string, data: string) => {
     const inst = terminalsRef.current.get(session_id)
     if (!inst) return
-    // 回车：记录当前输入行到后端全局历史，清空缓冲区
+    const buf = inst.input_buffer
+    const cur = inst.input_cursor
+
+    // 回车：记录当前输入行（实际执行的完整命令）到后端全局历史，清空缓冲区
     if (data === '\r' || data === '\n' || data === '\r\n') {
-      if (inst.input_buffer.trim()) {
-        api.recordCommand(inst.input_buffer).catch(() => {})
+      if (buf.trim()) {
+        api.recordCommand(buf.trim()).catch(() => {})
       }
       inst.input_buffer = ''
+      inst.input_cursor = 0
       return
     }
-    // 退格：删除缓冲区最后一个字符
+    // 退格：删除光标前一个字符
     if (data === '\x7f' || data === '\b') {
-      inst.input_buffer = inst.input_buffer.slice(0, -1)
+      if (cur > 0) {
+        inst.input_buffer = buf.slice(0, cur - 1) + buf.slice(cur)
+        inst.input_cursor = cur - 1
+      }
       return
     }
     // Ctrl+C / Ctrl+D：清空缓冲区
     if (data === '\x03' || data === '\x04') {
       inst.input_buffer = ''
+      inst.input_cursor = 0
       return
     }
-    // 可打印字符：添加到缓冲区（支持多字符粘贴和非 ASCII 字符）
-    if (data.length > 0 && data !== '\x00') {
-      // 过滤掉纯控制字符（除了可打印字符和空格）
-      const printable = data.split('').filter(c => c >= ' ' || c.charCodeAt(0) > 127).join('')
-      if (printable) {
-        inst.input_buffer += printable
+    // ESC 序列（方向键/Home/End/Delete 等）：整段解析，绝不写入缓冲区
+    // （之前只过滤 \x1b 字符，导致 [D/[C 这类残留被当成可打印字符混入命令历史）
+    if (data.startsWith('\x1b')) {
+      switch (data) {
+        case '\x1b[D': inst.input_cursor = Math.max(0, cur - 1); return  // ← 光标左移
+        case '\x1b[C': inst.input_cursor = Math.min(buf.length, cur + 1); return  // → 光标右移
+        case '\x1b[H': inst.input_cursor = 0; return  // Home 行首
+        case '\x1b[F': inst.input_cursor = buf.length; return  // End 行尾
+        case '\x1b[3~':  // Delete：删除光标处字符
+          if (cur < buf.length) inst.input_buffer = buf.slice(0, cur) + buf.slice(cur + 1)
+          return
+        case '\x1b[1;5D':  // Ctrl+←：跳到上一个词
+          inst.input_cursor = Math.max(0, buf.lastIndexOf(' ', Math.max(0, cur - 1)))
+          return
+        case '\x1b[1;5C': {  // Ctrl+→：跳到下一个词
+          const np = buf.indexOf(' ', cur)
+          inst.input_cursor = np === -1 ? buf.length : np + 1
+          return
+        }
+        default:
+          return  // 其他序列（上/下箭头、功能键等）：忽略，不影响缓冲区
       }
     }
-    // 其他字符（方向键、Tab 等）：忽略，不影响缓冲区
+    // Ctrl+A 行首 / Ctrl+E 行尾 / Ctrl+U 清行
+    if (data === '\x01') { inst.input_cursor = 0; return }
+    if (data === '\x05') { inst.input_cursor = buf.length; return }
+    if (data === '\x15') { inst.input_buffer = ''; inst.input_cursor = 0; return }
+    // 可打印字符：插入到光标位置（支持多字符粘贴和非 ASCII 字符）
+    if (data.length > 0 && data !== '\x00') {
+      const printable = data.split('').filter(c => c >= ' ' || c.charCodeAt(0) > 127).join('')
+      if (printable) {
+        inst.input_buffer = buf.slice(0, cur) + printable + buf.slice(cur)
+        inst.input_cursor = cur + printable.length
+      }
+    }
   }, [])
 
   const createTerminal = useCallback(async (host: Host, terminal_name?: string) => {
@@ -370,6 +405,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         container: null,
         state_timer,
         input_buffer: '',
+        input_cursor: 0,
         disconnected: false,
       }
 
@@ -488,6 +524,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           container: null,
           state_timer,
           input_buffer: '',
+          input_cursor: 0,
           disconnected: false,
         }
 
@@ -586,6 +623,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         // 只输入命令文本，不发送换行，用户可以编辑后手动执行
         inst.ws.send(JSON.stringify({ type: 'input', data: command }))
         inst.input_buffer = command
+        inst.input_cursor = command.length
       }
       // 输入/执行后光标聚焦到终端，方便直接继续输入
       inst.term.focus()

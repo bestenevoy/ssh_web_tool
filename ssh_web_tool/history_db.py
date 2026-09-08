@@ -6,11 +6,25 @@
 - 提供记录、搜索、最近、忽略/恢复、JSON 迁移能力
 """
 import json
+import re
 import time
 from pathlib import Path
 from typing import List, Dict
 
 import aiosqlite
+
+# ANSI/控制字符清洗：方向键等 ESC 序列若被拆解残留（如 [D、[C），也会被清理
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+_OSC_RE = re.compile(r'\x1b\][\s\S]*?(\x07|\x1b\\)')
+_CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def clean_command(command: str) -> str:
+    """清洗命令：剥离 ANSI 转义序列与残留控制字符，返回规范命令"""
+    text = _ANSI_RE.sub('', command)
+    text = _OSC_RE.sub('', text)
+    text = _CTRL_RE.sub('', text)
+    return text.strip()
 
 from .config import get_app_dir
 
@@ -42,11 +56,46 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_history_last ON command_history(last_used)"
         )
         await conn.commit()
+        await _purge_dirty_commands(conn)
+        await conn.commit()
+
+
+# 孤立方向键/功能键残留模式：如 [T、[D、[C、[A、[B、[3~ 等（旧版本输入处理把
+# ESC 序列拆开后残留的字面片段，无 ESC 前缀无法用 ANSI 正则清除）
+_GARBAGE_RE = re.compile(r'^\[\S{0,3}$')
+
+
+async def _purge_dirty_commands(conn) -> int:
+    """清理历史命令中的控制字符脏数据（旧版本方向键残留 [D/[C 等），返回清理条数"""
+    cur = await conn.execute("SELECT id, command FROM command_history")
+    rows = await cur.fetchall()
+    removed = 0
+    for rid, cmd in rows:
+        if not cmd:
+            continue
+        clean = clean_command(cmd)
+        if clean != cmd:
+            if not clean:
+                await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
+            else:
+                try:
+                    await conn.execute(
+                        "UPDATE command_history SET command = ? WHERE id = ?", (clean, rid))
+                except Exception:
+                    # 清洗后与已有记录冲突：保留原记录，删除脏行
+                    await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
+            removed += 1
+        elif _GARBAGE_RE.match(clean):
+            # 整条命令就是孤立控制残留（无内容可言）：直接删除
+            await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
+            removed += 1
+    return removed
 
 
 async def record_command(command: str) -> None:
     """记录一条命令：已存在则次数 +1 并刷新使用时间，不存在则插入"""
-    cmd = command.strip()
+    # 记录前清洗 ANSI/控制字符，防止方向键残留（[D/[C 等）污染历史
+    cmd = clean_command(command)
     if not cmd or len(cmd) > 500:
         return
     async with aiosqlite.connect(get_db_path()) as conn:
@@ -153,9 +202,12 @@ async def migrate_from_json(json_path: Path) -> int:
         if existing > 0:
             return 0
         for cmd, info in hist.items():
+            clean = clean_command(cmd)
+            if not clean or _GARBAGE_RE.match(clean):
+                continue  # 跳过控制字符残留垃圾（如 [T、[D 等）
             await conn.execute(
                 "INSERT OR IGNORE INTO command_history (command, count, last_used) VALUES (?, ?, ?)",
-                (cmd, info.get("count", 1), info.get("last_used", time.time())),
+                (clean, info.get("count", 1), info.get("last_used", time.time())),
             )
         await conn.commit()
         return len(hist)

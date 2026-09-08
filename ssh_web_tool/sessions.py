@@ -389,7 +389,11 @@ class SSHSession:
             raise RuntimeError("该会话没有交互式终端，请先在 Web 端打开终端")
         self.process.stdin.write(f"{command}\n")
         self.last_active = time.time()
-        self._record_command(command)
+        try:
+            from .history_db import record_command
+            await record_command(command)
+        except Exception:
+            pass  # 历史记录失败不影响命令执行
         return True
 
     async def inject_and_capture(self, command: str, idle_timeout: float = 0.5,
