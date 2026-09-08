@@ -127,7 +127,7 @@ function copySelection(term: Terminal) {
   }
 }
 
-function setupTerminalCopy(term: Terminal) {
+function setupTerminalCopy(term: Terminal, onAltR?: () => void) {
   // 1) 选中终端内容立即复制（无需 Ctrl+C）
   term.onSelectionChange(() => {
     if (term.hasSelection()) copySelection(term)
@@ -141,6 +141,11 @@ function setupTerminalCopy(term: Terminal) {
         copySelection(term)
         return false  // 阻止 xterm 把 Ctrl+C 发送到终端
       }
+    }
+    if (e.altKey && (e.key === 'r' || e.key === 'R')) {
+      // Alt+R：打开全局命令搜索；return false 阻止 xterm 把 Alt+R 发送到终端
+      if (onAltR) onAltR()
+      return false
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
       // 阻止 xterm 把 Ctrl+V 当作按键发送；从剪贴板读取纯文本后粘贴
@@ -257,17 +262,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
         }
         handleTerminalInput(session_id, data)
       })
-      setupTerminalCopy(term)
-
-      // 检测快捷键 Alt+R（终端获得焦点时也能触发）
-      term.onKey(({ domEvent }) => {
-        if (domEvent.altKey && (domEvent.key === 'r' || domEvent.key === 'R')) {
-          domEvent.preventDefault()
-          if (shortcutHandlerRef.current) {
-            shortcutHandlerRef.current()
-          }
-        }
-      })
+      setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
 
       ws.onopen = () => {
         term.reset()
@@ -383,7 +378,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null) => {
           }
           handleTerminalInput(t.session_id, data)
         })
-        setupTerminalCopy(term)
+        setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
 
         // 检测快捷键 Alt+R（终端获得焦点时也能触发）
         term.onKey(({ domEvent }) => {
