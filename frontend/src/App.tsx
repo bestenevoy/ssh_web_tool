@@ -559,8 +559,6 @@ function App() {
             terminals={terminals.terminals}
             activeId={terminals.activeId}
             registerContainer={terminals.registerContainer}
-            onReconnect={handleReconnectTerminal}
-            onCloseTab={handleCloseTerminal}
           />
         </div>
 

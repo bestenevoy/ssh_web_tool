@@ -7,6 +7,7 @@ import { api } from './api'
 import type { TerminalSettings } from './useSettings'
 import { reflowForCols } from './reflow'
 import { setupTerminalCopy } from './terminalCopy'
+import { markDisconnected } from './terminalDisconnect'
 
 export interface TerminalInstance {
   session_id: string
@@ -154,20 +155,6 @@ export function useTerminals(settings: TerminalSettings) {
   // 终端重同步：清除缓冲区 + 启用自动换行 + 发送 Ctrl+L 让 shell 重绘 + 发送 resize
   // 用于初始连接时，确保 shell 第一帧输出使用正确的终端尺寸
   // （终端复制/粘贴逻辑见 terminalCopy.ts：选中复制、Ctrl+C 复制、Ctrl+V 单次粘贴）
-
-// 标记终端为断开状态（ws 关闭时调用）
-function markDisconnected(term: Terminal, session_id: string, setTerminals: React.Dispatch<React.SetStateAction<Map<string, TerminalInstance>>>) {
-  try { term.write('\r\n\x1b[31m[连接已断开，点击顶部「🔗 重连」重新连接]\x1b[0m\r\n') } catch {}
-  setTerminals((prev) => {
-    const next = new Map(prev)
-    const cur = next.get(session_id)
-    if (cur && !cur.disconnected) {
-      // state_timer 已改为批量轮询，不再需要单独清理
-      next.set(session_id, { ...cur, disconnected: true, ws: null })
-    }
-    return next
-  })
-}
 
 const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_screen: boolean = true) => {
     if (ws && ws.readyState === WebSocket.OPEN && term) {
@@ -382,7 +369,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       }
 
       // WebSocket 意外断开（网络中断/后端主动关闭）：标记断开，不自动重连
-      ws.onclose = () => markDisconnected(term, session_id, setTerminals)
+      ws.onclose = () => markDisconnected(session_id, setTerminals)
 
       const instance: TerminalInstance = {
         session_id,
@@ -479,7 +466,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         }
 
         // 意外断开：标记断开，不自动重连
-        ws.onclose = () => markDisconnected(term, t.session_id, setTerminals)
+        ws.onclose = () => markDisconnected(t.session_id, setTerminals)
 
         // 终端状态检测已改为批量轮询（由外层 useEffect 统一处理）
         const state_timer = null

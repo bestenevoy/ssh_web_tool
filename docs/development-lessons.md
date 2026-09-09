@@ -277,3 +277,11 @@
   - 修复：bat 传入当前 PID（taskkill /f /pid 兜底），轮询等待旧 exe 可删除（最长 30s，每 1s 一次）；失败写 _wstool_update.log 便于排查；move 失败有 fail 分支。
 - **回归**：test_get_latest_release_retries_on_network_error、test_download_exe_size_mismatch_retries_then_success、test_download_exe_retries_on_network_error、test_build_update_script（断言 PID/轮询/日志）。
 - **补充教训（发版时序）**：build.ps1 必须在 version.py 改到目标版本之后运行，否则 EXE 内嵌旧版本号；重建前先停正在运行的 EXE，否则 PyInstaller 覆盖 dist/SSHWebTool.exe 报 PermissionError 文件锁。
+
+
+### 40. 断开/重连"清屏"误解与红字残留（v0.1.32 修复）
+- 用户需求澄清：连接/断开/重连都不要清屏；clear 只是把历史滚出视口（可滚动回看）；"消除红字"指断开提示红字 `[连接已断开...]`，其他内容必须保留。
+- 根因 1（CSS 覆盖）：`.terminal-instance.disconnected`（display:flex，覆盖层）定义在 `.terminal-instance.active`（display:block）之前，同优先级下后者生效——断开的**激活** Tab 覆盖层永远不显示，xterm 内容+红字一直挂着。
+- 根因 2（红字残留）：`markDisconnected` 向终端写入红字提示，重连新 Tab 虽无红字，但断开期间红字可见、观感差。
+- 修复：① `markDisconnected` 不再向终端写红字（断开提示由 header「🔗 重连」按钮 + Tab 划线样式承担，抽为纯函数 `terminalDisconnect.ts` 便于单测）；② `TerminalView` 删除覆盖层，断开后 xterm 容器保持挂载（内容保留可见）；③ 清理无用 CSS。
+- 回归：`terminalDisconnect.test.ts` 4 用例（标记状态、不写红字、幂等、空会话）。
