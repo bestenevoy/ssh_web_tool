@@ -6,6 +6,7 @@ import type { Host } from '../types'
 import { api } from './api'
 import type { TerminalSettings } from './useSettings'
 import { reflowForCols } from './reflow'
+import { setupTerminalCopy } from './terminalCopy'
 
 export interface TerminalInstance {
   session_id: string
@@ -152,34 +153,7 @@ export function useTerminals(settings: TerminalSettings) {
 
   // 终端重同步：清除缓冲区 + 启用自动换行 + 发送 Ctrl+L 让 shell 重绘 + 发送 resize
   // 用于初始连接时，确保 shell 第一帧输出使用正确的终端尺寸
-  // 终端复制：选中内容立即复制；Ctrl+C 有选区时复制（不发送 SIGINT 到远端）
-function copySelection(term: Terminal) {
-  const sel = term.getSelection()
-  if (!sel) return
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(sel).catch(() => {
-      // clipboard API 被拒绝时兜底：用文本域 execCommand
-      try {
-        const ta = document.createElement('textarea')
-        ta.value = sel
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        document.body.removeChild(ta)
-      } catch { /* ignore */ }
-    })
-  } else {
-    try {
-      const ta = document.createElement('textarea')
-      ta.value = sel
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-    } catch { /* ignore */ }
-  }
-}
-
+  // （终端复制/粘贴逻辑见 terminalCopy.ts：选中复制、Ctrl+C 复制、Ctrl+V 单次粘贴）
 
 // 标记终端为断开状态（ws 关闭时调用）
 function markDisconnected(term: Terminal, session_id: string, setTerminals: React.Dispatch<React.SetStateAction<Map<string, TerminalInstance>>>) {
@@ -192,43 +166,6 @@ function markDisconnected(term: Terminal, session_id: string, setTerminals: Reac
       next.set(session_id, { ...cur, disconnected: true, ws: null })
     }
     return next
-  })
-}
-
-function setupTerminalCopy(term: Terminal, onAltR?: () => void) {
-  // 1) Ctrl+C：有选区时复制并阻止发送（避免打断远端正在运行的命令）
-  //    Ctrl+V：读取剪贴板（纯文本，自动清除格式）并粘贴到终端
-  //    注意：xterm 的自定义按键 handler 是单槽，复制与粘贴必须在同一个 handler 内
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
-      if (term.hasSelection()) {
-        copySelection(term)
-        return false  // 阻止 xterm 把 Ctrl+C 发送到终端
-      }
-    }
-    if (e.altKey && (e.key === 'r' || e.key === 'R')) {
-      // Alt+R：打开全局命令搜索；return false 阻止 xterm 把 Alt+R 发送到终端
-      if (onAltR) onAltR()
-      return false
-    }
-    if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
-      // 关键：必须 preventDefault 阻止浏览器默认行为——否则 xterm textarea 的原生 paste
-      // 事件监听（handlePasteEvent）会再触发一次粘贴，加上 term.paste 共两次
-      e.preventDefault()
-      // 阻止 xterm 把 Ctrl+V 当作按键发送；从剪贴板读取纯文本后粘贴
-      if (navigator.clipboard?.readText) {
-        navigator.clipboard.readText()
-          .then((text) => {
-            if (text) term.paste(text)
-          })
-          .catch(() => {
-            // 剪贴板读取失败（如无权限）：保持终端焦点，提示用 Ctrl+Shift+V
-            console.warn('[Terminal] 剪贴板读取被拒绝，请用 Ctrl+Shift+V 粘贴')
-          })
-      }
-      return false
-    }
-    return true
   })
 }
 
