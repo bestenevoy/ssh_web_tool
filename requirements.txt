@@ -3,3 +3,4 @@ uvicorn[standard]==0.30.6
 aiosqlite
 asyncssh>=2.20.0
 python-multipart==0.0.9
+pywinpty>=3.0.5; sys_platform == "win32"

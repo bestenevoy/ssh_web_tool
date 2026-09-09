@@ -52,6 +52,7 @@ python -m PyInstaller --noconfirm --clean --onefile --noconsole --name SSHWebToo
     --add-data "static;static" --add-data "config.example.json;." `
     --hidden-import asyncssh `
     --hidden-import paramiko `
+    --collect-all winpty `
     --exclude-module playwright `
     main.py
 

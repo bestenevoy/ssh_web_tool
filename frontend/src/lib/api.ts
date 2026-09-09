@@ -47,6 +47,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ host_id, terminal_name }),
     }),
+  // 本机终端（cmd / powershell，winpty ConPTY，不经过 SSH）
+  createLocalSession: (shell: string) =>
+    request<{ session_id: string; status: string; terminal_name: string; host: string; shell: string }>('/api/local/session', {
+      method: 'POST',
+      body: JSON.stringify({ shell }),
+    }),
   closeSession: (session_id: string) => request(`/api/sessions/${session_id}`, { method: 'DELETE' }),
   runCommand: (session_id: string, command: string, timeout = 30) =>
     request<CommandResult>(`/api/sessions/${session_id}/run`, {

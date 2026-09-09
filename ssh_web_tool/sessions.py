@@ -60,9 +60,20 @@ class SSHSession:
         self._output_listeners: List[asyncio.Queue] = []
         self._output_buffer: List[str] = []  # 终端输出缓冲区（用于状态检测）
         self._reader_task: Optional[asyncio.Task] = None
-        # 日志持久化：使用 logging 模块 + TimedRotatingFileHandler（按天轮转，保留 7 天）
-        self._log_file = os.path.join(self.LOG_DIR, f"{session_id}.log")
-        self._logger = self._get_or_create_logger(session_id)
+        # 日志持久化：同一会话（session_id）固定同一份日志文件
+        # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
+        #       {host}_{start}_{end}_{session_id}.log
+        # 恢复已有会话时沿用旧文件（同一终端 = 同一份记录）
+        self._log_file = self._resolve_existing_log() or self._build_log_file()
+        self._logger = self._get_or_create_logger(session_id, self._log_file)
+        # 日志聚合缓冲：输出先累积，静默期/超阈值后清洗一次性写入，
+        # 避免把每次刷新的中间回显都写进日志（只记录最终显示内容）
+        self._log_buf = ''
+        self._log_flush_task: Optional[asyncio.Task] = None
+        # 本地 shell（winpty ConPTY，本机 cmd/powershell；SSH 断开后可自动切换）
+        self._local_proc: Optional[object] = None
+        self._local_shell = ''
+        self._local_reader_task: Optional[asyncio.Task] = None
         # 待处理的终端尺寸（resize 消息在 PTY 创建前到达时保存）
         self._pending_size: Optional[Tuple[int, int]] = None
         # resize 事件：PTY 创建后等待第一个 resize 消息，确保 shell 第一帧输出使用正确尺寸
@@ -88,6 +99,104 @@ class SSHSession:
         # 不直接走 _broadcast_output，避免提示文本混入 run_command 的注入捕获/echo 解析
         self._shell_notice: Optional[str] = None
 
+    # ---------- 日志文件命名 ----------
+
+    _LOG_NAME_SAFE_RE = re.compile(r'[^\w.\-]')
+    _LOG_TIME_FMT = '%Y%m%d-%H%M%S'
+
+    @classmethod
+    def _sanitize_host(cls, host: str) -> str:
+        """主机名清洗为合法文件名（IPv6 冒号、路径分隔符等 → _）"""
+        s = cls._LOG_NAME_SAFE_RE.sub('_', host or 'unknown')
+        return s[:48] or 'unknown'
+
+    @classmethod
+    def _fmt_time(cls, ts: Optional[float]) -> str:
+        import datetime
+        if not ts:
+            return 'running'
+        return datetime.datetime.fromtimestamp(ts).strftime(cls._LOG_TIME_FMT)
+
+    def _resolve_existing_log(self) -> Optional[str]:
+        """恢复场景：同 session_id 已存在日志文件则沿用（同一终端同一份记录）
+
+        匹配新命名 *_{sid}.log；兼容旧命名 {sid}.log（历史版本遗留）"""
+        try:
+            os.makedirs(self.LOG_DIR, exist_ok=True)
+            pat = re.compile(r'.*_{}\.log$'.format(re.escape(self.session_id)))
+            cands = [p for p in os.listdir(self.LOG_DIR) if pat.match(p)]
+            if not cands and os.path.exists(os.path.join(self.LOG_DIR, f"{self.session_id}.log")):
+                return os.path.join(self.LOG_DIR, f"{self.session_id}.log")
+            if cands:
+                full = [os.path.join(self.LOG_DIR, c) for c in cands]
+                return max(full, key=os.path.getmtime)
+        except Exception:
+            pass
+        return None
+
+    def _build_log_file(self) -> str:
+        """新会话日志文件名：{host}_{start}_running_{session_id}.log"""
+        start = self._fmt_time(self.created_at)
+        return os.path.join(self.LOG_DIR, f"{self._sanitize_host(self.host)}_{start}_running_{self.session_id}.log")
+
+    def _close_log_handler(self):
+        """关闭并移除当前 logger 的 FileHandler（释放文件句柄，供 rename/清理）"""
+        logger = self._logger
+        if logger is None:
+            return
+        for h in logger.handlers[:]:
+            try:
+                h.close()
+            except Exception:
+                pass
+            logger.removeHandler(h)
+
+    def finalize_log_file(self):
+        """会话关闭时补全结束时间：把 _running_ 替换为 {end}_
+
+        文件存在则重命名；不存在（会话无任何输出）也更新路径保持一致"""
+        try:
+            if not self._log_file or '_running_' not in self._log_file:
+                return
+            end = self._fmt_time(time.time())
+            new_path = self._log_file.replace('_running_', f'_{end}_', 1)
+            if new_path == self._log_file:
+                return
+            if os.path.exists(self._log_file):
+                # Windows 下 FileHandler 占用句柄会导致 rename 失败，先释放
+                self._close_log_handler()
+                try:
+                    os.rename(self._log_file, new_path)
+                except OSError:
+                    pass  # 重命名失败不阻塞关闭（句柄可能仍被占用）
+            self._log_file = new_path
+        except Exception:
+            pass  # 重命名失败不阻塞关闭（文件句柄可能仍被占用）
+
+    @classmethod
+    def cleanup_old_logs(cls, days: int = 30) -> int:
+        """启动时清理超过 days 天的会话日志（会话日志不再按天轮转，靠启动清理控制体积）
+
+        返回删除的文件数
+        """
+        removed = 0
+        try:
+            os.makedirs(cls.LOG_DIR, exist_ok=True)
+            cutoff = time.time() - days * 86400
+            for name in os.listdir(cls.LOG_DIR):
+                if not name.endswith('.log'):
+                    continue
+                p = os.path.join(cls.LOG_DIR, name)
+                try:
+                    if os.path.getmtime(p) < cutoff:
+                        os.remove(p)
+                        removed += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return removed
+
     def set_shell_notice(self, msg: str) -> None:
         """设置会话级通知（全局监控协程调用）"""
         self._shell_notice = msg
@@ -104,7 +213,7 @@ class SSHSession:
 
     @property
     def has_shell(self) -> bool:
-        return self._has_shell and self.process is not None
+        return self._has_shell and (self.process is not None or self._local_proc is not None)
 
     async def connect(self, password: Optional[str] = None,
                       private_key: Optional[str] = None,
@@ -330,8 +439,9 @@ class SSHSession:
             if len(self._clean_buffer) > 8000:
                 self._clean_buffer = self._clean_buffer[-8000:]
         self._clean_buffer_dirty = True
-        # 日志持久化：通过 logging 模块写入
-        self._write_log(data)
+        # 日志持久化：聚合缓冲，静默期/超阈值后清洗一次性写入
+        # （不逐块写：避免每次刷新回显都落盘，只记录最终显示内容）
+        self._feed_log(data)
         # 广播给所有监听器：put_nowait 不阻塞；队列满时丢最旧保最新，
         # 避免慢监听器（前端 ws 阻塞）拖住整个广播链（日志/echo 解析/其他监听器）
         for q in self._output_listeners:
@@ -341,29 +451,32 @@ class SSHSession:
                 self._drop_oldest(q, data)
 
     @classmethod
-    def _get_or_create_logger(cls, session_id: str) -> logging.Logger:
-        """获取或创建会话专属 logger（带 TimedRotatingFileHandler，按天轮转保留 7 天）
+    def _get_or_create_logger(cls, session_id: str, log_file: Optional[str] = None) -> logging.Logger:
+        """获取或创建会话专属 logger（FileHandler 追加模式，会话关闭时关闭 handler）
 
-        使用 logging 模块代替手动 open()+write()+flush()：
-        - logging 模块内置缓冲，不需要每次 flush
-        - TimedRotatingFileHandler 自动按天轮转，超过 7 天的日志自动删除
-        - 线程安全
+        同一 session_id 同一文件（日志文件路径在 __init__ 已固定：恢复会话沿用旧文件）；
+        不做按天轮转（会话日志是一份连续记录，轮转会破坏"同一终端同一份记录"）。
         """
         if session_id in cls._logger_cache:
             return cls._logger_cache[session_id]
         os.makedirs(cls.LOG_DIR, exist_ok=True)
-        log_file = os.path.join(cls.LOG_DIR, f"{session_id}.log")
+        path = log_file or os.path.join(cls.LOG_DIR, f"{session_id}.log")
         logger = logging.getLogger(f"ssh_session.{session_id}")
         logger.setLevel(logging.INFO)
+        # 已有 handler 但指向旧路径（恢复/重建场景路径变化）：先移除重建，避免写错文件
+        if logger.handlers:
+            first = logger.handlers[0]
+            base = getattr(first, "baseFilename", None)
+            if not base or os.path.normcase(base) != os.path.normcase(path):
+                for h in logger.handlers[:]:
+                    try:
+                        h.close()
+                    except Exception:
+                        pass
+                    logger.removeHandler(h)
         # 避免重复添加 handler（logger 会被全局注册）
         if not logger.handlers:
-            handler = TimedRotatingFileHandler(
-                log_file,
-                when='midnight',       # 每天午夜轮转
-                interval=1,
-                backupCount=cls.LOG_BACKUP_DAYS,  # 保留 7 天
-                encoding='utf-8',
-            )
+            handler = logging.FileHandler(path, mode='a', encoding='utf-8')
             handler.setFormatter(logging.Formatter('%(message)s'))
             handler.setLevel(logging.INFO)
             logger.addHandler(handler)
@@ -372,12 +485,67 @@ class SSHSession:
         cls._logger_cache[session_id] = logger
         return logger
 
-    def _write_log(self, data: str):
-        """将终端输出写入日志（通过 logging 模块，自动缓冲 + 按天轮转）"""
+    # 日志聚合写入：静默期（LOG_FLUSH_DELAY）或缓冲超阈值时一次性清洗写入
+    LOG_FLUSH_DELAY = 0.6   # 秒：无新输出多久后 flush
+    LOG_FLUSH_MAX = 65536   # 字符：缓冲超过该阈值立即 flush
+
+    def _schedule_log_flush(self):
+        """有新输出进入日志缓冲时调度一次延迟 flush（已调度则不重复）"""
+        if not self._log_buf:
+            return
+        if self._log_flush_task and not self._log_flush_task.done():
+            return
         try:
-            self._logger.info(data)
+            self._log_flush_task = asyncio.create_task(self._log_flusher())
+        except RuntimeError:
+            # 无运行中的 event loop（同步上下文/测试）：直接同步 flush
+            self._flush_log_now()
+
+    async def _log_flusher(self):
+        try:
+            await asyncio.sleep(self.LOG_FLUSH_DELAY)
+        except asyncio.CancelledError:
+            pass
+        self._flush_log_now()
+
+    def _flush_log_now(self):
+        """把日志缓冲清洗后一次性写入（幂等；会话关闭前必须调用以落盘剩余内容）"""
+        if not self._log_buf:
+            return
+        text = self._log_buf
+        self._log_buf = ''
+        try:
+            # 只记录最终显示：清洗 ANSI + 行内 \r 覆盖合并（进度条等只留最后状态）
+            text = self._clean_ansi_keep_cr(text)
+            text = self._collapse_cr_lines(text)
+            if text.strip():
+                self._logger.info(text)
         except Exception:
             pass  # 日志写入失败不影响主流程
+
+    @staticmethod
+    def _collapse_cr_lines(text: str) -> str:
+        """同一物理行内多次 \r 覆盖：只保留最后一次 \r 之后的内容
+        （wget/进度条等 \r 刷新场景，日志只记录最终显示状态）
+
+        注意：先把 CRLF 归一化为 LF，避免把 \r\n 换行误判为进度条覆盖
+        而丢掉整行内容。
+        """
+        lines = text.replace('\r\n', '\n').split('\n')
+        out = []
+        for line in lines:
+            if '\r' in line:
+                line = line.rsplit('\r', 1)[-1]
+            out.append(line)
+        return '\n'.join(out)
+
+    def _feed_log(self, data: str):
+        """输出进入日志聚合缓冲（替代逐块 _write_log，减少刷新回显碎片）"""
+        self._log_buf += data
+        if len(self._log_buf) >= self.LOG_FLUSH_MAX:
+            self._flush_log_now()
+        else:
+            self._schedule_log_flush()
 
     def get_history_logs(self, offset: int = 0, limit: int = 2000) -> str:
         """
@@ -440,7 +608,13 @@ class SSHSession:
         return '\n'.join(result)
 
     async def start_output_reader(self):
-        """启动后台协程持续读取 stdout 并广播（幂等，重复调用不会重复启动）"""
+        """启动后台协程持续读取 stdout 并广播（幂等，重复调用不会重复启动）
+
+        本地 shell（ConPTY）走 _start_local_reader（to_thread 读取，不阻塞事件循环）
+        """
+        if self._local_proc is not None:
+            self._start_local_reader()
+            return
         if self._reader_task and not self._reader_task.done():
             return
         if not self.process:
@@ -466,6 +640,129 @@ class SSHSession:
         if self._reader_task:
             self._reader_task.cancel()
             self._reader_task = None
+
+    # ============ 本地 shell（winpty ConPTY：本机 cmd / powershell） ============
+
+    def is_local(self) -> bool:
+        """当前是否运行在本地 shell（非 SSH）"""
+        return self._local_proc is not None
+
+    async def start_local_shell(self, shell: str = "cmd", cols: int = 120, rows: int = 40):
+        """启动本机交互式 shell（ConPTY）。SSH 断开自动切换或用户主动创建本地终端时调用
+
+        - shell: 'cmd' / 'powershell' / 'pwsh'
+        - 复用现有广播/日志/监听机制，前端协议与 SSH 会话完全一致
+        """
+        if shell == "powershell":
+            argv = ["powershell.exe", "-NoLogo"]
+        elif shell == "pwsh":
+            argv = ["pwsh", "-NoLogo"]
+        else:
+            argv = ["cmd.exe"]
+        try:
+            import winpty
+        except ImportError:
+            raise RuntimeError("本地 shell 需要 pywinpty（pip install pywinpty），当前不可用")
+        # 延迟 import：非 Windows/未安装时不影响主程序（本地终端功能按需可用）
+        proc = winpty.PtyProcess.spawn(argv, dimensions=(rows, cols), backend=1)
+        self._local_proc = proc
+        self._local_shell = shell
+        self._last_cols = cols
+        self._last_rows = rows
+        self._connected = True
+        self._has_shell = True
+        self.last_active = time.time()
+        # 与 SSH shell 共用输出广播/日志/监听（输出循环由 stop_local_reader 管理）
+        self._start_local_reader()
+        return proc
+
+    def _start_local_reader(self):
+        """本地 shell 输出读取协程（to_thread 避免阻塞事件循环）"""
+        if self._local_reader_task and not self._local_reader_task.done():
+            return
+
+        async def _reader():
+            try:
+                while True:
+                    data = await asyncio.to_thread(self._local_proc.read, 4096)
+                    if not data:
+                        break
+                    self.last_active = time.time()
+                    await self._broadcast_output(data)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                import traceback
+                print(f"[local-shell] reader 异常: {traceback.format_exc()}")
+
+        self._local_reader_task = asyncio.create_task(_reader())
+
+    def stop_local_reader(self):
+        """停止本地 shell 输出读取器"""
+        if self._local_reader_task:
+            self._local_reader_task.cancel()
+            self._local_reader_task = None
+
+    async def write_local(self, data: str):
+        """向前台本地 shell 写入输入（转码为 str；ConPTY 期望 str）"""
+        if self._local_proc is not None:
+            try:
+                self._local_proc.write(data)
+                self.last_active = time.time()
+            except Exception:
+                pass
+
+    def resize_local(self, cols: int, rows: int):
+        """调整本地 shell 窗口尺寸（setwinsize 参数顺序 (rows, cols)）"""
+        if self._local_proc is not None:
+            try:
+                self._local_proc.setwinsize(rows, cols)
+                self._last_cols = cols
+                self._last_rows = rows
+            except Exception:
+                pass
+
+    async def switch_to_local(self, shell: str = "cmd", cols: int = 0, rows: int = 0):
+        """SSH 连接断开时切换到本机 shell（不销毁会话，前端无感知切换）
+
+        关闭 SSH 相关资源，保留日志/广播/监听结构，随后启动本地 ConPTY shell
+        """
+        self._reconnecting = False
+        self.stop_output_reader()
+        if cols <= 0:
+            cols = self._last_cols
+        if rows <= 0:
+            rows = self._last_rows
+        if self.process:
+            try:
+                self.process.close()
+            except Exception:
+                pass
+            self.process = None
+        if self.conn:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = None
+        self._connected = False
+        self._has_shell = False
+        await self.start_local_shell(shell, cols, rows)
+
+    async def restart_local_shell(self, cols: int = 0, rows: int = 0):
+        """本机 shell 已退出时重启（沿用原 shell 类型与最近尺寸）"""
+        self.stop_local_reader()
+        if self._local_proc is not None:
+            try:
+                self._local_proc.terminate(force=True)
+            except Exception:
+                pass
+            self._local_proc = None
+        if cols <= 0:
+            cols = self._last_cols
+        if rows <= 0:
+            rows = self._last_rows
+        await self.start_local_shell(self._local_shell or "cmd", cols, rows)
 
     # ============ 注入命令到交互式终端 ============
 
@@ -860,7 +1157,13 @@ class SSHSession:
             self._sftp = None
 
     def is_alive(self) -> bool:
-        """检测 SSH 连接是否真的活着（不只是标志位）"""
+        """检测连接是否真的活着（不只是标志位）；本地 shell 检查 ConPTY 进程"""
+        # 本地 shell（winpty ConPTY）
+        if self._local_proc is not None:
+            try:
+                return bool(self._local_proc.isalive())
+            except Exception:
+                return False
         # 外部镜像会话（paramiko/asyncssh 劫持注册）：基于外部 client 的真实状态
         if getattr(self, '_external', False):
             client = getattr(self, '_paramiko_client', None)
@@ -903,7 +1206,12 @@ class SSHSession:
             return False
 
     def is_shell_alive(self) -> bool:
-        """检测 shell 进程/channel 是否真的活着（不只是标志位）"""
+        """检测 shell 进程/channel 是否真的活着（不只是标志位）；本地 shell 检查 ConPTY"""
+        if self._local_proc is not None:
+            try:
+                return bool(self._local_proc.isalive())
+            except Exception:
+                return False
         if not self._has_shell or self.process is None:
             return False
         try:
@@ -1023,7 +1331,14 @@ class SSHSession:
         """关闭会话"""
         self._reconnecting = False
         self.stop_output_reader()
+        self.stop_local_reader()
         await self.close_sftp()
+        if self._local_proc is not None:
+            try:
+                self._local_proc.terminate(force=True)
+            except Exception:
+                pass
+            self._local_proc = None
         if self.process:
             try:
                 self.process.close()
@@ -1038,8 +1353,10 @@ class SSHSession:
             self.conn = None
         self._connected = False
         self._has_shell = False
-        # 关闭日志 handler 并清理 logger 缓存
+        # 日志：先落盘剩余缓冲，再关闭 handler，最后补全结束时间重命名
+        self._flush_log_now()
         self._close_logger()
+        self.finalize_log_file()
 
     def _close_logger(self):
         """关闭会话专属 logger 的 handler 并清理缓存"""

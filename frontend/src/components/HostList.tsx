@@ -7,6 +7,7 @@ interface Props {
   groups: string[]
   activeHostId: string | null
   onHostClick: (host: Host) => void
+  onOpenLocalTerminal: (shell: 'cmd' | 'powershell') => void
   onEdit: (host: Host) => void
   onDelete: (host: Host) => void
   onCopy: (host: Host) => void
@@ -22,7 +23,7 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
 }
 
-export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, onOpenLocalTerminal, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -153,6 +154,11 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
           <button className="host-search-clear" onClick={() => setSearchQuery('')}>✕</button>
         )}
         <button className="host-search-group-btn" onClick={onManageGroups} title="管理分组">📁</button>
+      </div>
+      <div className="local-terminal-bar" title="打开本机终端（不经过 SSH）">
+        <span className="local-terminal-label">本机</span>
+        <button className="local-terminal-btn" onClick={() => onOpenLocalTerminal('cmd')}>cmd</button>
+        <button className="local-terminal-btn" onClick={() => onOpenLocalTerminal('powershell')}>PowerShell</button>
       </div>
       {orderedGroups.map((group) => {
         const groupHosts = grouped[group] || []

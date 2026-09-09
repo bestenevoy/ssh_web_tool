@@ -570,6 +570,23 @@ body {
 }
 .host-search-group-btn:hover { border-color: #e94560; color: #e94560; }
 
+/* 本机终端入口（cmd / powershell，不经过 SSH） */
+.local-terminal-bar {
+  display: flex; gap: 6px; align-items: center;
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+}
+.local-terminal-label {
+  font-size: 10px; color: var(--text-tertiary); flex-shrink: 0;
+}
+.local-terminal-btn {
+  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text-secondary); cursor: pointer; font-size: 11px;
+  padding: 3px 10px; font-family: inherit; transition: all .15s;
+}
+.local-terminal-btn:hover {
+  border-color: #4caf50; color: #4caf50; background: rgba(76, 175, 80, 0.08);
+}
+
 /* 分组管理面板 */
 .group-add-row { display: flex; gap: 8px; margin-bottom: 12px; }
 .group-add-input {

@@ -527,6 +527,13 @@ function App() {
             groups={groups}
             activeHostId={activeHostId}
             onHostClick={handleHostClick}
+            onOpenLocalTerminal={(shell: 'cmd' | 'powershell') => {
+              if (terminals.connecting) { setStatus('正在连接其他终端，请稍候...'); return }
+              setStatus(`正在打开本机 ${shell}...`)
+              terminals.openLocalTerminal(shell)
+                .then(() => { setStatus(`本机 ${shell} 已打开`); setTimeout(() => loadHosts(), 500) })
+                .catch((e) => { setStatus('打开本机终端失败'); alert('本机终端打开失败: ' + (e as Error).message) })
+            }}
             onEdit={(h) => { setEditingHost(h); setModalOpen(true) }}
             onDelete={handleDeleteHost}
             onCopy={handleCopyConnection}

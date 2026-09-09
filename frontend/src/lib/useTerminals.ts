@@ -283,7 +283,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     }
   }, [])
 
-  const createTerminal = useCallback(async (host: Host, terminal_name?: string) => {
+  const createTerminal = useCallback(async (host: Host, terminal_name?: string, kind: 'ssh' | 'local' = 'ssh', localShell = 'cmd') => {
     // 连接防抖：已有连接正在建立时拒绝新的连接请求
     if (connectingRef.current) {
       const err = new Error('已有连接正在建立中，请稍候再试')
@@ -293,9 +293,21 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     connectingRef.current = true
     setConnecting(true)
     try {
-      const result = await api.connectHost(host.id, terminal_name)
-      const session_id = result.session_id
-      const tname = result.terminal_name || terminal_name || '终端1'
+      let session_id: string
+      let tname: string
+      let hostLike: { id: string; host: string; name: string; type: string }
+      if (kind === 'local') {
+        // 本机终端（cmd/powershell，winpty ConPTY，不经过 SSH）
+        const r = await api.createLocalSession(localShell)
+        session_id = r.session_id
+        tname = r.terminal_name || terminal_name || (localShell === 'powershell' ? '本机 PowerShell' : '本机 cmd')
+        hostLike = { id: 'local', host: 'localhost', name: tname, type: 'local' }
+      } else {
+        const result = await api.connectHost(host.id, terminal_name)
+        session_id = result.session_id
+        tname = result.terminal_name || terminal_name || '终端1'
+        hostLike = { id: host.id, host: host.host, name: host.name || host.host, type: host.type }
+      }
       const s = settingsRef.current
 
       const term = new Terminal({
@@ -303,6 +315,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         theme: getTerminalTheme(s),
         fontFamily: s.fontFamily,
         fontSize: s.fontSize,
+        // 保留足够滚动历史：clear/连接时不丢之前内容（只能滚动回看）
+        scrollback: 5000,
       })
       const fitAddon = new FitAddon()
       term.loadAddon(fitAddon)
@@ -340,7 +354,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         setTimeout(doResize, 200)
         // 加载完整历史日志（含主机登录 banner/MOTD）：先确保 fit（宽高就绪）再写入，
         // 避免历史内容按默认宽度折行导致显示错乱；不追加"加载完成"标记（无实际意义）
-        api.getHistoryLogs(session_id, 999999, 8000).then(async (res) => {
+        // limit 200000：完整回放同会话历史（同一终端 = 同一份记录）
+        api.getHistoryLogs(session_id, 999999, 200000).then(async (res) => {
           if (res.content) {
             await ensureFit(session_id, term, fitAddon, ws)
             // 历史日志按 pty 当时宽度换行；窄窗口直接写入会 soft-wrap 碎片化，
@@ -371,11 +386,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
 
       const instance: TerminalInstance = {
         session_id,
-        host_id: host.id,
-        host_name: host.name || host.host,
+        host_id: hostLike.id,
+        host_name: hostLike.name || hostLike.host,
         terminal_name: tname,
-        type: host.type,
-        shell_type: 'shell',
+        type: hostLike.type,
+        shell_type: kind === 'local' ? 'local' : 'shell',
         term,
         fitAddon,
         ws,
@@ -688,6 +703,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     connecting,
     activeSessions,
     createTerminal,
+    // 打开本机终端（cmd / powershell，winpty ConPTY，不经过 SSH）
+    openLocalTerminal: (shell: 'cmd' | 'powershell') =>
+      createTerminal({} as Host, undefined, 'local', shell),
     restoreTerminals,
     switchTerminal,
     closeTerminal,

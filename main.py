@@ -317,6 +317,37 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
             "terminal_name": session.terminal_name, "host": _sanitize_host(host)}
 
 
+@app.post("/api/local/session")
+async def api_create_local_session(req: dict = None):
+    """创建本机终端（cmd / powershell，winpty ConPTY 交互式 shell，不经过 SSH）
+
+    前端"本机终端"入口调用；会话协议与 SSH 终端完全一致（output/input/resize）。
+    """
+    req = req or {}
+    shell = str(req.get("shell") or "cmd").lower()
+    if shell not in ("cmd", "powershell", "pwsh"):
+        shell = "cmd"
+    import getpass
+    tname = "本机 cmd" if shell == "cmd" else ("本机 PowerShell" if shell == "powershell" else "本机 pwsh")
+    session_id = session_manager.create_session(
+        host="localhost", port=0, username=getpass.getuser(),
+        terminal_name=tname
+    )
+    session = session_manager.get_session(session_id)
+    try:
+        await session.start_local_shell(shell=shell, cols=120, rows=40)
+    except Exception as e:
+        await session_manager.remove_session(session_id)
+        raise HTTPException(status_code=400, detail=f"启动本地 shell 失败: {str(e)}")
+    await event_bus.publish(
+        "session_create", "api",
+        f"创建本地终端 {session_id} ({tname})",
+        session_id=session_id, host="localhost", port=0
+    )
+    return {"session_id": session_id, "status": "connected", "has_shell": True,
+            "terminal_name": tname, "host": "localhost", "shell": shell}
+
+
 @app.get("/api/sessions")
 async def api_list_sessions():
     """列出所有活动会话"""
@@ -1028,16 +1059,24 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         await websocket.close()
         return
 
-    # 检测 SSH 连接是否真的活着，如果断开了自动重连
-    if not session.is_alive():
+    # 检测 SSH 连接是否真的活着，如果断开了自动重连（本地 shell 会话直接跳过）
+    if session.is_local():
+        pass
+    elif not session.is_alive():
         await websocket.send_json({"type": "info", "data": "检测到连接断开，正在自动重连..."})
         try:
             reconnect_ok = await session.reconnect()
             if not reconnect_ok:
-                await websocket.send_json({"type": "error", "data": "自动重连失败，请重新连接主机"})
-                await websocket.close()
-                return
-            await websocket.send_json({"type": "info", "data": "自动重连成功"})
+                # SSH 重连失败 → 自动切换到本机 shell（不销毁会话，终端保持可用）
+                try:
+                    await session.switch_to_local("cmd")
+                    await websocket.send_json({"type": "info", "data": "SSH 重连失败，已切换到本机 cmd（可在界面重新连接主机）"})
+                except Exception as e:
+                    await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {str(e)}"})
+                    await websocket.close()
+                    return
+            else:
+                await websocket.send_json({"type": "info", "data": "自动重连成功"})
         except Exception as e:
             await websocket.send_json({"type": "error", "data": f"重连异常: {str(e)}"})
             await websocket.close()
@@ -1048,8 +1087,14 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     # channel 已死（远端 shell 被 kill/网络异常）时会误报"已恢复"，实际无法输入
     # 不发送"已恢复已有终端会话"提示（用户反馈无意义；恢复内容由前端历史输出直接体现）
     pending_msg = None  # 初始化：如果第一个消息不是 resize，保存下来在消息循环中处理
-    if session._has_shell and session.process is not None and session.is_shell_alive():
+    if session.is_local() and session.is_shell_alive():
+        pass  # 本机 shell 已就绪，直接复用
+    elif session._has_shell and session.process is not None and session.is_shell_alive():
         pass
+    elif session.is_local():
+        # 本机 shell 已退出：重启（沿用原 shell 类型与最近尺寸）
+        await websocket.send_json({"type": "info", "data": "检测到本机 shell 已退出，正在重新启动..."})
+        await session.restart_local_shell()
     elif session._has_shell and session.process is not None:
         # shell 标志在但实际已死：重启 shell（恢复场景无运行中程序，安全）
         await websocket.send_json({"type": "info", "data": "检测到终端已断开，正在重新启动 shell..."})
@@ -1131,16 +1176,20 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         if msg_type == "input":
             data = msg.get("data", "")
             if data:
-                # 直接尝试写入；若 shell 尚未就绪（启动中/重启窗口），短暂等待后重试
+                # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入；
+                # 若 shell 尚未就绪（启动中/重启窗口），短暂等待后重试
                 try:
-                    for _ in range(30):
-                        if session.process is not None:
-                            break
-                        await asyncio.sleep(0.1)
-                    if session.process is None:
-                        raise RuntimeError("终端 shell 尚未就绪，请稍候再输入")
-                    session.process.stdin.write(data)
-                    session.last_active = time.time()
+                    if session.is_local():
+                        await session.write_local(data)
+                    else:
+                        for _ in range(30):
+                            if session.process is not None:
+                                break
+                            await asyncio.sleep(0.1)
+                        if session.process is None:
+                            raise RuntimeError("终端 shell 尚未就绪，请稍候再输入")
+                        session.process.stdin.write(data)
+                        session.last_active = time.time()
                 except Exception as e:
                     # 不再自动重连：重连会中断正在运行的全屏程序（如 vi/vim），
                     # 且用户已确认不想要自动重连行为；只提示错误，让用户手动处理
@@ -1149,7 +1198,10 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         elif msg_type == "resize":
             cols = msg.get("cols", 120)
             rows = msg.get("rows", 40)
-            await session.resize_pty(cols, rows)
+            if session.is_local():
+                session.resize_local(cols, rows)
+            else:
+                await session.resize_pty(cols, rows)
         elif msg_type == "ping":
             await websocket.send_json({"type": "pong"})
 
@@ -1377,6 +1429,14 @@ def main():
     print("=" * 50)
     print("提示：程序常驻右下角系统托盘，右键托盘图标可打开界面/配置/日志")
     print()
+
+    # 清理超过 30 天的旧会话日志（会话日志不按天轮转，靠启动清理控制体积）
+    try:
+        n = SSHSession.cleanup_old_logs(days=30)
+        if n:
+            print(f"[日志] 已清理 {n} 个超过 30 天的旧会话日志")
+    except Exception as e:
+        print(f"[日志] 清理旧日志失败: {e}")
 
     # 启动时后台静默检查更新（有新版才弹提示，不自动更新）
     try:

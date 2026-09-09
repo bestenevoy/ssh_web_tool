@@ -246,3 +246,22 @@
 - 更新脚本（bat）必须与 EXE 同盘（move 才能原子）；下载先写 `SSHWebTool_new.exe`。
 - 更新会重启进程：所有 SSH 会话（内存态）丢失，确认弹窗必须明确告知"将断开所有 SSH 连接"。
 - 托盘菜单「检查更新」动作必须在后台线程执行（MessageBox 会阻塞托盘消息循环导致图标假死）。
+
+
+### 36. 日志清洗 `_collapse_cr_lines` 会把 CRLF 换行当进度条覆盖，整行内容被吞
+- 现象：会话日志文件里只剩提示符，banner/命令输出全消失。
+- 根因：按 `\n` split 后每行 `rsplit('\r',1)[-1]`——`\r\n` 的行尾 `\r` 被误判为“进度条覆盖”，整行被丢弃。
+- 修复：先 `text.replace('\r\n','\n')` 归一化再处理；保留行内 `\r`（进度条）覆盖语义。
+- 回归：`test_collapse_cr_lines_keeps_crlf_lines`。
+
+### 37. Windows 下 FileHandler 占用句柄导致日志 rename（finalize）失败
+- 现象：`finalize_log_file` 后文件名仍带 `_running_`，异常被 `except: pass` 吞掉。
+- 根因：logging.FileHandler 长期打开文件句柄，Windows rename 抛 PermissionError(32)。
+- 修复：rename 前先 `_close_log_handler()` 释放句柄；rename 失败也更新 `_log_file` 路径。
+- 回归：`test_finalize_log_file_replaces_running_with_end` 改为真实写文件场景。
+
+### 38. 本机终端（winpty ConPTY）调试要点
+- `import pywinpty` 失败是正常的，用 `import winpty`；`PtyProcess.spawn(argv, dimensions=(rows, cols), backend=1)`（backend 必须是 int，1=ConPTY）。
+- write/read 接收 str 而非 bytes；`setwinsize(rows, cols)`。
+- 输出必须持续被读取（循环 read），否则 ConPTY 管道背压、cmd 后续输入不执行——表现为“write 成功但命令无回显”。
+- 日志断言读文件而非 `_log_buf`（0.6s 静默期后缓冲已 flush 落盘）。
