@@ -231,3 +231,18 @@
 6. 提交：消息用 `-F` 文件（避免引号坑）？两端都 push？
 7. 发布：tag 两端都推？Release 资产验证了？
 8. **修 Bug：回归测试写了吗？全量测试过了吗？**（`python -m pytest tests`）
+
+### 34. 自动更新发版流程（必须同步 APP_VERSION）
+- **现象**：新增自动更新功能后，如果 `ssh_web_tool/version.py` 的 `APP_VERSION` 不随 tag 更新，新版本会被误判为旧版本，永不提示更新。
+- **约定（发版 Checklist）**：
+  1. 更新 `ssh_web_tool/version.py` 的 `APP_VERSION`（与将打的 tag 一致）
+  2. 跑 `python -m pytest tests`（后端）+ `npm --prefix frontend test`（前端）
+  3. git commit（含 version.py 与构建产物 static/index.html）
+  4. 打 tag 推送（GitHub Actions 自动构建 Release）
+  5. 本地 `build.ps1` 重建 EXE 并重启验证
+- **防漏**：托盘菜单「检查更新」点开若提示"已是最新"，而 GitHub 上 tag 更新——先查 version.py 是否落后。
+
+### 35. 更新替换脚本的注意事项
+- 更新脚本（bat）必须与 EXE 同盘（move 才能原子）；下载先写 `SSHWebTool_new.exe`。
+- 更新会重启进程：所有 SSH 会话（内存态）丢失，确认弹窗必须明确告知"将断开所有 SSH 连接"。
+- 托盘菜单「检查更新」动作必须在后台线程执行（MessageBox 会阻塞托盘消息循环导致图标假死）。

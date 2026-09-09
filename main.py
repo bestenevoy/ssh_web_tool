@@ -28,9 +28,10 @@ from ssh_web_tool.storage import storage
 from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
 from ssh_web_tool.config import load_config, get_app_dir
 from ssh_web_tool import history_db
+from ssh_web_tool.version import APP_VERSION
 from ssh_web_tool.external_sessions import external_hub
 
-app = FastAPI(title="SSH Web Tool", version="2.0.0")
+app = FastAPI(title="SSH Web Tool", version=APP_VERSION)
 
 
 @app.on_event("shutdown")
@@ -1366,7 +1367,7 @@ def main():
         root_logger.addHandler(stream_handler)
 
     print("=" * 50)
-    print("SSH Web Tool v2.0 启动中...")
+    print(f"SSH Web Tool v{APP_VERSION} 启动中...")
     print(f"配置文件: {CONFIG_FILE_NAME}")
     print(f"网页 UI:  {base_url}")
     print(f"API 文档: {base_url}/docs")
@@ -1376,6 +1377,14 @@ def main():
     print("=" * 50)
     print("提示：程序常驻右下角系统托盘，右键托盘图标可打开界面/配置/日志")
     print()
+
+    # 启动时后台静默检查更新（有新版才弹提示，不自动更新）
+    try:
+        import threading as _th
+        from ssh_web_tool.updater import check_for_update_quiet
+        _th.Thread(target=check_for_update_quiet, daemon=True).start()
+    except Exception as e:
+        print(f"[updater] 启动更新检查失败: {e}")
 
     # 系统托盘（EXE 打包后 --noconsole 无窗口，托盘是唯一入口）
     try:

@@ -103,6 +103,7 @@ ID_OPEN_CONFIG = 1003
 ID_OPEN_LOG = 1004
 ID_REFRESH_CONFIG = 1005
 ID_EXIT = 1006
+ID_CHECK_UPDATE = 1007
 
 
 def RGB(r, g, b):
@@ -213,6 +214,19 @@ class TrayIcon:
         self._taskbar_created = None
 
     # ---------- 菜单动作 ----------
+    def check_update(self):
+        """检查更新：后台线程执行（弹窗阻塞不能卡托盘消息循环）"""
+        import threading
+        from ssh_web_tool.updater import check_and_update
+
+        def _do():
+            try:
+                check_and_update()
+            except Exception as e:
+                print(f"[tray] 检查更新异常: {e}")
+
+        threading.Thread(target=_do, daemon=True).start()
+
     def open_web(self):
         import webbrowser
         try:
@@ -368,6 +382,8 @@ class TrayIcon:
         _append(ID_REFRESH_CONFIG, "检查配置/脚本更新")
         _append(ID_OPEN_LOG, "打开日志窗口")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        _append(ID_CHECK_UPDATE, "检查更新")
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         _append(ID_EXIT, "退出")
 
         pt = wt.POINT()
@@ -388,6 +404,8 @@ class TrayIcon:
             self.refresh_config()
         elif cmd == ID_OPEN_LOG:
             self.open_log()
+        elif cmd == ID_CHECK_UPDATE:
+            self.check_update()
         elif cmd == ID_EXIT:
             self.exit_app()
 
