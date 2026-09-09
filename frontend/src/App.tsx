@@ -25,6 +25,7 @@ function App() {
   const [groups, setGroups] = useState<string[]>([])
   const [hostTypes, setHostTypes] = useState<HostType[]>([])
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
+  const [fallbackShell, setFallbackShell] = useState('cmd')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
   const [panelTab, setPanelTab] = useState<PanelTab>('quick')
@@ -64,6 +65,17 @@ function App() {
     return () => window.removeEventListener('keydown', handler, true)
   }, [terminals.activeId])
 
+  // SSH 断开后自动进入的本机终端（保存到全局配置 config.json）
+  const handleSetFallbackShell = useCallback(async (shell: string) => {
+    try {
+      await api.setFallbackShell(shell)
+      setFallbackShell(shell)
+      setStatus(`断开后自动进入 ${shell === 'powershell' ? 'PowerShell' : 'cmd'}`)
+    } catch (e) {
+      setStatus('保存配置失败: ' + (e as Error).message)
+    }
+  }, [])
+
   const loadHosts = useCallback(async () => {
     try {
       const data = await api.listHosts()
@@ -86,6 +98,9 @@ function App() {
 
   useEffect(() => {
     loadHosts()
+      api.getConfig()
+        .then((c) => { if (c?.fallback_local_shell) setFallbackShell(c.fallback_local_shell) })
+        .catch(() => {})
     loadQuickCommands()
     terminals.restoreTerminals()
     // 定期刷新主机列表，确保终端计数及时更新（CLI/Python 包创建的终端也能显示）
@@ -526,6 +541,8 @@ function App() {
             hostTypes={hostTypes}
             groups={groups}
             activeHostId={activeHostId}
+            fallbackShell={fallbackShell}
+            onSetFallbackShell={handleSetFallbackShell}
             onHostClick={handleHostClick}
             onOpenLocalTerminal={(shell: 'cmd' | 'powershell') => {
               if (terminals.connecting) { setStatus('正在连接其他终端，请稍候...'); return }

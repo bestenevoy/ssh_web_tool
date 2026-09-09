@@ -580,6 +580,12 @@ body {
 .local-terminal-btn:hover {
   border-color: #4caf50; color: #4caf50; background: rgba(76, 175, 80, 0.08);
 }
+.fallback-shell-select {
+  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text-secondary); font-size: 11px; padding: 3px 4px; font-family: inherit;
+  cursor: pointer; flex-shrink: 0; max-width: 88px;
+}
+.fallback-shell-select:focus { outline: none; border-color: #4caf50; }
 
 /* 分组管理面板 */
 .group-add-row { display: flex; gap: 8px; margin-bottom: 12px; }

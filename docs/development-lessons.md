@@ -285,3 +285,11 @@
 - 根因 2（红字残留）：`markDisconnected` 向终端写入红字提示，重连新 Tab 虽无红字，但断开期间红字可见、观感差。
 - 修复：① `markDisconnected` 不再向终端写红字（断开提示由 header「🔗 重连」按钮 + Tab 划线样式承担，抽为纯函数 `terminalDisconnect.ts` 便于单测）；② `TerminalView` 删除覆盖层，断开后 xterm 容器保持挂载（内容保留可见）；③ 清理无用 CSS。
 - 回归：`terminalDisconnect.test.ts` 4 用例（标记状态、不写红字、幂等、空会话）。
+
+
+### 41. 断开后本地终端可选 cmd/PowerShell + load_config 白名单合并（v0.1.33）
+- 需求：SSH 断线自动切换到本机 shell 时，目标 shell 要可配置（cmd / powershell / pwsh 可选），原来写死 `switch_to_local("cmd")`。
+- 实现：`config.json` 新增顶层配置项 `fallback_local_shell`（默认 "cmd"）；`get_fallback_local_shell()` 校验非法值回退 cmd；`/api/config` 透出、`POST /api/config/fallback-shell` 保存（`save_config()` 写回）；前端「本机」栏增加「断开后」下拉选择（cmd / PowerShell），HostList 下拉保存即生效。
+- 顺手修复：① `config.example.json` 存在**非法尾逗号**（`"open_browser": true,` 后直接 `}`），json.load 直接失败；② **load_config 只合并 server/open_browser**，新增顶层配置项永远读不到——改为 `_TOP_LEVEL_KEYS` 白名单合并，新增全局配置项时在 config.py 登记即可。
+- 教训：给 load_config 加新配置项时必须同步白名单，否则"写进去读不出来"；config.example.json 每次改后跑 `python -c "import json; json.load(open('config.example.json'))"` 校验。
+- 回归：`tests/unit/test_config_fallback_shell.py`（6 例）+ `tests/api/test_config_api.py`（4 例）：默认值、合法/非法回退、roundtrip、example.json 合法性、API 保存/拒绝/大小写。API 测试 monkeypatch save_config 防写真实配置文件。

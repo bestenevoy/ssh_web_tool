@@ -26,7 +26,9 @@ from pydantic import BaseModel
 from ssh_web_tool.sessions import session_manager, SSHSession
 from ssh_web_tool.storage import storage
 from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
-from ssh_web_tool.config import load_config, get_app_dir
+from ssh_web_tool.config import (
+    load_config, get_app_dir, get_fallback_local_shell, save_config, LOCAL_SHELL_CHOICES,
+)
 from ssh_web_tool import history_db
 from ssh_web_tool.version import APP_VERSION
 from ssh_web_tool.external_sessions import external_hub
@@ -235,7 +237,29 @@ async def index():
 @app.get("/api/config")
 async def api_get_config():
     """返回前端展示所需的全局配置"""
-    return {}
+    cfg = load_config()
+    return {
+        "fallback_local_shell": get_fallback_local_shell(cfg),
+        "local_shell_choices": list(LOCAL_SHELL_CHOICES),
+    }
+
+
+class FallbackShellRequest(BaseModel):
+    """设置 SSH 断开后切换的本机 shell"""
+    shell: str
+
+
+@app.post("/api/config/fallback-shell")
+async def api_set_fallback_shell(req: FallbackShellRequest):
+    """保存"断开后切换本机终端"的 shell 选择（cmd / powershell / pwsh）"""
+    shell = req.shell.strip().lower()
+    if shell not in LOCAL_SHELL_CHOICES:
+        raise HTTPException(status_code=400, detail=f"不支持的 shell: {shell}，可选 {list(LOCAL_SHELL_CHOICES)}")
+    cfg = load_config()
+    cfg["fallback_local_shell"] = shell
+    if not save_config(cfg):
+        raise HTTPException(status_code=500, detail="保存配置失败")
+    return {"status": "ok", "fallback_local_shell": shell}
 
 
 @app.post("/api/config/reload")
@@ -1093,9 +1117,12 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
             reconnect_ok = await session.reconnect()
             if not reconnect_ok:
                 # SSH 重连失败 → 自动切换到本机 shell（不销毁会话，终端保持可用）
+                # 使用用户在配置中选择的本地终端（fallback_local_shell：cmd / powershell）
                 try:
-                    await session.switch_to_local("cmd")
-                    await websocket.send_json({"type": "info", "data": "SSH 重连失败，已切换到本机 cmd（可在界面重新连接主机）"})
+                    local_shell = get_fallback_local_shell()
+                    await session.switch_to_local(local_shell)
+                    shell_label = "PowerShell" if local_shell in ("powershell", "pwsh") else "cmd"
+                    await websocket.send_json({"type": "info", "data": f"SSH 重连失败，已切换到本机 {shell_label}（可在界面重新连接主机）"})
                 except Exception as e:
                     await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {str(e)}"})
                     await websocket.close()

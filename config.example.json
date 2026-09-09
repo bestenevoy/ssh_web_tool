@@ -5,4 +5,5 @@
     "auto_find_free_port": true
   },
   "open_browser": true,
+  "fallback_local_shell": "cmd"
 }

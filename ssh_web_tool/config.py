@@ -93,7 +93,38 @@ DEFAULT_CONFIG: Dict = {
         "auto_find_free_port": True,    # 端口被占用时自动寻找空闲端口
     },
     "open_browser": True,               # 启动后延迟自动打开浏览器
+    "fallback_local_shell": "cmd",      # SSH 断开自动切换本机终端时使用的 shell（cmd / powershell / pwsh）
 }
+
+# 合法本机 shell 取值
+LOCAL_SHELL_CHOICES = ("cmd", "powershell", "pwsh")
+
+# 顶层标量配置白名单：这些键会在 load_config 时从用户 config.json 合并进来
+_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell")
+
+
+def get_fallback_local_shell(cfg: Optional[Dict] = None) -> str:
+    """读取"SSH 断开后切换本机终端"的 shell 配置，非法取值回退 cmd"""
+    c = cfg if cfg is not None else load_config()
+    val = (c or {}).get("fallback_local_shell", "cmd")
+    if val not in LOCAL_SHELL_CHOICES:
+        return "cmd"
+    return val
+
+
+def save_config(cfg: Dict) -> bool:
+    """把配置写回配置文件（~/.ai4one/wstool/config.json，保留注释不可行——纯 JSON 覆盖写）
+
+    仅当配置目录下已有 config.json 时写入；无配置文件则创建。
+    """
+    try:
+        path = get_app_dir() / CONFIG_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except OSError as e:
+        print(f"[config] 保存配置失败: {e}")
+        return False
 
 
 def find_config_file() -> Optional[Path]:
@@ -145,8 +176,10 @@ def load_config() -> Dict:
             for key, value in server.items():
                 if value is not None:
                     cfg["server"][key] = value
-        if "open_browser" in user_cfg and isinstance(user_cfg["open_browser"], bool):
-            cfg["open_browser"] = user_cfg["open_browser"]
+        # 顶层标量配置白名单（新增全局配置项时在这里登记即可被 load_config 读取）
+        for key in _TOP_LEVEL_KEYS:
+            if key in user_cfg:
+                cfg[key] = user_cfg[key]
     except (json.JSONDecodeError, OSError) as e:
         print(f"[config] 配置文件解析失败，使用默认配置: {e}")
     return cfg

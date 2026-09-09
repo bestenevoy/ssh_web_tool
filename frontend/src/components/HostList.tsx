@@ -6,6 +6,8 @@ interface Props {
   hostTypes: HostType[]
   groups: string[]
   activeHostId: string | null
+  fallbackShell: string
+  onSetFallbackShell: (shell: string) => void
   onHostClick: (host: Host) => void
   onOpenLocalTerminal: (shell: 'cmd' | 'powershell') => void
   onEdit: (host: Host) => void
@@ -23,7 +25,7 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
 }
 
-export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, onHostClick, onOpenLocalTerminal, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, fallbackShell, onSetFallbackShell, onHostClick, onOpenLocalTerminal, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -159,6 +161,16 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
         <span className="local-terminal-label">本机</span>
         <button className="local-terminal-btn" onClick={() => onOpenLocalTerminal('cmd')}>cmd</button>
         <button className="local-terminal-btn" onClick={() => onOpenLocalTerminal('powershell')}>PowerShell</button>
+        <span className="local-terminal-label" title="SSH 断开后自动进入的本机终端">断开后</span>
+        <select
+          className="fallback-shell-select"
+          value={fallbackShell}
+          onChange={(e) => onSetFallbackShell(e.target.value)}
+          title="SSH 连接断开后自动切换到哪种本机终端"
+        >
+          <option value="cmd">cmd</option>
+          <option value="powershell">PowerShell</option>
+        </select>
       </div>
       {orderedGroups.map((group) => {
         const groupHosts = grouped[group] || []

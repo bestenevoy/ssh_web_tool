@@ -18,7 +18,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 // 主机管理
 export const api = {
   // 全局配置
-  getConfig: () => request<Record<string, never>>('/api/config'),
+  getConfig: () => request<{ fallback_local_shell: string; local_shell_choices: string[] }>('/api/config'),
+  // 设置 SSH 断开后自动进入的本机终端（cmd / powershell / pwsh）
+  setFallbackShell: (shell: string) =>
+    request<{ status: string; fallback_local_shell: string }>('/api/config/fallback-shell', {
+      method: 'POST',
+      body: JSON.stringify({ shell }),
+    }),
 
   // 主机
   listHosts: () => request<{ hosts: Host[]; groups: string[]; host_types: HostType[] }>('/api/hosts'),
