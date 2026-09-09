@@ -215,11 +215,13 @@ def _ask_and_apply(msg: str, rel: dict, show_dialog=None) -> None:
     # 替换脚本带当前 PID：旧进程退出慢时由脚本 taskkill 兜底，避免文件锁导致更新失败
     script = build_update_script(exe_dir, exe.name, new_path.name, pid=os.getpid())
     # 启动更新脚本（独立进程，不等）后立即退出当前程序
+    # 注意：CREATE_NEW_CONSOLE 与 DETACHED_PROCESS 互斥，同时使用会 WinError 87 参数错误
+    #（v0.1.31 引入该 bug 导致脚本从未启动、更新永远失败）。用 DETACHED_PROCESS 静默运行。
     try:
         subprocess.Popen(
             [str(script)],
             cwd=str(exe_dir),
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "DETACHED_PROCESS", 0),
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
             close_fds=True,
         )
     except Exception:

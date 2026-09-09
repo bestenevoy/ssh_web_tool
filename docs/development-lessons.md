@@ -293,3 +293,11 @@
 - 顺手修复：① `config.example.json` 存在**非法尾逗号**（`"open_browser": true,` 后直接 `}`），json.load 直接失败；② **load_config 只合并 server/open_browser**，新增顶层配置项永远读不到——改为 `_TOP_LEVEL_KEYS` 白名单合并，新增全局配置项时在 config.py 登记即可。
 - 教训：给 load_config 加新配置项时必须同步白名单，否则"写进去读不出来"；config.example.json 每次改后跑 `python -c "import json; json.load(open('config.example.json'))"` 校验。
 - 回归：`tests/unit/test_config_fallback_shell.py`（6 例）+ `tests/api/test_config_api.py`（4 例）：默认值、合法/非法回退、roundtrip、example.json 合法性、API 保存/拒绝/大小写。API 测试 monkeypatch save_config 防写真实配置文件。
+
+
+### 42. 自动更新永远失败：CREATE_NEW_CONSOLE | DETACHED_PROCESS 互斥（v0.1.34 修复）
+- 现象：用户"检查更新"→ 下载完成后提示"启动更新脚本失败，已取消更新"；`_wstool_update.log` 从未生成（脚本从未启动）。
+- 根因：`subprocess.Popen(..., creationflags=CREATE_NEW_CONSOLE | DETACHED_PROCESS)`——Windows 文档明确这两个 flag 互斥，组合使用 CreateProcess 直接返回 `WinError 87 参数错误`，Popen 抛 OSError → updater 捕获后提示取消。v0.1.31 写替换脚本时引入，从 31 起更新实际从未成功过（此前 29→30 失败被误判为网络问题）。
+- 修复：`creationflags` 只保留 `DETACHED_PROCESS`（静默后台运行 bat，不弹窗）。
+- 教训：Windows CreateProcess flag 互斥（CREATE_NEW_CONSOLE vs DETACHED_PROCESS vs CREATE_NO_WINDOW）——**组合使用前先看文档**；测试要覆盖"调用参数"，用真实 Popen 启动 bat 验证而不是只看脚本内容。
+- 回归：`test_update_script_launch_flags`（真实 Popen：旧组合必须抛 OSError、新组合能启动 bat）+ `test_update_script_content_uses_detached_only`（源码防回归）。

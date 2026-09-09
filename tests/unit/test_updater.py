@@ -249,3 +249,41 @@ def test_apply_update_confirm_false_no_download(monkeypatch):
     monkeypatch.setattr(updater, "download_exe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应下载")))
     monkeypatch.setattr(updater, "_confirm", lambda *a, **k: False)
     updater._ask_and_apply("msg", {"version": "v9.9.9"}, None)
+
+
+# ---------- 更新脚本启动 flag（Windows 专用） ----------
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 专用：验证 CreateProcess flag 互斥")
+def test_update_script_launch_flags(tmp_path):
+    """CREATE_NEW_CONSOLE | DETACHED_PROCESS 互斥（WinError 87）——
+    v0.1.31 引入的 bug 导致更新脚本从未启动、永远提示"启动更新脚本失败"。
+    回归：新组合（仅 DETACHED_PROCESS）必须能启动 bat。"""
+    import subprocess
+
+    bat = tmp_path / "_t.bat"
+    bat.write_text("@echo off\r\necho ok > %~dp0out.txt\r\n", encoding="ascii")
+
+    CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0)
+    assert CREATE_NEW_CONSOLE and DETACHED
+
+    # 旧组合（互斥 flag）必须抛异常——这正是用户遇到的"启动更新脚本失败"
+    with pytest.raises(OSError):
+        subprocess.Popen(
+            [str(bat)], cwd=str(tmp_path),
+            creationflags=CREATE_NEW_CONSOLE | DETACHED, close_fds=True,
+        )
+
+    # 新组合（仅 DETACHED_PROCESS）必须成功启动 bat
+    p = subprocess.Popen([str(bat)], cwd=str(tmp_path), creationflags=DETACHED, close_fds=True)
+    p.wait(timeout=15)
+    assert (tmp_path / "out.txt").exists()
+
+
+def test_update_script_content_uses_detached_only(tmp_path):
+    """updater.py 源码不再使用 CREATE_NEW_CONSOLE（防回归：直接检查调用参数）"""
+    src = Path(updater.__file__).read_text(encoding="utf-8")
+    # 仅允许注释中说明该坑，不允许实际调用参数使用
+    bad = [l for l in src.splitlines() if "CREATE_NEW_CONSOLE" in l and not l.strip().startswith("#")]
+    assert not bad
+    assert 'creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)' in src
