@@ -265,3 +265,15 @@
 - write/read 接收 str 而非 bytes；`setwinsize(rows, cols)`。
 - 输出必须持续被读取（循环 read），否则 ConPTY 管道背压、cmd 后续输入不执行——表现为“write 成功但命令无回显”。
 - 日志断言读文件而非 `_log_buf`（0.6s 静默期后缓冲已 flush 落盘）。
+
+
+### 39. 自动更新失败的三大原因与对策（v0.1.31 修复）
+- **现象**：0.1.29 -> 0.1.30 更新失败：两次"网络问题"、一次"更新失败"。
+- **原因 A（网络）**：get_latest_release（api.github.com）与 download_exe（objects.githubusercontent.com）一次失败即放弃，无重试；国内访问 GitHub 不稳定。
+  - 修复：两处均自动重试 3 次（退避 1s/2s）；失败提示明确"已重试 3 次"。
+- **原因 B（半截文件）**：下载只校验"非空"，不校验大小，可能拿到不完整 EXE。
+  - 修复：download_exe(..., expected_size=rel['size'])，字节数不匹配视为失败并重试。
+- **原因 C（替换失败）**：更新 bat 固定等 2 秒就 del 旧 exe——PyInstaller onefile 引导进程退出慢时文件仍被锁，del/move 静默失败且无日志。
+  - 修复：bat 传入当前 PID（taskkill /f /pid 兜底），轮询等待旧 exe 可删除（最长 30s，每 1s 一次）；失败写 _wstool_update.log 便于排查；move 失败有 fail 分支。
+- **回归**：test_get_latest_release_retries_on_network_error、test_download_exe_size_mismatch_retries_then_success、test_download_exe_retries_on_network_error、test_build_update_script（断言 PID/轮询/日志）。
+- **补充教训（发版时序）**：build.ps1 必须在 version.py 改到目标版本之后运行，否则 EXE 内嵌旧版本号；重建前先停正在运行的 EXE，否则 PyInstaller 覆盖 dist/SSHWebTool.exe 报 PermissionError 文件锁。
