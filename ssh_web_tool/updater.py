@@ -4,8 +4,10 @@
 设计：
 - 版本源：GitHub Releases API（公开仓库，无需认证）
 - 下载：流式写入 exe 同目录 SSHWebTool_new.exe（保证替换脚本同盘 rename 原子）
-- 替换：更新脚本（bat）在旧进程退出后 del 旧 exe → move 新 exe → 启动 → 自删
+- 替换：更新脚本（bat）等待旧进程退出后 del 旧 exe → move 新 exe → 启动 → 自删
 - 安全：更新前弹窗确认，明确告知"将断开所有 SSH 连接"（进程重启，会话内存态全丢）
+- 健壮性：网络请求自动重试（国内访问 GitHub 不稳定）；下载校验大小；
+  替换脚本轮询等待旧进程退出（最长 30s），并写 _wstool_update.log 便于排查失败原因
 """
 import os
 import re
@@ -22,6 +24,10 @@ from ssh_web_tool.version import APP_VERSION
 REPO = "bestenevoy/ssh_web_tool"
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_NAME = "SSHWebTool.exe"
+
+# 网络重试参数（国内访问 GitHub 不稳定，自动重试降低"网络问题"失败率）
+RETRY_TIMES = 3
+
 
 # 当前可执行文件
 def _current_exe() -> Optional[Path]:
@@ -45,70 +51,107 @@ def is_newer(latest: str, current: str) -> bool:
 
 
 def get_latest_release(timeout: float = 15.0) -> Optional[dict]:
-    """获取最新 Release 信息，返回 {version, download_url, size, url}；失败返回 None"""
-    try:
-        req = urllib.request.Request(
-            RELEASE_API,
-            headers={"User-Agent": "ssh-web-tool-updater", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-        import json
-        rel = json.loads(data)
-        version = rel.get("tag_name", "")
-        asset_url = None
-        size = 0
-        for asset in rel.get("assets", []):
-            if asset.get("name") == ASSET_NAME:
-                asset_url = asset.get("browser_download_url")
-                size = asset.get("size", 0)
-                break
-        if not asset_url:
-            return None
-        return {"version": version, "download_url": asset_url, "size": size,
-                "url": rel.get("html_url", "")}
-    except Exception:
-        return None
+    """获取最新 Release 信息，返回 {version, download_url, size, url}；失败返回 None
+
+    网络异常自动重试（RETRY_TIMES 次，退避 1s/2s）。
+    """
+    last_err = None
+    for attempt in range(RETRY_TIMES):
+        try:
+            req = urllib.request.Request(
+                RELEASE_API,
+                headers={"User-Agent": "ssh-web-tool-updater", "Accept": "application/vnd.github+json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            import json
+            rel = json.loads(data)
+            version = rel.get("tag_name", "")
+            asset_url = None
+            size = 0
+            for asset in rel.get("assets", []):
+                if asset.get("name") == ASSET_NAME:
+                    asset_url = asset.get("browser_download_url")
+                    size = asset.get("size", 0)
+                    break
+            if not asset_url:
+                return None
+            return {"version": version, "download_url": asset_url, "size": size,
+                    "url": rel.get("html_url", "")}
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < RETRY_TIMES - 1:
+                time.sleep(1 + attempt)
+    print(f"[updater] 获取 Release 失败（{RETRY_TIMES} 次）: {last_err}")
+    return None
 
 
-def download_exe(url: str, dest: Path, timeout: float = 60.0) -> bool:
-    """流式下载到 dest（覆盖已存在）；失败清理残留返回 False"""
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ssh-web-tool-updater"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            with open(tmp, "wb") as f:
-                while True:
-                    chunk = resp.read(1 << 16)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-        # 校验非空后 rename（临时 → 目标）
-        if tmp.stat().st_size == 0:
+def download_exe(url: str, dest: Path, expected_size: int = 0, timeout: float = 60.0) -> bool:
+    """流式下载到 dest（覆盖已存在）；失败清理残留返回 False
+
+    - 网络异常自动重试（RETRY_TIMES 次，退避 1s/2s）
+    - expected_size > 0 时校验下载字节数（GitHub 资产 size 字段），不匹配视为失败
+    """
+    for attempt in range(RETRY_TIMES):
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ssh-web-tool-updater"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = resp.read(1 << 16)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            size = tmp.stat().st_size
+            # 校验非空 + 大小匹配
+            if size == 0 or (expected_size > 0 and size != expected_size):
+                print(f"[updater] 下载大小不匹配: got {size}, expected {expected_size}")
+                tmp.unlink(missing_ok=True)
+                if attempt < RETRY_TIMES - 1:
+                    time.sleep(1 + attempt)
+                continue
+            os.replace(tmp, dest)
+            return True
+        except Exception as e:  # noqa: BLE001
+            print(f"[updater] 下载失败（第 {attempt + 1} 次）: {e}")
             tmp.unlink(missing_ok=True)
-            return False
-        os.replace(tmp, dest)
-        return True
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        return False
+            if attempt < RETRY_TIMES - 1:
+                time.sleep(1 + attempt)
+    return False
 
 
-def build_update_script(exe_dir: Path, old_name: str, new_name: str) -> Path:
+def build_update_script(exe_dir: Path, old_name: str, new_name: str, pid: int = 0) -> Path:
     """生成替换重启脚本（bat），返回脚本路径
 
-    脚本流程：等待 2 秒（旧进程已退出）→ 删旧 → 移新 → 启动 → 自删
+    脚本流程：轮询等待旧进程退出（最多 30s，taskkill 指定 PID 兜底）
+    → 删旧 → 移新 → 启动 → 自删；全程写 _wstool_update.log 便于排查
     """
     script = exe_dir / "_wstool_update.bat"
-    # chcp 65001 + batch 内中文避免乱码（脚本本身用 ASCII 更稳）
+    pid_kill = f'taskkill /f /pid {pid} >nul 2>&1\r\n' if pid else ""
     content = (
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
-        "timeout /t 2 /nobreak >nul\r\n"
+        'set "LOG=%~dp0_wstool_update.log"\r\n'
+        'echo [%date% %time%] update start >> "%LOG%"\r\n'
+        "set /a N=0\r\n"
+        ":wait\r\n"
+        "set /a N+=1\r\n"
+        "if %N% gtr 30 goto fail\r\n"
+        f"{pid_kill}"
+        "timeout /t 1 /nobreak >nul\r\n"
         f'del /f /q "%~dp0{old_name}" >nul 2>&1\r\n'
+        f'if exist "%~dp0{old_name}" goto wait\r\n'
         f'move /y "%~dp0{new_name}" "%~dp0{old_name}" >nul 2>&1\r\n'
+        f'if not exist "%~dp0{old_name}" goto fail\r\n'
         f'start "" "%~dp0{old_name}"\r\n'
-        "del /f /q \"%~f0\" >nul 2>&1\r\n"
+        'echo [%date% %time%] update ok >> "%LOG%"\r\n'
+        'del /f /q "%~f0" >nul 2>&1\r\n'
+        "exit /b 0\r\n"
+        ":fail\r\n"
+        'echo [%date% %time%] update FAILED >> "%LOG%"\r\n'
+        'del /f /q "%~f0" >nul 2>&1\r\n'
+        "exit /b 1\r\n"
     )
     script.write_text(content, encoding="ascii")
     return script
@@ -159,11 +202,18 @@ def _ask_and_apply(msg: str, rel: dict, show_dialog=None) -> None:
         return
     exe_dir = exe.parent
     new_path = exe_dir / ("SSHWebTool_new.exe")
-    _info(f"正在下载新版本 {rel['version']}（约 {rel.get('size', 0) // 1024 // 1024} MB）...", show_dialog)
-    if not download_exe(rel["download_url"], new_path):
-        _info("下载失败，已取消更新（请检查网络后重试）。", show_dialog)
+    # 清理上次更新失败的残留文件（避免旧文件干扰/占用空间）
+    try:
+        new_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    size_mb = rel.get("size", 0) // 1024 // 1024
+    _info(f"正在下载新版本 {rel['version']}（约 {size_mb} MB），网络失败将自动重试...", show_dialog)
+    if not download_exe(rel["download_url"], new_path, expected_size=rel.get("size", 0)):
+        _info("下载失败（已自动重试 3 次），请检查网络后重试。", show_dialog)
         return
-    script = build_update_script(exe_dir, exe.name, new_path.name)
+    # 替换脚本带当前 PID：旧进程退出慢时由脚本 taskkill 兜底，避免文件锁导致更新失败
+    script = build_update_script(exe_dir, exe.name, new_path.name, pid=os.getpid())
     # 启动更新脚本（独立进程，不等）后立即退出当前程序
     try:
         subprocess.Popen(
