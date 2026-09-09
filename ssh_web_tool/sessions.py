@@ -555,6 +555,9 @@ class SSHSession:
         返回清理后的日志文本
         """
         try:
+            # 先落盘聚合缓冲：banner/MOTD 等刚产生（未到 0.6s 静默期）的输出
+            # 若直接读文件会漏掉，导致"连接后的主机信息没有显示"
+            self._flush_log_now()
             if not os.path.exists(self._log_file):
                 return ""
             file_size = os.path.getsize(self._log_file)

@@ -1059,6 +1059,31 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         await websocket.close()
         return
 
+    # 先注册输出监听器再启动 shell：banner/MOTD 等首包输出不丢失
+    # （此前在 start_interactive_shell 之后注册，SSH 连接横幅在 listener 就绪前
+    #  已被广播丢弃，前端只剩提示符——用户反馈"连接后的主机信息没有显示"）
+    await session.start_output_reader()
+    listener = session.add_output_listener()
+
+    async def read_output():
+        try:
+            while True:
+                # 会话级通知（shell 异常等）优先推送，发送后清空（take 只取一次）
+                notice = session.take_shell_notice()
+                if notice:
+                    await websocket.send_json({"type": "info", "data": notice})
+                data = await listener.get()
+                await websocket.send_json({"type": "output", "data": data})
+        except Exception:
+            pass
+
+    read_task = asyncio.create_task(read_output())
+
+    # 全局连接监控已由 SessionManager 统一管理（start_global_monitor），
+    # 不再为每个 WebSocket 连接创建独立监控协程
+    session_manager.start_global_monitor()
+    monitor_task = None  # 保留变量名以兼容 finally 块的 cancel
+
     # 检测 SSH 连接是否真的活着，如果断开了自动重连（本地 shell 会话直接跳过）
     if session.is_local():
         pass
@@ -1135,29 +1160,8 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
             return
 
     # 确保输出读取器在运行（start_interactive_shell 会自动启动，但恢复场景需要确认）
+    # 注意：listener/read_task 已在 shell 启动前注册（见上方），此处仅兜底确保 reader 在跑
     await session.start_output_reader()
-
-    # 注册输出监听器（从广播队列读取，发送给前端）
-    listener = session.add_output_listener()
-
-    async def read_output():
-        try:
-            while True:
-                # 会话级通知（shell 异常等）优先推送，发送后清空（take 只取一次）
-                notice = session.take_shell_notice()
-                if notice:
-                    await websocket.send_json({"type": "info", "data": notice})
-                data = await listener.get()
-                await websocket.send_json({"type": "output", "data": data})
-        except Exception:
-            pass
-
-    read_task = asyncio.create_task(read_output())
-
-    # 全局连接监控已由 SessionManager 统一管理（start_global_monitor），
-    # 不再为每个 WebSocket 连接创建独立监控协程
-    session_manager.start_global_monitor()
-    monitor_task = None  # 保留变量名以兼容 finally 块的 cancel
 
     # 处理单条消息的函数
     async def handle_message(raw: str):

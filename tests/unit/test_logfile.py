@@ -151,6 +151,18 @@ def test_feed_log_flush_threshold(tmp_path):
     assert content.count("x") == s.LOG_FLUSH_MAX + 100
 
 
+def test_get_history_logs_flushes_before_read(tmp_path):
+    """历史日志读取前先 flush 聚合缓冲（回归：banner/MOTD 刚产生未到静默期
+    时直接读文件会漏掉，导致"连接后的主机信息没有显示"）"""
+    s = _mk_session()
+    s._feed_log("Welcome to Ubuntu 26.04\r\nroot@host:~# ")
+    # 不等待 0.6s 静默期，直接读历史日志（内部应 flush）
+    content = s.get_history_logs(offset=0, limit=5000)
+    assert "Welcome to Ubuntu 26.04" in content
+    assert "root@host:~#" in content
+    assert s._log_buf == ""  # 读后缓冲已落盘
+
+
 def test_close_flushes_remaining_log(tmp_path):
     """关闭会话：剩余缓冲落盘 + 日志文件名补全结束时间"""
     s = _mk_session()
