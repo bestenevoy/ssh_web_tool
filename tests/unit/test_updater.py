@@ -127,9 +127,11 @@ def test_build_update_script(tmp_path):
     assert 'move /y "%~dp0SSHWebTool_new.exe" "%~dp0SSHWebTool.exe"' in content
     assert 'start "" "%~dp0SSHWebTool.exe"' in content
     assert 'if exist "%~dp0SSHWebTool.exe" goto wait' in content  # 轮询等待旧进程退出
-    assert "if %N% gtr 30 goto fail" in content
-    assert 'goto fail' in content
-    assert '_wstool_update.log' in content  # 失败日志便于排查
+    assert "if %N% gtr 60 goto fail" in content  # 最长约 60s
+    assert "ping -n 2 127.0.0.1 >nul" in content  # 延时用 ping：timeout 在 stdin 重定向/无控制台下立即失败
+    assert "goto fail" in content
+    assert "_wstool_update.log" in content  # 失败日志便于排查
+    assert "old exe locked" in content  # 等待时写日志，可区分"锁没释放"与"脚本没跑"
 
 
 def test_build_update_script_no_pid(tmp_path):
@@ -280,10 +282,81 @@ def test_update_script_launch_flags(tmp_path):
     assert (tmp_path / "out.txt").exists()
 
 
-def test_update_script_content_uses_detached_only(tmp_path):
-    """updater.py 源码不再使用 CREATE_NEW_CONSOLE（防回归：直接检查调用参数）"""
+def test_update_script_launch_strategy_source_guard(tmp_path):
+    """启动策略防回归（源码检查）：
+    - 禁止 CREATE_NEW_CONSOLE（与 DETACHED_PROCESS 互斥，v0.1.31 曾因此永远失败）
+    - 必须存在多策略启动器 _launch_update_script 且被 _ask_and_apply 调用
+    - 必须包含 cmd /c 显式解释 + CREATE_NO_WINDOW（打包版无控制台的兜底主力）"""
     src = Path(updater.__file__).read_text(encoding="utf-8")
-    # 仅允许注释中说明该坑，不允许实际调用参数使用
     bad = [l for l in src.splitlines() if "CREATE_NEW_CONSOLE" in l and not l.strip().startswith("#")]
     assert not bad
-    assert 'creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)' in src
+    assert "def _launch_update_script" in src
+    assert "_launch_update_script(script, exe_dir)" in src
+    assert "CREATE_NO_WINDOW" in src
+    assert '"shell": True' in src  # 最后兜底方式存在
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 专用")
+def test_launch_update_script_falls_back_on_failure(tmp_path, monkeypatch):
+    """前两种启动方式失败时自动兜底第三种，全部失败才抛异常"""
+    calls = {"n": 0}
+
+    def flaky_popen(args, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise OSError(f"blocked (attempt {calls['n']})")
+        return mock.Mock()
+
+    monkeypatch.setattr(updater.subprocess, "Popen", flaky_popen)
+    updater._launch_update_script(tmp_path / "s.bat", tmp_path)
+    assert calls["n"] == 3  # 三种方式都尝试了
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 专用")
+def test_launch_update_script_all_fail_raises(tmp_path, monkeypatch):
+    def always_fail(args, **kw):
+        raise OSError("blocked")
+
+    monkeypatch.setattr(updater.subprocess, "Popen", always_fail)
+    with pytest.raises(OSError):
+        updater._launch_update_script(tmp_path / "s.bat", tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 专用")
+def test_launch_update_script_real(tmp_path):
+    """真实启动：_launch_update_script 必须能把 bat 跑起来（cmd /c + CREATE_NO_WINDOW + DEVNULL 主路径）"""
+    import time as _t
+
+    bat = tmp_path / "_t.bat"
+    bat.write_text("@echo off\r\nping -n 2 127.0.0.1 >nul\r\necho ok > %~dp0out.txt\r\n", encoding="ascii")
+    updater._launch_update_script(bat, tmp_path)  # 内部 Popen 成功即返回
+    for _ in range(150):  # 轮询 15s 等 bat 产物
+        if (tmp_path / "out.txt").exists():
+            break
+        _t.sleep(0.1)
+    assert (tmp_path / "out.txt").exists()
+
+
+def test_ask_and_apply_launch_failure_keeps_new_exe(monkeypatch, tmp_path):
+    """启动脚本失败：报错带真实异常 + 保留已下载新包（供重试/手动替换），不删"""
+
+    def fake_download(url, dest, expected_size=0, timeout=60.0):
+        dest.write_bytes(b"new exe bytes")
+        return True
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    exe = tmp_path / "SSHWebTool.exe"
+    exe.write_bytes(b"old")
+    monkeypatch.setattr(updater, "_current_exe", lambda: exe)
+    monkeypatch.setattr(updater, "_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(updater, "download_exe", fake_download)
+    monkeypatch.setattr(updater, "_launch_update_script",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("blocked by av")))
+    info = []
+    monkeypatch.setattr(updater, "_info", lambda msg, *a, **k: info.append(msg))
+    updater._ask_and_apply("msg", {
+        "version": "v9.9.9", "download_url": "https://x/exe", "size": 13, "url": "",
+    }, None)
+    assert any("启动更新脚本失败" in m and "blocked by av" in m for m in info)
+    assert any("SSHWebTool_new.exe" in m for m in info)  # 提示手动替换路径
+    assert (tmp_path / "SSHWebTool_new.exe").exists()  # 新包未被删除

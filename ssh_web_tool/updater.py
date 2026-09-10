@@ -5,9 +5,12 @@
 - 版本源：GitHub Releases API（公开仓库，无需认证）
 - 下载：流式写入 exe 同目录 SSHWebTool_new.exe（保证替换脚本同盘 rename 原子）
 - 替换：更新脚本（bat）等待旧进程退出后 del 旧 exe → move 新 exe → 启动 → 自删
+- 启动脚本：多种方式逐个尝试（cmd /c 显式解释 + DETACHED 兜底 + shell 最后兜底），
+  打包版/杀软环境下单一方式失败率高；每次失败写 _wstool_update.log
 - 安全：更新前弹窗确认，明确告知"将断开所有 SSH 连接"（进程重启，会话内存态全丢）
 - 健壮性：网络请求自动重试（国内访问 GitHub 不稳定）；下载校验大小；
-  替换脚本轮询等待旧进程退出（最长 30s），并写 _wstool_update.log 便于排查失败原因
+  替换脚本轮询等待旧进程退出（最长 60s，延时用 ping——timeout 在无控制台/
+  stdin 重定向下立即失败会导致等待循环空转）；启动失败保留新包供重试/手动替换
 """
 import os
 import re
@@ -15,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -124,23 +128,25 @@ def download_exe(url: str, dest: Path, expected_size: int = 0, timeout: float = 
 def build_update_script(exe_dir: Path, old_name: str, new_name: str, pid: int = 0) -> Path:
     """生成替换重启脚本（bat），返回脚本路径
 
-    脚本流程：轮询等待旧进程退出（最多 30s，taskkill 指定 PID 兜底）
-    → 删旧 → 移新 → 启动 → 自删；全程写 _wstool_update.log 便于排查
+    脚本流程：轮询等待旧进程退出（最多 60s，taskkill 指定 PID 兜底）
+    → 删旧 → 移新 → 启动 → 自删；全程写 _wstool_update.log 便于排查。
+    延时用 ping 而非 timeout：timeout 在 stdin 被重定向（DEVNULL）或无控制台时
+    会立即报错退出，等待循环瞬间空转 60 次直接 fail（"闪失败"的元凶之一）。
     """
     script = exe_dir / "_wstool_update.bat"
     pid_kill = f'taskkill /f /pid {pid} >nul 2>&1\r\n' if pid else ""
     content = (
         "@echo off\r\n"
-        "chcp 65001 >nul\r\n"
         'set "LOG=%~dp0_wstool_update.log"\r\n'
         'echo [%date% %time%] update start >> "%LOG%"\r\n'
         "set /a N=0\r\n"
         ":wait\r\n"
         "set /a N+=1\r\n"
-        "if %N% gtr 30 goto fail\r\n"
+        "if %N% gtr 60 goto fail\r\n"
         f"{pid_kill}"
-        "timeout /t 1 /nobreak >nul\r\n"
+        "ping -n 2 127.0.0.1 >nul\r\n"
         f'del /f /q "%~dp0{old_name}" >nul 2>&1\r\n'
+        f'if exist "%~dp0{old_name}" echo [%date% %time%] old exe locked, waiting (attempt %N%) >> "%LOG%"\r\n'
         f'if exist "%~dp0{old_name}" goto wait\r\n'
         f'move /y "%~dp0{new_name}" "%~dp0{old_name}" >nul 2>&1\r\n'
         f'if not exist "%~dp0{old_name}" goto fail\r\n'
@@ -149,12 +155,74 @@ def build_update_script(exe_dir: Path, old_name: str, new_name: str, pid: int = 
         'del /f /q "%~f0" >nul 2>&1\r\n'
         "exit /b 0\r\n"
         ":fail\r\n"
-        'echo [%date% %time%] update FAILED >> "%LOG%"\r\n'
+        'echo [%date% %time%] update FAILED (attempts %N%) >> "%LOG%"\r\n'
         'del /f /q "%~f0" >nul 2>&1\r\n'
         "exit /b 1\r\n"
     )
     script.write_text(content, encoding="ascii")
     return script
+
+
+def _ulog(msg: str, base: Optional[Path] = None) -> None:
+    """更新流程文件日志（打包版 --noconsole 没有 stdout，print 不可见）
+
+    写 base/_wstool_update.log（追加）；写失败静默（更新流程不能因日志中断）。
+    """
+    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [pid={os.getpid()}] {msg}\n"
+    if base is not None:
+        candidates = [base]
+    else:
+        candidates = []
+        exe = _current_exe()
+        if exe is not None:
+            candidates.append(exe.parent)
+        candidates.append(Path(os.environ.get("TEMP", ".")))
+    for d in candidates:
+        try:
+            with open(d / "_wstool_update.log", "a", encoding="utf-8", errors="replace") as f:
+                f.write(line)
+            return
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _launch_update_script(script: Path, exe_dir: Path) -> None:
+    """启动更新脚本：多种方式逐个尝试，全部失败抛出最后一个异常
+
+    打包版（--noconsole）进程无控制台、标准句柄无效，且部分安全软件会拦截
+    "下载来的 exe 直接拉起 bat"——单一启动方式在个别机器上必失败（表现为
+    "启动升级脚本失败"）。按可靠性排序兜底，每次失败写日志：
+
+    1. cmd /c 显式解释 + CREATE_NO_WINDOW：有隐藏控制台，cmd 内建命令行为
+       与交互环境一致，且不弹窗（标准句柄显式给 DEVNULL，避免继承无效句柄）
+    2. DETACHED_PROCESS 直启 bat（v0.1.34 起的原方式）
+    3. shell=True 字符串（最后兜底，走系统 COMSPEC 解析）
+    """
+    flags_cnw = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    flags_det = getattr(subprocess, "DETACHED_PROCESS", 0)
+    comspec = os.environ.get("COMSPEC", "cmd.exe")
+    attempts = [
+        ("cmd/c+CREATE_NO_WINDOW", [comspec, "/c", str(script)], {"creationflags": flags_cnw}),
+        ("DETACHED_PROCESS", [str(script)], {"creationflags": flags_det}),
+        ("shell=True", f'"{script}"', {"creationflags": flags_cnw, "shell": True}),
+    ]
+    last_err: Exception = RuntimeError("no launch attempt made")
+    for desc, args, extra in attempts:
+        try:
+            subprocess.Popen(
+                args,
+                cwd=str(exe_dir),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **extra,
+            )
+            _ulog(f"update script launched via {desc}", base=exe_dir)
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            _ulog(f"launch via {desc} failed: {type(e).__name__}: {e}", base=exe_dir)
+    raise last_err
 
 
 def check_for_update_quiet(show_dialog=None) -> None:
@@ -210,23 +278,27 @@ def _ask_and_apply(msg: str, rel: dict, show_dialog=None) -> None:
     size_mb = rel.get("size", 0) // 1024 // 1024
     _info(f"正在下载新版本 {rel['version']}（约 {size_mb} MB），网络失败将自动重试...", show_dialog)
     if not download_exe(rel["download_url"], new_path, expected_size=rel.get("size", 0)):
-        _info("下载失败（已自动重试 3 次），请检查网络后重试。", show_dialog)
+        _info(
+            "下载失败（已自动重试 3 次），请检查网络后重试。\n\n"
+            "若程序放在 Program Files 等受保护目录，请把整个程序移动到用户目录（如桌面）后再试。",
+            show_dialog,
+        )
         return
     # 替换脚本带当前 PID：旧进程退出慢时由脚本 taskkill 兜底，避免文件锁导致更新失败
     script = build_update_script(exe_dir, exe.name, new_path.name, pid=os.getpid())
     # 启动更新脚本（独立进程，不等）后立即退出当前程序
-    # 注意：CREATE_NEW_CONSOLE 与 DETACHED_PROCESS 互斥，同时使用会 WinError 87 参数错误
-    #（v0.1.31 引入该 bug 导致脚本从未启动、更新永远失败）。用 DETACHED_PROCESS 静默运行。
+    # 多种启动方式逐个尝试（杀软拦截 bat 直启等环境差异会毙掉单一方式），见 _launch_update_script
     try:
-        subprocess.Popen(
-            [str(script)],
-            cwd=str(exe_dir),
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
-            close_fds=True,
+        _launch_update_script(script, exe_dir)
+    except Exception as e:  # noqa: BLE001
+        # 不删已下载的新包：保留供重试更新或手动重命名替换，避免白白重下 20+ MB
+        _info(
+            f"启动更新脚本失败：{type(e).__name__}: {e}\n\n"
+            f"新版本已下载到：{new_path}\n"
+            f"可重启程序再次尝试更新；或手动把上面的文件重命名为 {exe.name}（先退出本程序）。\n"
+            f"详情见同目录 _wstool_update.log",
+            show_dialog,
         )
-    except Exception:
-        new_path.unlink(missing_ok=True)
-        _info("启动更新脚本失败，已取消更新。", show_dialog)
         return
     os._exit(0)  # noqa: PLR1722
 

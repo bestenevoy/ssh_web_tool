@@ -48,3 +48,6 @@ config.json
 
 # 运行时端口记录（启动时生成，不提交）
 .running_port
+
+# 自动更新过程日志（exe 同目录/TEMP，运行时生成）
+_wstool_update.log

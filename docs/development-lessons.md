@@ -325,3 +325,16 @@
 - **验证**：`tests/api/test_logs_api.py` 5 例（已删会话按文件读、_running 命名匹配、存活会话优先走内存、未知会话返回空内容不 404、ANSI 清理）；浏览器 e2e：断开→重连→Shift+PageUp/PageDown 滚动，旧 banner + `echo` 回显 + 输出完整可见。
 - **教训**：凡是"先读旧数据再删旧对象"的流程，读与删之间任何一方先失败都会丢数据；**删除语义的资源，读取接口要按不可变键（文件名含 session_id）独立提供**，不要依赖生命周期对象。
 - **备注**：e2e 用 bu 验证滚动回看时，`bu.scroll` 滚轮事件在 xterm 上不可靠（可能滚的是页面），用 **Shift+PageUp/PageDown**（xterm 标准 scrollback 快捷键）最稳。
+
+
+### 45. 自动更新"启动升级脚本失败"仍未绝迹：单一启动方式 + 吞异常 + timeout 空转（v0.1.39 修复）
+- **现象**：v0.1.34 修掉 WinError 87 后，打包版用户升级仍报"启动更新脚本失败"；且报错不带原因，`print` 日志在 --noconsole EXE 里完全不可见，无法排查。
+- **本机无法复现**：用 pythonw（≈--noconsole）与 PyInstaller onefile --noconsole 探针 EXE 实测，`Popen([bat], DETACHED_PROCESS)` 与 `timeout` 延时在开发机全部正常——失败只在用户机器出现（杀软拦截 exe 直启 bat / 路径环境差异等），属于环境相关故障，代码必须自带兜底与可观测性。
+- **修复（updater.py）**：
+  - 启动脚本改为**多策略逐个兜底** `_launch_update_script()`：① `cmd /c` 显式解释 + CREATE_NO_WINDOW + 标准句柄 DEVNULL（隐藏控制台、不继承无效句柄）；② DETACHED_PROCESS 直启 bat（原方式）；③ `shell=True` 最后兜底。每次失败写 `_wstool_update.log`。
+  - 新增 `_ulog()` 文件日志（exe 目录 → TEMP 兜底），替代 print；用户可见报错带 `{type(e).__name__}: {e}`。
+  - **启动失败不再删除已下载的新包**：提示可重试或手动改名为 SSHWebTool.exe（原来失败即删 20+MB 下载成果）。
+  - bat 延时 **`timeout` → `ping -n 2 127.0.0.1`**：timeout 在 stdin 被重定向（DEVNULL）或无控制台时立即报错，等待循环瞬间空转 60 次直接 fail（"闪失败"元凶）；等待上限 30→60 次，等待期间写 "old exe locked, waiting" 日志。
+  - 下载失败提示补"受保护目录（Program Files）无写权限"场景引导。
+- **教训**：① 环境相关故障（只在用户机出现）本地复现不了时，修复方向是**多策略兜底 + 失败原因透出**，而不是继续猜单一根因；② GUI/--noconsole 程序里 print 是自欺——用户侧可观测性必须靠文件日志；③ bat 里 `timeout` 依赖控制台 stdin，脚本化场景一律用 `ping -n N 127.0.0.1` 做延时。
+- **回归**：`test_updater.py` 23 例（新增：启动兜底链 mock 3 次调用、全失败抛异常、真实 Popen 跑通 bat、启动失败保留新包+报错带原因；bat 内容断言 ping/60 次/locked 日志）。
