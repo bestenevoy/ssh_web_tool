@@ -664,8 +664,14 @@ class SSHSession:
             argv = ["cmd.exe"]
         try:
             import winpty
-        except ImportError:
-            raise RuntimeError("本地 shell 需要 pywinpty（pip install pywinpty），当前不可用")
+        except ImportError as e:
+            # 打包后 winpty.dll 加载失败常见原因：目标机器缺 VC++ Redistributable
+            raise RuntimeError(
+                f"本地 shell 需要 pywinpty，当前不可用。"
+                f"如果使用打包版 EXE，请安装 Microsoft Visual C++ Redistributable"
+                f"（https://aka.ms/vs/17/release/vc_redist.x64.exe）后重试。"
+                f"原始错误: {e}"
+            )
         # 延迟 import：非 Windows/未安装时不影响主程序（本地终端功能按需可用）
         proc = winpty.PtyProcess.spawn(argv, dimensions=(rows, cols), backend=1)
         self._local_proc = proc

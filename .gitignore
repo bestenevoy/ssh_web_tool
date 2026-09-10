@@ -37,6 +37,9 @@ frontend/dist/
 SSHWebTool.exe
 *.exe
 
+# 构建时收集的 VC++ 运行时 DLL（临时目录）
+vcrt/
+
 # UV
 .uv-cache/
 

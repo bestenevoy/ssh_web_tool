@@ -45,11 +45,30 @@ if ($LASTEXITCODE -ne 0) {
     pip install pyinstaller
 }
 
+# ---- [1.5] 收集 VC++ 运行时 DLL ----
+# winpty.dll 依赖 vcruntime140.dll 等，干净 Windows 可能没装 VC++ Redistributable
+Write-Host ''
+Write-Host '=== [1.5/3] 收集 VC++ 运行时 DLL ==='
+$pyDir = Split-Path -Parent (Get-Command python).Source
+$vcrtDir = Join-Path $Root 'vcrt'
+New-Item -ItemType Directory -Force -Path $vcrtDir | Out-Null
+$vcrtDlls = Get-ChildItem -Path $pyDir -Filter "vcruntime*.dll" -ErrorAction SilentlyContinue
+$vcrtDlls += Get-ChildItem -Path $pyDir -Filter "msvcp*.dll" -ErrorAction SilentlyContinue
+if ($vcrtDlls) {
+    foreach ($dll in $vcrtDlls) {
+        Copy-Item $dll.FullName $vcrtDir
+        Write-Host "  Found: $($dll.Name)"
+    }
+} else {
+    Write-Host '  No VC++ runtime DLLs found (may already be bundled by PyInstaller)'
+}
+
 # ---- [2] 打包独立 EXE ----
 Write-Host ''
 Write-Host '=== [2/3] 打包独立 EXE（SSHWebTool.exe，约需 1-3 分钟）==='
 python -m PyInstaller --noconfirm --clean --onefile --noconsole --name SSHWebTool `
     --add-data "static;static" --add-data "config.example.json;." `
+    --add-data "vcrt;." `
     --hidden-import asyncssh `
     --hidden-import paramiko `
     --collect-all winpty `

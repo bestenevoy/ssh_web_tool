@@ -41,9 +41,27 @@ jobs:
           pip install pyinstaller
           pip install -e .
 
+      # 收集 VC++ 运行时 DLL（vcruntime140.dll 等），确保干净 Windows 也能加载 winpty.dll
+      - name: Collect VC++ runtime DLLs
+        shell: powershell
+        run: |
+          $pyDir = Split-Path -Parent (Get-Command python).Source
+          # 目录必须无条件创建：--add-data "vcrt;." 在目录不存在时会让 PyInstaller 直接失败
+          New-Item -ItemType Directory -Force -Path vcrt | Out-Null
+          $dlls = Get-ChildItem -Path $pyDir -Filter "vcruntime*.dll" -ErrorAction SilentlyContinue
+          $dlls += Get-ChildItem -Path $pyDir -Filter "msvcp*.dll" -ErrorAction SilentlyContinue
+          if ($dlls) {
+            foreach ($dll in $dlls) {
+              Copy-Item $dll.FullName vcrt\
+              Write-Host "Found: $($dll.Name)"
+            }
+          } else {
+            Write-Host "No VC++ runtime DLLs found in Python dir"
+          }
+
       - name: Build EXE with PyInstaller
         run: |
-          pyinstaller --onefile --noconsole --name "SSHWebTool" --add-data "static;static" --add-data "config.example.json;." --hidden-import "uvicorn.logging" --hidden-import "uvicorn.loops" --hidden-import "uvicorn.loops.auto" --hidden-import "uvicorn.protocols" --hidden-import "uvicorn.protocols.http" --hidden-import "uvicorn.protocols.http.auto" --hidden-import "uvicorn.protocols.websockets" --hidden-import "uvicorn.protocols.websockets.auto" --hidden-import "uvicorn.lifespan" --hidden-import "uvicorn.lifespan.on" --collect-submodules "asyncssh" --collect-all "winpty" --exclude-module "playwright" main.py
+          pyinstaller --onefile --noconsole --name "SSHWebTool" --add-data "static;static" --add-data "config.example.json;." --add-data "vcrt;." --hidden-import "uvicorn.logging" --hidden-import "uvicorn.loops" --hidden-import "uvicorn.loops.auto" --hidden-import "uvicorn.protocols" --hidden-import "uvicorn.protocols.http" --hidden-import "uvicorn.protocols.http.auto" --hidden-import "uvicorn.protocols.websockets" --hidden-import "uvicorn.protocols.websockets.auto" --hidden-import "uvicorn.lifespan" --hidden-import "uvicorn.lifespan.on" --collect-submodules "asyncssh" --collect-all "winpty" --exclude-module "playwright" main.py
 
       - name: Verify EXE
         run: |
@@ -68,6 +86,15 @@ jobs:
           } else {
             Write-Error "winpty NOT bundled in EXE! pywinpty missing from build env."
             exit 1
+          }
+          # 额外验证关键 DLL/扩展模块
+          $critical = @('winpty.dll', '_winpty', 'vcruntime')
+          foreach ($pat in $critical) {
+            if ($out -match $pat) {
+              Write-Host "  [OK] $pat found in archive"
+            } else {
+              Write-Warning "  [WARN] $pat NOT found in archive"
+            }
           }
         shell: powershell
 
