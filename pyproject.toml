@@ -35,6 +35,9 @@ dependencies = [
     "playwright>=1.40.0",
     "python-multipart>=0.0.6",
     "uvicorn[standard]>=0.27.0",
+    # 本地 cmd/PowerShell 终端（winpty ConPTY）依赖；仅 Windows 需要，
+    # 必须与 requirements.txt 保持一致——Actions 打包靠它被 PyInstaller 收集
+    "pywinpty>=3.0.5; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

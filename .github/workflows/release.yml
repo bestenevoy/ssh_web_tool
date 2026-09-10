@@ -56,6 +56,21 @@ jobs:
           }
         shell: powershell
 
+      # 回归防线：v0.1.36 曾因 Actions 环境没装 pywinpty 导致 EXE 内完全没有 winpty 包，
+      # --collect-all winpty 收集了个寂寞，运行时本地终端报"需要安装 pywinpty"。
+      # 构建产物必须包含 winpty.dll/_winpty.pyd，否则直接构建失败。
+      - name: Verify winpty bundled
+        run: |
+          $out = python -m PyInstaller.utils.cliutils.archive_viewer -l dist/SSHWebTool.exe 2>&1 | Out-String
+          if ($out -match 'winpty') {
+            $n = ([regex]::Matches($out, 'winpty')).Count
+            Write-Host "winpty bundled OK (matches: $n)"
+          } else {
+            Write-Error "winpty NOT bundled in EXE! pywinpty missing from build env."
+            exit 1
+          }
+        shell: powershell
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
