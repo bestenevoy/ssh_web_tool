@@ -301,3 +301,14 @@
 - 修复：`creationflags` 只保留 `DETACHED_PROCESS`（静默后台运行 bat，不弹窗）。
 - 教训：Windows CreateProcess flag 互斥（CREATE_NEW_CONSOLE vs DETACHED_PROCESS vs CREATE_NO_WINDOW）——**组合使用前先看文档**；测试要覆盖"调用参数"，用真实 Popen 启动 bat 验证而不是只看脚本内容。
 - 回归：`test_update_script_launch_flags`（真实 Popen：旧组合必须抛 OSError、新组合能启动 bat）+ `test_update_script_content_uses_detached_only`（源码防回归）。
+
+
+### 43. 重连"清屏"实为新终端无历史 + Actions EXE 缺 winpty（v0.1.35）
+- 现象①：SSH 断开后点「🔗 重连」，新终端屏幕空白（用户以为清屏，实际是新建了终端）。
+- 根因①：`handleReconnectTerminal` 用 `createTerminal` 新建终端+新后端会话；新会话无历史日志可加载（旧内容按 session_id 存在旧会话里），屏幕自然空白。v0.1.32 的"不清屏"只覆盖了旧终端本身，不覆盖重连新建。
+- 修复①：重连时**先读取旧会话完整历史**（`getHistoryLogs(旧session)`，此时旧会话还没关），作为 `history_content` 传入 `createTerminal`，ws.onopen 后先写历史再接收新输出。时序要点：**必须先读历史再 closeTerminal 删旧会话**（否则旧会话 404、历史取不到）。
+- 现象②：Release 版 EXE 启动本机 cmd/PowerShell 提示"需要安装 pywinpty"；本机 build.ps1 构建的 EXE 正常。
+- 根因②：**GH Actions release.yml 的 PyInstaller 命令漏了 `--collect-all winpty`**（build.ps1 有），Actions 构建的 EXE 不含 winpty 模块/DLL。
+- 修复②：release.yml 与 build.ps1 对齐，加 `--collect-all "winpty"`。
+- 教训：本地能用的功能在 Release 上不可用 → 先对比 build.ps1 与 CI workflow 的 PyInstaller 参数差异；`import winpty`（pywinpty 提供）打包必须 `--collect-all winpty`。
+- 回归：前端 20 tests 通过（重连逻辑改动在 hook 内，无 jsdom 环境未加单测，靠 e2e 手动验证）。

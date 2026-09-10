@@ -187,7 +187,13 @@ function App() {
     setStatus(`正在重新连接 ${host.host}...`)
     try {
       // 先建新会话（保留原标签名），再关闭旧标签；keepActive=true 避免 activeId 跳回第一个 Tab
-      await terminals.createTerminal(host, inst.terminal_name)
+      // 重连不清空：先读取旧会话完整历史（旧会话此刻还没关），再传入新终端直接写入
+      let oldHistory = ''
+      try {
+        const res = await api.getHistoryLogs(inst.session_id, 999999, 200000)
+        oldHistory = res?.content || ''
+      } catch { /* 旧会话无历史（如本地 shell）则跳过 */ }
+      await terminals.createTerminal(host, inst.terminal_name, 'ssh', 'cmd', oldHistory)
       await terminals.closeTerminal(session_id, true)
       loadHosts()
       setTimeout(() => loadHosts(), 800)

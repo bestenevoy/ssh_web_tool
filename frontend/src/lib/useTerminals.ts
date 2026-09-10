@@ -270,7 +270,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     }
   }, [])
 
-  const createTerminal = useCallback(async (host: Host, terminal_name?: string, kind: 'ssh' | 'local' = 'ssh', localShell = 'cmd') => {
+  const createTerminal = useCallback(async (host: Host, terminal_name?: string, kind: 'ssh' | 'local' = 'ssh', localShell = 'cmd', history_content?: string) => {
     // 连接防抖：已有连接正在建立时拒绝新的连接请求
     if (connectingRef.current) {
       const err = new Error('已有连接正在建立中，请稍候再试')
@@ -342,14 +342,22 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         // 加载完整历史日志（含主机登录 banner/MOTD）：先确保 fit（宽高就绪）再写入，
         // 避免历史内容按默认宽度折行导致显示错乱；不追加"加载完成"标记（无实际意义）
         // limit 200000：完整回放同会话历史（同一终端 = 同一份记录）
-        api.getHistoryLogs(session_id, 999999, 200000).then(async (res) => {
-          if (res.content) {
-            await ensureFit(session_id, term, fitAddon, ws)
-            // 历史日志按 pty 当时宽度换行；窄窗口直接写入会 soft-wrap 碎片化，
-            // 写入前按当前 cols 重新折行（ANSI 0 宽度计）
-            term.write(reflowForCols(res.content, term.cols))
-          }
-        }).catch(() => {})
+        // history_content：重连时由 App 预先读取旧会话历史传入（旧会话在读取后才关闭），
+        // 直接写入新终端，保证重连后之前的内容（banner/命令输出）仍然可看（用户要求：重连不清空）
+        if (history_content) {
+          ensureFit(session_id, term, fitAddon, ws).then(() => {
+            term.write(reflowForCols(history_content, term.cols))
+          })
+        } else {
+          api.getHistoryLogs(session_id, 999999, 200000).then(async (res) => {
+            if (res.content) {
+              await ensureFit(session_id, term, fitAddon, ws)
+              // 历史日志按 pty 当时宽度换行；窄窗口直接写入会 soft-wrap 碎片化，
+              // 写入前按当前 cols 重新折行（ANSI 0 宽度计）
+              term.write(reflowForCols(res.content, term.cols))
+            }
+          }).catch(() => {})
+        }
       }
 
       // 定期检测终端状态（用于 tab 显示 shell 类型）
