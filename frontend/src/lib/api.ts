@@ -76,6 +76,11 @@ export const api = {
     request<{ session_id: string; offset: number; limit: number; content: string }>(
       `/api/sessions/${session_id}/logs?offset=${offset}&limit=${limit}`
     ),
+  // 按会话ID从日志文件读历史（会话已删除仍可读，用于重连保留旧内容）
+  getLogsByFile: (session_id: string, offset = 0, limit = 200000) =>
+    request<{ session_id: string; content: string }>(
+      `/api/logs/${session_id}?offset=${offset}&limit=${limit}`
+    ),
 
   // 持久化终端（会话ID复用）
   listSavedTerminals: () => request<{ terminals: SavedTerminal[] }>('/api/terminals/saved'),

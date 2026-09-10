@@ -312,3 +312,16 @@
 - 修复②：release.yml 与 build.ps1 对齐，加 `--collect-all "winpty"`。
 - 教训：本地能用的功能在 Release 上不可用 → 先对比 build.ps1 与 CI workflow 的 PyInstaller 参数差异；`import winpty`（pywinpty 提供）打包必须 `--collect-all winpty`。
 - 回归：前端 20 tests 通过（重连逻辑改动在 hook 内，无 jsdom 环境未加单测，靠 e2e 手动验证）。
+
+
+### 44. 重连历史仍读不到：断开会删会话 → 旧日志须按文件读（v0.1.36 修复）
+- **现象**：#43 的 history_content 方案上线后，重连新终端里依然只有新 banner，旧命令回显读不到（用户明确要"重连后旧内容可看"）。
+- **根因**：「断开」按钮走 `api.closeSession` 会**删除后端会话对象**；重连时 `App.handleReconnectTerminal` 先 `api.getHistoryLogs(旧 session)` → `/api/sessions/{sid}/logs` 因会话已删返回 **404** → catch 吞掉 → `oldHistory=''` → 新终端无历史。日志文件其实还在（断开只是删会话，不删 log 文件），但旧接口强依赖 session 存在。
+- **修复**：新增 `GET /api/logs/{session_id}`（独立于 /api/sessions）：
+  - 会话还在 → 走 `session.get_history_logs`（含未 flush 缓冲）；
+  - 会话已删 → 在 `SSHSession.LOG_DIR` 下按文件名 `*{session_id}*.log` 匹配最新文件，读尾部后复用 `SSHSession._format_history_logs()` 清洗 ANSI/合并 \r 返回。
+  - 前端 `api.getLogsByFile(session_id)` 调用新接口；重连流程改为先读文件历史再 `createTerminal(..., oldHistory)`。
+- **时序要点**：`history_content` 在 `ws.onopen` **同步立即写入**（不等 ensureFit），新连接 banner 作为 ws 输出随后追加在历史之后——顺序正确（历史在上、新输出在下）；xterm 后续 fit/resize 会自动 reflow 折行，不会因 cols 未就绪而 soft-wrap 碎片化。
+- **验证**：`tests/api/test_logs_api.py` 5 例（已删会话按文件读、_running 命名匹配、存活会话优先走内存、未知会话返回空内容不 404、ANSI 清理）；浏览器 e2e：断开→重连→Shift+PageUp/PageDown 滚动，旧 banner + `echo` 回显 + 输出完整可见。
+- **教训**：凡是"先读旧数据再删旧对象"的流程，读与删之间任何一方先失败都会丢数据；**删除语义的资源，读取接口要按不可变键（文件名含 session_id）独立提供**，不要依赖生命周期对象。
+- **备注**：e2e 用 bu 验证滚动回看时，`bu.scroll` 滚轮事件在 xterm 上不可靠（可能滚的是页面），用 **Shift+PageUp/PageDown**（xterm 标准 scrollback 快捷键）最稳。

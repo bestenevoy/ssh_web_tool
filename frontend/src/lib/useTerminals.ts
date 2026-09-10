@@ -345,9 +345,10 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         // history_content：重连时由 App 预先读取旧会话历史传入（旧会话在读取后才关闭），
         // 直接写入新终端，保证重连后之前的内容（banner/命令输出）仍然可看（用户要求：重连不清空）
         if (history_content) {
-          ensureFit(session_id, term, fitAddon, ws).then(() => {
-            term.write(reflowForCols(history_content, term.cols))
-          })
+          // 立即写入旧历史（不等待 ensureFit）：新连接输出（banner）随后自然追加在
+          // 历史之后，顺序正确（历史在上、新输出在下）；xterm 后续 fit/resize 会自动
+          // reflow 折行，不会因当前 cols 未 fit 而 soft-wrap 碎片化
+          term.write(reflowForCols(history_content, term.cols))
         } else {
           api.getHistoryLogs(session_id, 999999, 200000).then(async (res) => {
             if (res.content) {

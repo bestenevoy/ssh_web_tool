@@ -543,6 +543,39 @@ async def api_get_session_logs(session_id: str, offset: int = 0, limit: int = 20
     return {"session_id": session_id, "offset": offset, "limit": limit, "content": logs}
 
 
+@app.get("/api/logs/{session_id}")
+async def api_get_session_logs_by_file(session_id: str, offset: int = 0, limit: int = 200000):
+    """按会话ID从日志文件读取完整历史（会话删除后仍可读，用于重连保留历史）
+
+    - 会话还在：优先走 get_history_logs（含未 flush 缓冲）
+    - 会话已删除（如手动断开）：按日志文件名匹配（文件名含 session_id），从文件读，
+      保证重连时旧会话的 banner/命令输出仍能回放到新终端（用户要求：重连不清空）
+    """
+    session = session_manager.get_session(session_id)
+    if session:
+        return {"session_id": session_id, "content": session.get_history_logs(offset=offset, limit=limit)}
+    log_dir = Path(SSHSession.LOG_DIR)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    matches = sorted(
+        (p for p in log_dir.glob(f"*{session_id}*.log") if p.is_file()),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    if not matches:
+        return {"session_id": session_id, "content": ""}
+    f = matches[0]
+    try:
+        size = f.stat().st_size
+        start_pos = max(0, size - offset - limit)
+        read_size = min(limit, size - start_pos)
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start_pos)
+            content = fh.read(read_size)
+        return {"session_id": session_id, "content": SSHSession._format_history_logs(content)}
+    except Exception as e:
+        print(f"[logs] 读取日志文件失败 {f}: {e}")
+        return {"session_id": session_id, "content": ""}
+
+
 # ============ 主机配置 API（持久化） ============
 
 def _sanitize_host(h: dict) -> dict:
