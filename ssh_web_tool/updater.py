@@ -186,6 +186,31 @@ def _ulog(msg: str, base: Optional[Path] = None) -> None:
             continue
 
 
+def _clean_launcher_env() -> dict:
+    """剥离 PyInstaller bootloader 注入的 _PYI_* / _MEI* 环境变量
+
+    onefile 模式下跑 Python 代码的进程是 bootloader 拉起的"子进程"，环境里带有
+    _PYI_ARCHIVE_FILE / _PYI_PARENT_PROCESS_LEVEL / _PYI_APPLICATION_HOME_DIR 等
+    变量。升级脚本（cmd）会原样继承，并由 bat 的 start 传给重启后的新版 EXE：
+    新版 bootloader（PyInstaller>=6.22.1）看到 _PYI_ARCHIVE_FILE 就认定自己是
+    onefile 子进程，随即校验父进程可执行路径——而父进程是 cmd（脚本启动方式）
+    或已退出拿不到路径，校验失败直接退出，表现为：
+
+        Security validation failure: fail to obtain executable path for
+        parent process
+
+    → 升级文件替换成功但程序无法自启。启动升级脚本前剥离这些变量，保证
+    bat 与重启后的新版 EXE 环境干净（源码/非打包模式下无这些变量，等于原样透传）。
+    """
+    env = {}
+    for k, v in os.environ.items():
+        ku = k.upper()
+        if ku.startswith("_PYI_") or ku.startswith("_MEI"):
+            continue
+        env[k] = v
+    return env
+
+
 def _launch_update_script(script: Path, exe_dir: Path) -> None:
     """启动更新脚本：多种方式逐个尝试，全部失败抛出最后一个异常
 
@@ -197,10 +222,14 @@ def _launch_update_script(script: Path, exe_dir: Path) -> None:
        与交互环境一致，且不弹窗（标准句柄显式给 DEVNULL，避免继承无效句柄）
     2. DETACHED_PROCESS 直启 bat（v0.1.34 起的原方式）
     3. shell=True 字符串（最后兜底，走系统 COMSPEC 解析）
+
+    三种方式统一传清洗后的环境变量（_clean_launcher_env），防止 _PYI_*/_MEI*
+    经由 cmd → bat → start 传入新版 EXE 触发 bootloader 父进程安全校验失败。
     """
     flags_cnw = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     flags_det = getattr(subprocess, "DETACHED_PROCESS", 0)
     comspec = os.environ.get("COMSPEC", "cmd.exe")
+    clean_env = _clean_launcher_env()
     attempts = [
         ("cmd/c+CREATE_NO_WINDOW", [comspec, "/c", str(script)], {"creationflags": flags_cnw}),
         ("DETACHED_PROCESS", [str(script)], {"creationflags": flags_det}),
@@ -215,6 +244,7 @@ def _launch_update_script(script: Path, exe_dir: Path) -> None:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=clean_env,
                 **extra,
             )
             _ulog(f"update script launched via {desc}", base=exe_dir)

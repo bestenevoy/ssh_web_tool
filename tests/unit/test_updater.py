@@ -296,6 +296,52 @@ def test_update_script_launch_strategy_source_guard(tmp_path):
     assert '"shell": True' in src  # 最后兜底方式存在
 
 
+# ---------- 启动脚本环境变量清洗（PyInstaller onefile 安全校验规避） ----------
+
+def test_clean_launcher_env_strips_pyi_and_mei_vars(monkeypatch):
+    """_clean_launcher_env 必须剥离 _PYI_* / _MEI* 变量，保留正常变量
+
+    背景：PyInstaller>=6.22.1 onefile bootloader 校验父进程可执行路径，
+    继承的 _PYI_ARCHIVE_FILE 会让重启后的新版 EXE 误判为 onefile 子进程，
+    父进程是 cmd（或已退出）→ "Security validation failure: fail to obtain
+    executable path for parent process"，升级后无法自启。
+    """
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", r"C:\Users\t\AppData\Local\Temp\_MEI12345\app.exe")
+    monkeypatch.setenv("_PYI_PARENT_PROCESS_LEVEL", "1")
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", r"C:\app")
+    monkeypatch.setenv("_MEIPASS2", r"C:\Users\t\AppData\Local\Temp\_MEI12345")
+    monkeypatch.setenv("_MEI12345", "junk")
+    monkeypatch.setenv("COMSPEC", "C:\\Windows\\system32\\cmd.exe")
+    monkeypatch.setenv("PATH", r"C:\Windows")
+
+    env = updater._clean_launcher_env()
+
+    stripped = [k for k in env if k.upper().startswith("_PYI_") or k.upper().startswith("_MEI")]
+    assert stripped == []
+    assert env["COMSPEC"] == "C:\\Windows\\system32\\cmd.exe"
+    assert env["PATH"] == r"C:\Windows"
+
+
+def test_launch_update_script_passes_clean_env(tmp_path, monkeypatch):
+    """三种启动方式统一传清洗后的 env（截获 Popen 断言）"""
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", "should-not-leak")
+    monkeypatch.setenv("COMSPEC", "C:\\Windows\\system32\\cmd.exe")
+
+    captured = {}
+
+    def fake_popen(args, **kw):
+        captured["args"] = args
+        captured["kw"] = kw
+        return mock.Mock()
+
+    monkeypatch.setattr(updater.subprocess, "Popen", fake_popen)
+    updater._launch_update_script(tmp_path / "_wstool_update.bat", tmp_path)
+
+    env = captured["kw"]["env"]
+    assert "_PYI_ARCHIVE_FILE" not in env
+    assert env["COMSPEC"] == "C:\\Windows\\system32\\cmd.exe"
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows 专用")
 def test_launch_update_script_falls_back_on_failure(tmp_path, monkeypatch):
     """前两种启动方式失败时自动兜底第三种，全部失败才抛异常"""
