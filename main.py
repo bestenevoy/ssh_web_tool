@@ -1150,12 +1150,10 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
             reconnect_ok = await session.reconnect()
             if not reconnect_ok:
                 # SSH 重连失败 → 自动切换到本机 shell（不销毁会话，终端保持可用）
-                # 使用用户在配置中选择的本地终端（fallback_local_shell：cmd / powershell）
+                # 使用用户配置的本地终端（fallback_local_shell：cmd / powershell）；
+                # 切换提示通过 _broadcast_output 进入终端输出与会话日志（以会话为主）
                 try:
-                    local_shell = get_fallback_local_shell()
-                    await session.switch_to_local(local_shell)
-                    shell_label = "PowerShell" if local_shell in ("powershell", "pwsh") else "cmd"
-                    await websocket.send_json({"type": "info", "data": f"SSH 重连失败，已切换到本机 {shell_label}（可在界面重新连接主机）"})
+                    await session._auto_switch_to_local()
                 except Exception as e:
                     await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {str(e)}"})
                     await websocket.close()

@@ -29,6 +29,12 @@ def get_data_dir() -> str:
     return str(get_app_dir())
 
 
+def _fallback_shell() -> str:
+    """读取"SSH 退出后切换本机终端"的 shell 配置（cmd / powershell / pwsh）"""
+    from .config import get_fallback_local_shell
+    return get_fallback_local_shell()
+
+
 class SSHSession:
     """单个 SSH 会话（对应一个 SSH 连接 + 可选的交互式终端）"""
 
@@ -88,6 +94,8 @@ class SSHSession:
         self._reconnecting = False
         self._reconnect_count = 0
         self._max_reconnect = 5  # 最大自动重连次数
+        self._switching_local = False  # 正在自动切换本机 shell（防止与自动重连并发冲突）
+        self._switch_task: Optional[asyncio.Task] = None  # 持有切换任务引用（loop 只保留弱引用）
         # 命令回显解析（从终端输出流提取"提示符后的实际命令"，含 Tab 补全/历史翻查结果）
         self._echo_buf = ''          # 输出行缓冲（可能被数据块截断，留到下一块补齐）
         self._echo_last_cmd = ''     # 最近一次解析记录的命令（去重防重复记录）
@@ -624,10 +632,13 @@ class SSHSession:
             raise RuntimeError("没有交互式终端")
 
         async def _reader():
+            clean_eof = False
             try:
                 while True:
                     data = await self.process.stdout.read(4096)
                     if not data:
+                        # EOF：远端 shell 已退出（用户输入 exit/logout 等）
+                        clean_eof = True
                         break
                     self.last_active = time.time()
                     await self._broadcast_output(data)
@@ -635,6 +646,11 @@ class SSHSession:
                 pass
             except Exception:
                 pass
+            if clean_eof and self._has_shell and not self.is_local():
+                # 用户退出远端 shell → 自动切回本机终端。
+                # 必须用独立任务：switch_to_local 内部会 stop_output_reader 取消本协程，
+                # 若在协程内直接 await，取消会在切换中途抛出 CancelledError 导致切换失败
+                self._switch_task = asyncio.create_task(self._auto_switch_to_local())
 
         self._reader_task = asyncio.create_task(_reader())
 
@@ -772,6 +788,46 @@ class SSHSession:
         if rows <= 0:
             rows = self._last_rows
         await self.start_local_shell(self._local_shell or "cmd", cols, rows)
+
+    def is_transport_alive(self) -> bool:
+        """SSH 传输层是否存活（shell channel 可能已关闭：用户 exit 后连接尚未断开）"""
+        if self.is_local() or getattr(self, '_external', False):
+            return False
+        if self.conn is None:
+            return False
+        try:
+            t = getattr(self.conn, '_transport', None)
+            if t is not None:
+                return not t.is_closing()
+            if hasattr(self.conn, 'is_closing'):
+                return not self.conn.is_closing()
+        except Exception:
+            pass
+        return False
+
+    async def _auto_switch_to_local(self):
+        """远端 shell 已退出（用户输入 exit/logout）→ 自动切换到本机 shell
+
+        - 幂等：已在本机 / 正在切换 / 正在重连时直接跳过（防止与自动重连并发冲突）
+        - 切换提示走 _broadcast_output，同步写入会话日志（同一会话一份记录）
+        """
+        if self.is_local() or self._switching_local or self._reconnecting:
+            return
+        self._switching_local = True
+        try:
+            shell = _fallback_shell()
+            label = "PowerShell" if shell in ("powershell", "pwsh") else "cmd"
+            await self._broadcast_output(
+                f"\r\n\x1b[33m[SSH 已退出，已切换到本机 {label}，可在界面重新连接主机]\x1b[0m\r\n"
+            )
+            await self.switch_to_local(shell)
+        except Exception as e:
+            try:
+                await self._broadcast_output(f"\r\n\x1b[31m[切换本机 shell 失败: {e}]\x1b[0m\r\n")
+            except Exception:
+                pass
+        finally:
+            self._switching_local = False
 
     # ============ 注入命令到交互式终端 ============
 
@@ -1274,8 +1330,8 @@ class SSHSession:
 
     async def reconnect(self) -> bool:
         """自动重连 SSH 并恢复 shell（如果之前有 shell）"""
-        if self._reconnecting:
-            print(f"[SSHSystem] 重连进行中，跳过: {self.session_id}")
+        if self._reconnecting or self._switching_local:
+            print(f"[SSHSystem] 重连/切换进行中，跳过: {self.session_id}")
             return False
         if self._reconnect_count >= self._max_reconnect:
             print(f"[SSHSystem] 已达最大重连次数 {self._max_reconnect}，停止重连: {self.session_id}")
@@ -1508,27 +1564,50 @@ class SessionManager:
         self._monitor_task = asyncio.create_task(self._global_monitor_loop())
 
     async def _global_monitor_loop(self):
-        """全局监控循环：每 15 秒检查所有会话的连接和 shell 状态"""
+        """全局监控循环：每 15 秒检查所有会话的连接和 shell 状态
+
+        - 本机 shell 会话：退出即自动重启，保持终端可用
+        - SSH 会话 shell 已退出（用户 exit/logout，传输层仍在）→ 自动切换本机 shell
+        - SSH 传输层断开（网络异常等）→ 自动重连
+        """
+        async def _try_reconnect(session: SSHSession):
+            print(f"[Monitor] 检测到 SSH 连接断开，尝试自动重连: {session.session_id}")
+            try:
+                if await session.reconnect():
+                    print(f"[Monitor] 自动重连成功: {session.session_id}")
+                else:
+                    print(f"[Monitor] 自动重连失败: {session.session_id}")
+            except Exception as e:
+                print(f"[Monitor] 重连异常: {e}")
+
         try:
             while True:
                 await asyncio.sleep(15)
                 for session in list(self._sessions.values()):
                     try:
-                        if not session.is_alive():
-                            print(f"[Monitor] 检测到 SSH 连接断开，尝试自动重连: {session.session_id}")
-                            try:
-                                if await session.reconnect():
-                                    print(f"[Monitor] 自动重连成功: {session.session_id}")
-                                else:
-                                    print(f"[Monitor] 自动重连失败: {session.session_id}")
-                            except Exception as e:
-                                print(f"[Monitor] 重连异常: {e}")
-                        elif session._has_shell and not session.is_shell_alive():
-                            print(f"[Monitor] 检测到 shell 状态异常: {session.session_id}")
-                            # 设置会话级通知（不通过 _broadcast_output！否则提示文本会进入
-                            # run_command 的注入捕获监听器/echo 解析缓冲，污染命令返回的 stdout）
-                            # 由各 WebSocket 的 read_output 循环 take 后单独推送给前端
-                            session.set_shell_notice("检测到终端 shell 状态异常，如需恢复请点击顶部重连")
+                        shell_dead = session._has_shell and not session.is_shell_alive()
+                        if getattr(session, '_external', False):
+                            # 外部镜像会话（paramiko/asyncssh 劫持）：保持原有行为
+                            # （断开时重连；shell 异常仅提示，不做本机切换）
+                            if not session.is_alive():
+                                await _try_reconnect(session)
+                            elif shell_dead:
+                                session.set_shell_notice("检测到终端 shell 状态异常，如需恢复请点击顶部重连")
+                            continue
+                        if session.is_local():
+                            # 本机 shell 已退出：自动重启（与页面重开时的恢复行为一致）
+                            if not session.is_shell_alive():
+                                print(f"[Monitor] 本机 shell 已退出，自动重启: {session.session_id}")
+                                await session.restart_local_shell()
+                            continue
+                        if not session.is_alive() or shell_dead:
+                            if shell_dead and session.is_transport_alive():
+                                # 传输层仍在、仅 shell 退出（用户输入 exit）→ 切回本机终端，
+                                # 不做 SSH 自动重连（重连会回到远端，违背"退出即回本机"预期）
+                                print(f"[Monitor] SSH shell 已退出，自动切换本机 shell: {session.session_id}")
+                                await session._auto_switch_to_local()
+                            else:
+                                await _try_reconnect(session)
                     except Exception as e:
                         print(f"[Monitor] 监控异常 {session.session_id}: {e}")
         except asyncio.CancelledError:
