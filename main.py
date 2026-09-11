@@ -852,6 +852,7 @@ async def api_unified_search(keyword: str = "", limit: int = 50):
                 'name': qc.get('name', ''),
                 'command': qc.get('command', ''),
                 'cmd_type': qc.get('type', 'direct'),  # direct=直接执行 / param=输入到终端后编辑
+                'pre_ops': qc.get('pre_ops', []),      # 预操作：搜索执行与点击快捷指令行为一致
             })
 
     # 2. 搜索历史命令（按使用频次排序，SQLite，已忽略的不返回）
@@ -1238,19 +1239,26 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         if msg_type == "input":
             data = msg.get("data", "")
             if data:
-                # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入；
-                # 若 shell 尚未就绪（启动中/重启窗口），短暂等待后重试
+                # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入。
+                # SSH 已退出/断开时（自动切换本机终端或自动重连进行中）先等状态收敛：
+                # 期间 process 可能是已关闭的通道，直接写会报 "Channel not open for sending"
                 try:
                     if session.is_local():
                         await session.write_local(data)
                     else:
-                        for _ in range(30):
-                            if session.process is not None:
+                        for _ in range(50):
+                            if session.process is not None and not session.switching_local:
                                 break
                             await asyncio.sleep(0.1)
+                        if session.switching_local:
+                            raise RuntimeError("正在切换本机终端，请稍候再输入")
                         if session.process is None:
                             raise RuntimeError("终端 shell 尚未就绪，请稍候再输入")
-                        session.process.stdin.write(data)
+                        stdin = session.process.stdin
+                        if getattr(stdin, "is_closing", None) and stdin.is_closing():
+                            # 通道已关闭（切换/重连尚未完成）：不写死通道，给友好提示
+                            raise RuntimeError("SSH 通道已关闭，正在自动切换/重连，请稍候再输入")
+                        stdin.write(data)
                         session.last_active = time.time()
                 except Exception as e:
                     # 不再自动重连：重连会中断正在运行的全屏程序（如 vi/vim），

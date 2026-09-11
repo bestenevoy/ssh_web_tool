@@ -631,7 +631,8 @@ function App() {
       {historySearchOpen && (
         <HistorySearchModal
           onClose={() => { setHistorySearchOpen(false); focusActiveTerminal() }}
-          onExecute={(cmd) => terminals.sendCommand(cmd, true)}
+          onExecuteQuick={handleSendQuickCommand}          // 快捷指令(direct)：与面板点击同一链路（含预操作）
+          onEditExecuteQuick={handleEditExecuteQuickCommand}  // 快捷指令(param)：预操作 + 输入终端
           onInputToTerminal={(cmd) => terminals.sendCommand(cmd, false)}
           onRefreshQuickCommands={loadQuickCommands}
         />

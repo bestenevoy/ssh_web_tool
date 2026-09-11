@@ -666,6 +666,11 @@ class SSHSession:
         """当前是否运行在本地 shell（非 SSH）"""
         return self._local_proc is not None
 
+    @property
+    def switching_local(self) -> bool:
+        """正在自动切换到本机 shell（输入路径据此等待状态收敛，避免写入已关闭的 SSH 通道）"""
+        return self._switching_local
+
     async def start_local_shell(self, shell: str = "cmd", cols: int = 120, rows: int = 40):
         """启动本机交互式 shell（ConPTY）。SSH 断开自动切换或用户主动创建本地终端时调用
 

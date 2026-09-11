@@ -1,18 +1,31 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { api } from '../lib/api'
+import type { QuickCommand } from '../types'
 
 interface HistorySearchModalProps {
   onClose: () => void
-  onExecute: (command: string) => void      // 直接执行
+  onExecuteQuick: (qc: QuickCommand) => void      // 快捷指令（direct）：与点击快捷指令完全一致（含预操作）
+  onEditExecuteQuick: (qc: QuickCommand) => void  // 快捷指令（param）：先预操作再输入到终端，用户编辑 {args} 后执行
   onInputToTerminal: (command: string) => void  // 只输入到终端，可编辑
   onRefreshQuickCommands: () => void  // 保存快捷命令后刷新列表
 }
 
 type SearchResult =
-  | { type: 'quick'; id: string; name: string; command: string; cmd_type?: string }
+  | { type: 'quick'; id: string; name: string; command: string; cmd_type?: string; pre_ops?: QuickCommand['pre_ops'] }
   | { type: 'history'; command: string; count: number; last_used: number }
 
-export default function HistorySearchModal({ onClose, onExecute, onInputToTerminal, onRefreshQuickCommands }: HistorySearchModalProps) {
+// 搜索结果里的快捷指令 → 完整 QuickCommand（预操作随行，保证与面板点击行为一致）
+function toQuickCommand(item: Extract<SearchResult, { type: 'quick' }>): QuickCommand {
+  return {
+    id: item.id,
+    name: item.name,
+    command: item.command,
+    type: (item.cmd_type as 'direct' | 'param') || 'direct',
+    pre_ops: item.pre_ops || [],
+  }
+}
+
+export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExecuteQuick, onInputToTerminal, onRefreshQuickCommands }: HistorySearchModalProps) {
   const [keyword, setKeyword] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -133,6 +146,20 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
     }
   }
 
+  // 选中项激活（Enter 与点击共用）：快捷指令走与面板点击完全相同的执行链路（含预操作）
+  const activateItem = (item: SearchResult) => {
+    if (item.type === 'quick') {
+      if (item.cmd_type === 'param') {
+        onEditExecuteQuick(toQuickCommand(item))  // 带参数：先预操作再输入终端，编辑 {args} 后执行
+      } else {
+        onExecuteQuick(toQuickCommand(item))      // 直接执行：预操作流水线 + 命令本体
+      }
+    } else {
+      onInputToTerminal(item.command)             // 非快捷指令：按带参数指令输入到终端
+    }
+    onClose()
+  }
+
   // 键盘事件
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (confirmingCmd) {
@@ -179,15 +206,7 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
       if (showIgnored) return  // 已忽略视图不执行
       const item = results[selectedIndex]
       if (item) {
-        if (item.type === 'quick' && item.cmd_type !== 'param') {
-          // 快捷命令（direct）：直接执行
-          onExecute(item.command)
-          onClose()
-        } else {
-          // 带参数快捷命令 / 历史命令：输入到终端，可编辑
-          onInputToTerminal(item.command)
-          onClose()
-        }
+        activateItem(item)
       } else if (keyword.trim()) {
         // 没有匹配结果：把搜索框内容输入到终端（不执行），用户可编辑
         onInputToTerminal(keyword.trim())
@@ -321,13 +340,7 @@ export default function HistorySearchModal({ onClose, onExecute, onInputToTermin
                       className={`history-result-item ${idx === selectedIndex ? 'selected' : ''} ${item.type}`}
                       onClick={() => {
                         setSelectedIndex(idx)
-                        if (item.type === 'quick' && item.cmd_type !== 'param') {
-                          onExecute(item.command)
-                          onClose()
-                        } else {
-                          onInputToTerminal(item.command)
-                          onClose()
-                        }
+                        activateItem(item)
                       }}
                     >
                       {item.type === 'quick' ? (

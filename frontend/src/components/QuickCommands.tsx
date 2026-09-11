@@ -91,7 +91,7 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
               }}
             >
               <div className="qc-item-header">
-                <div className="qc-name" title={qc.name}>
+                <div className="qc-name" title={qc.command ? `${qc.name}\n${qc.command}` : qc.name}>
                   <span className={`qc-type-badge ${isParam ? 'param' : 'direct'}`} title={isParam ? '带参数' : '直接执行'}>
                     {isParam ? '⌨️' : '⚡'}
                   </span>
@@ -130,7 +130,6 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
               {qc.description && (
                 <div className="qc-description" title={qc.description}>{qc.description}</div>
               )}
-              <div className="qc-cmd" title={qc.command}>{qc.command}</div>
             </div>
           )
         })}
