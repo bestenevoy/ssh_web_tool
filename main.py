@@ -13,6 +13,7 @@ FastAPI 后端
 
 import asyncio
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -622,6 +623,46 @@ def _sanitize_host(h: dict) -> dict:
     for key in ("password", "mgmt_password", "private_key", "passphrase"):
         out[f"has_{key}"] = bool((h.get(key) or "").strip())
     return out
+
+
+def _parse_ssh_command(data: str) -> tuple[str, int, str, str] | None:
+    """解析本地终端输入的 ssh 命令，提取连接信息
+
+    支持格式：ssh user:password@host  或  ssh user:password@host:port
+    冒号前是用户名，冒号后到最后一个 @ 前是密码，最后一个 @ 后是 IP（可带端口）
+
+    返回 (host, port, username, password) 或 None（不匹配）
+    """
+    # 取回车前的命令行
+    line = data.split("\r")[0].split("\n")[0].strip()
+    # 匹配 ssh 前缀（允许前面有空白）
+    m = re.match(r"^ssh\s+(.+)$", line)
+    if not m:
+        return None
+    rest = m.group(1).strip()
+    # 必须包含 @（最后一个 @ 分割：前面是 user:password，后面是 host[:port]）
+    at_idx = rest.rfind("@")
+    if at_idx <= 0:
+        return None
+    user_pass = rest[:at_idx]
+    host_port = rest[at_idx + 1:]
+    # user:password 分割（第一个冒号）
+    colon_idx = user_pass.find(":")
+    if colon_idx <= 0:
+        return None
+    username = user_pass[:colon_idx]
+    password = user_pass[colon_idx + 1:]
+    if not username or not password or not host_port:
+        return None
+    # 解析 host:port
+    port = 22
+    # IPv6 地址中可能有多个冒号，但本项目场景以 IPv4/域名为主
+    # 只在 host_port 中最后一个冒号后为纯数字时视为端口
+    if host_port.count(":") == 1:
+        h, p = host_port.rsplit(":", 1)
+        if p.isdigit():
+            host_port, port = h, int(p)
+    return host_port, port, username, password
 
 
 @app.get("/api/hosts")
@@ -1306,6 +1347,34 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 # 不写入 shell、不进入 _broadcast_output（不污染日志/echo 解析）
                 if "\r" in data:
                     await websocket.send_json({"type": "input_marker"})
+                # 本地终端 SSH 拦截：用户输入 ssh user:password@host 时，
+                # 拦截命令（不写入本地 shell），直接建立 SSH 连接切换到远端终端
+                if session.is_local() and "\r" in data:
+                    parsed = _parse_ssh_command(data)
+                    if parsed:
+                        ssh_host, ssh_port, ssh_user, ssh_pass = parsed
+                        await session._broadcast_output(
+                            f"\r\n\x1b[36m[正在连接 {ssh_user}@{ssh_host}:{ssh_port} ...]\x1b[0m\r\n"
+                        )
+                        try:
+                            await session.switch_to_ssh(ssh_host, ssh_port, ssh_user, ssh_pass)
+                            await websocket.send_json({
+                                "type": "ssh_connected",
+                                "host": ssh_host,
+                                "port": ssh_port,
+                                "username": ssh_user,
+                                "terminal_name": f"{ssh_user}@{ssh_host}",
+                            })
+                            await event_bus.publish(
+                                "session_create", "local-ssh",
+                                f"本地终端拦截 SSH 连接 {session.session_id} -> {ssh_user}@{ssh_host}:{ssh_port}",
+                                session_id=session.session_id, host=ssh_host, port=ssh_port,
+                            )
+                        except Exception as e:
+                            await session._broadcast_output(
+                                f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n"
+                            )
+                        return  # 拦截成功（或失败已提示），不写入本地 shell
                 # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入。
                 # SSH 已退出/断开时（自动切换本机终端或自动重连进行中）先等状态收敛：
                 # 期间 process 可能是已关闭的通道，直接写会报 "Channel not open for sending"

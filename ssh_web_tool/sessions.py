@@ -787,6 +787,38 @@ class SSHSession:
         self._has_shell = False
         await self.start_local_shell(shell, cols, rows)
 
+    async def switch_to_ssh(
+        self, host: str, port: int, username: str, password: str, cols: int = 0, rows: int = 0
+    ):
+        """从本地 shell 切换到 SSH 远端 shell（用户在本地终端输入 ssh user:pass@host 时触发）
+
+        关闭本地 ConPTY，更新会话连接信息，建立 SSH 连接并启动交互式 shell。
+        复用同一会话的广播/日志/监听结构（前端无感知切换，与 switch_to_local 反向）。
+        """
+        if cols <= 0:
+            cols = self._last_cols
+        if rows <= 0:
+            rows = self._last_rows
+        # 关闭本地 shell
+        self.stop_local_reader()
+        if self._local_proc is not None:
+            try:
+                self._local_proc.terminate(force=True)
+            except Exception:
+                pass
+            self._local_proc = None
+        self._connected = False
+        self._has_shell = False
+        # 更新会话连接信息（切换到远端主机）
+        self.host = host
+        self.port = port
+        self.username = username
+        self._local_shell = ""
+        # 建立 SSH 连接
+        await self.connect(password=password or None)
+        await self.start_interactive_shell(cols=cols, rows=rows)
+
+
     async def restart_local_shell(self, cols: int = 0, rows: int = 0):
         """本机 shell 已退出时重启（沿用原 shell 类型与最近尺寸）"""
         self.stop_local_reader()
