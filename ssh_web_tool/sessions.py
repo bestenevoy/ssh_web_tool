@@ -113,6 +113,10 @@ class SSHSession:
         # 会话级通知（如 shell 异常提示）：由全局监控协程写入，WebSocket read_output 循环取出推送。
         # 不直接走 _broadcast_output，避免提示文本混入 run_command 的注入捕获/echo 解析
         self._shell_notice: str | None = None
+        # 会话级切换通知：SSH 退出/断开自动切换到本机 shell 时设置，
+        # WebSocket read_output 循环取出后发送 switched_to_local 消息给前端，
+        # 前端据此更新终端类型和 UI 状态（如隐藏断开按钮）
+        self._switch_notice: str | None = None
 
     # ---------- 日志文件命名 ----------
 
@@ -221,6 +225,16 @@ class SSHSession:
         """取出并清空会话级通知（WebSocket read_output 循环调用，只取一次）"""
         n = self._shell_notice
         self._shell_notice = None
+        return n
+
+    def set_switch_notice(self, shell: str) -> None:
+        """设置切换到本机 shell 的通知（_auto_switch_to_local 调用）"""
+        self._switch_notice = shell
+
+    def take_switch_notice(self) -> str | None:
+        """取出并清空切换通知（WebSocket read_output 循环调用，只取一次）"""
+        n = self._switch_notice
+        self._switch_notice = None
         return n
 
     @property
@@ -867,6 +881,8 @@ class SSHSession:
                 f"\r\n\x1b[33m[{reason}，已切换到本机 {label}，可在界面重新连接主机]\x1b[0m\r\n"
             )
             await self.switch_to_local(shell)
+            # 通知前端：会话已切换到本机终端，前端据此更新 UI 状态
+            self.set_switch_notice(shell)
         except Exception as e:
             try:
                 await self._broadcast_output(f"\r\n\x1b[31m[切换本机 shell 失败: {e}]\x1b[0m\r\n")

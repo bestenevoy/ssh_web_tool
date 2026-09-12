@@ -1234,6 +1234,16 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 notice = session.take_shell_notice()
                 if notice:
                     await websocket.send_json({"type": "info", "data": notice})
+                # 会话级切换通知：SSH 退出/断开后自动切换到本机 shell，
+                # 通知前端更新终端类型为 local（隐藏断开按钮、更新标签等）
+                switch = session.take_switch_notice()
+                if switch:
+                    label = "PowerShell" if switch in ("powershell", "pwsh") else "cmd"
+                    await websocket.send_json({
+                        "type": "switched_to_local",
+                        "shell": switch,
+                        "terminal_name": f"本机 {label}",
+                    })
                 data = await listener.get()
                 await websocket.send_json({"type": "output", "data": data})
         except Exception:

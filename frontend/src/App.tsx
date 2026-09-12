@@ -474,13 +474,20 @@ function App() {
         <span className="status">{status}</span>
         {terminals.activeId && (() => {
           const activeInst = terminals.terminals.get(terminals.activeId!)
-          return activeInst?.disconnected ? (
-            <button
-              className="btn btn-primary btn-sm conn-action-btn"
-              onClick={() => handleReconnectTerminal(terminals.activeId!)}
-              title="重新连接当前主机"
-            >🔗 重连</button>
-          ) : (
+          if (activeInst?.disconnected) {
+            return (
+              <button
+                className="btn btn-primary btn-sm conn-action-btn"
+                onClick={() => handleReconnectTerminal(terminals.activeId!)}
+                title="重新连接当前主机"
+              >🔗 重连</button>
+            )
+          }
+          // 本地终端不显示断开按钮（本地终端没有"断开"的概念）
+          if (activeInst?.type === 'local') {
+            return null
+          }
+          return (
             <button
               className="btn btn-secondary btn-sm conn-action-btn"
               onClick={() => handleDisconnectTerminal(terminals.activeId!)}

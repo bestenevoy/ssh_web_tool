@@ -417,6 +417,23 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
               return next
             })
           }
+          else if (msg.type === 'switched_to_local') {
+            // SSH 退出/断开后后端自动切换到本机终端：更新终端类型和标签
+            setTerminals((prev) => {
+              const next = new Map(prev)
+              const inst = next.get(session_id)
+              if (inst) {
+                next.set(session_id, {
+                  ...inst,
+                  type: 'local',
+                  host_name: msg.terminal_name || '本机',
+                  shell_type: 'local',
+                  disconnected: false,
+                })
+              }
+              return next
+            })
+          }
           else if (msg.type === 'error') term.write(`\r\n\x1b[31m[错误] ${msg.data}\x1b[0m\r\n`)
           else if (msg.type === 'info') term.write(`\r\n\x1b[33m[${msg.data}]\x1b[0m\r\n`)
           else if (msg.type === 'closed') term.write('\r\n\x1b[33m[连接已关闭]\x1b[0m\r\n')
@@ -527,6 +544,23 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
                     type: 'ssh',
                     shell_type: 'shell',
                     host_id: '',
+                  })
+                }
+                return next
+              })
+            }
+            else if (msg.type === 'switched_to_local') {
+              // SSH 退出/断开后后端自动切换到本机终端：更新终端类型和标签
+              setTerminals((prev) => {
+                const next = new Map(prev)
+                const inst = next.get(t.session_id)
+                if (inst) {
+                  next.set(t.session_id, {
+                    ...inst,
+                    type: 'local',
+                    host_name: msg.terminal_name || '本机',
+                    shell_type: 'local',
+                    disconnected: false,
                   })
                 }
                 return next
