@@ -13,6 +13,7 @@ FastAPI 后端
 
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -45,8 +46,7 @@ async def _shutdown_cleanup():
     """程序退出前关闭数据库单例连接。
 
     history_db 使用全局单例 aiosqlite 连接（非 daemon worker 线程），
-    若不显式关闭，开发模式 Ctrl+C / uvicorn 异常退出时进程会挂住无法退出。
-    （托盘"退出"走 os._exit 不经此路径，由 tray.exit_app 自行清理。）
+    若不显式关闭，进程异常退出时可能残留 -wal/-shm 文件。
     """
     try:
         await history_db.close_db()
@@ -1554,8 +1554,16 @@ async def websocket_external(websocket: WebSocket, session_id: str):
 # ============ 启动 ============
 
 
+def _acquire_single_instance() -> bool:
+    """单实例检查：已有一个实例在运行时返回 False（Windows 命名 Mutex）"""
+    import ctypes
+
+    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\SSHWebTool_SingleInstance")
+    return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+
+
 def main():
-    """启动 SSH Web Tool 服务"""
+    """启动 SSH Web Tool 服务（pywebview 桌面窗口版）"""
     # PyInstaller 打包后多进程支持
     if hasattr(sys, "frozen"):
         import multiprocessing
@@ -1564,7 +1572,6 @@ def main():
 
     import logging
     import threading
-    import webbrowser
 
     import uvicorn
 
@@ -1578,7 +1585,6 @@ def main():
         migrate_legacy_data,
         resolve_server_config,
     )
-    from ssh_web_tool.tray import acquire_single_instance, start_tray
 
     # 统一数据目录：~/.ai4one/wstool；首次运行迁移旧位置（EXE 目录/项目根）的数据
     ensure_data_dir()
@@ -1593,18 +1599,12 @@ def main():
     except Exception as e:
         print(f"[history] 初始化历史数据库失败: {e}")
 
-    # 单实例：已有一个实例在运行则打开其 Web 页面并退出
-    if not acquire_single_instance():
-        port_file = get_app_dir() / ".running_port"
-        port = port_file.read_text().strip() if port_file.is_file() else "8765"
-        try:
-            webbrowser.open(f"http://127.0.0.1:{port}")
-        except Exception:
-            pass
-        print("SSH Web Tool 已在运行，已打开其 Web 界面，本实例退出")
+    # 单实例：已有实例在运行则退出
+    if not _acquire_single_instance():
+        print("SSH Web Tool 已在运行，本实例退出")
         return
 
-    # 加载配置：首次运行自动生成 config.json（优先复制 config.example.json 模板）
+    # 加载配置
     ensure_config_file()
     cfg = load_config()
     try:
@@ -1619,7 +1619,7 @@ def main():
     host, port = server["host"], server["port"]
     base_url = f"http://{host}:{port}"
 
-    # 记录实际使用的端口（供单实例"打开已运行页面"与外部脚本读取）
+    # 记录实际使用的端口
     try:
         (get_app_dir() / ".running_port").write_text(str(port), encoding="utf-8")
     except OSError:
@@ -1644,16 +1644,14 @@ def main():
     print("=" * 50)
     print(f"SSH Web Tool v{APP_VERSION} 启动中...")
     print(f"配置文件: {CONFIG_FILE_NAME}")
-    print(f"网页 UI:  {base_url}")
+    print(f"本地服务: {base_url}")
     print(f"API 文档: {base_url}/docs")
     print("数据文件:", storage.data_file)
     print("日志目录:", SSHSession.LOG_DIR)
     print("请求日志:", server_log)
     print("=" * 50)
-    print("提示：程序常驻右下角系统托盘，右键托盘图标可打开界面/配置/日志")
-    print()
 
-    # 清理超过 30 天的旧会话日志（会话日志不按天轮转，靠启动清理控制体积）
+    # 清理超过 30 天的旧会话日志
     try:
         n = SSHSession.cleanup_old_logs(days=30)
         if n:
@@ -1663,32 +1661,63 @@ def main():
 
     # 启动时后台静默检查更新（有新版才弹提示，不自动更新）
     try:
-        import threading as _th
-
         from ssh_web_tool.updater import check_for_update_quiet
 
-        _th.Thread(target=check_for_update_quiet, daemon=True).start()
+        threading.Thread(target=check_for_update_quiet, daemon=True).start()
     except Exception as e:
         print(f"[updater] 启动更新检查失败: {e}")
 
-    # 系统托盘（EXE 打包后 --noconsole 无窗口，托盘是唯一入口）
-    try:
-        config_path = find_config_file() or (get_app_dir() / CONFIG_FILE_NAME)
-        start_tray(base_url, get_app_dir(), config_path, server_log)
-    except Exception as e:
-        print(f"[tray] 托盘启动失败（不影响服务）: {e}")
+    # 在后台线程启动 uvicorn（FastAPI 服务）
+    server_thread = threading.Thread(
+        target=uvicorn.run,
+        args=(app,),
+        kwargs={"host": host, "port": port, "log_level": "info", "workers": 1, "log_config": None},
+        daemon=True,
+    )
+    server_thread.start()
 
-    # 延迟打开浏览器（等服务启动后）
-    def open_browser():
-        time.sleep(1.5)
-        webbrowser.open(base_url)
+    # 等待服务就绪
+    import urllib.request
 
-    if cfg.get("open_browser", True):
-        threading.Thread(target=open_browser, daemon=True).start()
+    for _ in range(30):
+        try:
+            urllib.request.urlopen(f"{base_url}/", timeout=0.5)
+            break
+        except Exception:
+            time.sleep(0.2)
 
-    # log_config=None：使用我们自己的 logging 配置（文件 + 控制台），
-    # 避免 uvicorn 默认配置在 --noconsole（stderr=None）下报错
-    uvicorn.run(app, host=host, port=port, log_level="info", workers=1, log_config=None)
+    # 启动 pywebview 窗口
+    import webview
+
+    def on_closing():
+        """窗口关闭确认"""
+        import ctypes
+
+        result = ctypes.windll.user32.MessageBoxW(
+            0,
+            "确定要退出 SSH Web Tool 吗？\n所有 SSH 连接将被断开。",
+            "确认退出",
+            0x04 | 0x30 | 0x00,  # MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1
+        )
+        if result == 6:  # IDYES
+            # 关闭历史数据库
+            try:
+                asyncio.run(history_db.close_db())
+            except Exception:
+                pass
+            os._exit(0)
+        return False  # 阻止默认关闭行为（只在确认后 os._exit）
+
+    window = webview.create_window(
+        title=f"SSH Web Tool v{APP_VERSION}",
+        url=base_url,
+        width=1280,
+        height=800,
+        min_size=(800, 500),
+        text_select=True,
+    )
+    window.closing += on_closing
+    webview.start()
 
 
 if __name__ == "__main__":

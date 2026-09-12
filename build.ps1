@@ -1,4 +1,4 @@
-﻿# ============================================================
+﻿﻿# ============================================================
 # SSH Web Tool 一键打包脚本
 #
 # 产物（dist/ 目录）：
@@ -98,12 +98,13 @@ if (-not $copied) {
 # ---- [2] 打包独立 EXE ----
 Write-Host ''
 Write-Host '=== [2/3] 打包独立 EXE（SSHWebTool.exe，约需 1-3 分钟）==='
-& $Py -m PyInstaller --noconfirm --clean --onefile --noconsole --name SSHWebTool `
+& $Py -m PyInstaller --noconfirm --clean --onefile --windowed --name SSHWebTool `
     --add-data "static;static" --add-data "config.example.json;." `
     --add-data "vcrt;." `
     --hidden-import asyncssh `
     --hidden-import paramiko `
     --collect-all winpty `
+    --collect-all webview `
     --exclude-module playwright `
     --exclude-module winpty.tests `
     main.py
