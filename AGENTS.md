@@ -1,5 +1,7 @@
 # AGENTS.md — 开发规范
 
+尽量不是用 Any 类型，dict 类型尽量使用 dataclass 类型化
+
 ## 编码规范
 
 1. **import 顺序**: 标准库 → 第三方库 → 本项目（`ssh_web_tool`、`main`、`ssh_client`），由 Ruff isort 自动管理

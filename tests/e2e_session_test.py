@@ -3,13 +3,15 @@
 import asyncio
 import json
 import sys
+import urllib.error
 import urllib.request
+from typing import Any
 
 BASE = "http://127.0.0.1:8765"
 HOST_ID = sys.argv[1] if len(sys.argv) > 1 else "24ae9ee4"
 
 
-def api(method, path, body=None):
+def api(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method, headers={"Content-Type": "application/json"})
     try:

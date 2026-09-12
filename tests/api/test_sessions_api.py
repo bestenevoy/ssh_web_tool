@@ -27,7 +27,7 @@ def make_session_with_shell(session_id="sess-1"):
     from ssh_web_tool.sessions import SSHSession
 
     s = SSHSession(session_id, "10.0.0.1", 22, "root")
-    s.process = FakeProcess()
+    s.process = FakeProcess()  # type: ignore[assignment]
     s._has_shell = True
     s._connected = True  # is_connected 是只读 property，直接设底层字段
     return s
@@ -74,14 +74,14 @@ async def test_inject_and_capture_serializes_with_inject_command(shell_session, 
         # 记录写入顺序
         shell_session.process.stdin.writes.clear()
         await shell_session.inject_command("CMD2")
-        events.append(("inject-written",))
+        events.append(("inject-written",))  # type: ignore[list-item]
 
     await asyncio.gather(capture(), plain_inject())
 
     # 有锁：CMD2 的写必须发生在 CMD1 的 wait 结束之后（串行）
-    wi = events.index(("wait-start", "CMD1"))
-    we = events.index(("wait-end", "CMD1"))
-    inj = events.index(("inject-written",))
+    wi = events.index(("wait-start", "CMD1"))  # type: ignore[arg-type]
+    we = events.index(("wait-end", "CMD1"))  # type: ignore[arg-type]
+    inj = events.index(("inject-written",))  # type: ignore[arg-type]
     assert wi < we < inj, f"注入命令打断了正在捕获的命令: {events}"
 
 

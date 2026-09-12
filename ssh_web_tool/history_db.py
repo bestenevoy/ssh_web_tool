@@ -172,7 +172,8 @@ async def record_echo_command(cmd: str) -> None:
         "SELECT COUNT(*) FROM command_history WHERE command = ? AND last_used > ?",
         (cmd, now - 3),
     )
-    cnt = (await cur.fetchone())[0]
+    row = await cur.fetchone()
+    cnt = row[0] if row else 0
     if cnt > 0:
         await conn.commit()
         return
@@ -267,7 +268,8 @@ async def migrate_from_json(json_path: Path) -> int:
         return 0
     conn = await get_db()
     cur = await conn.execute("SELECT COUNT(*) FROM command_history")
-    existing = (await cur.fetchone())[0]
+    row = await cur.fetchone()
+    existing = row[0] if row else 0
     if existing > 0:
         return 0
     for cmd, info in hist.items():

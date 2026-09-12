@@ -80,7 +80,7 @@ async def test_parse_echo_line_tab_completion_keeps_final():
 
     s = SSHSession("t", "10.0.0.1", 22, "root")
     s._has_shell = True
-    s.process = object()  # _parse_echo_line 要求 process 非 None
+    s.process = object()  # type: ignore[assignment]  # _parse_echo_line 要求 process 非 None
     s._echo_buf = ""
     s._echo_last_cmd = ""
     s._echo_last_time = 0

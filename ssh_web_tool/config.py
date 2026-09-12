@@ -51,7 +51,7 @@ def ensure_data_dir() -> Path:
 def get_example_path() -> Path | None:
     """config.example.json 模板所在位置（打包后随资源目录 _MEIPASS）"""
     if getattr(sys, "frozen", False):
-        p = Path(sys._MEIPASS) / EXAMPLE_FILE_NAME
+        p = Path(sys._MEIPASS) / EXAMPLE_FILE_NAME  # type: ignore[attr-defined]
         return p if p.is_file() else None
     p = Path(__file__).resolve().parent.parent / EXAMPLE_FILE_NAME
     return p if p.is_file() else None

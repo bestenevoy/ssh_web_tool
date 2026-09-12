@@ -62,7 +62,7 @@ def test_auto_switch_uses_configured_shell_and_broadcasts(tmp_path, monkeypatch)
 
     async def _run():
         s._has_shell = True
-        s.process = object()  # 模拟 SSH shell 存在
+        s.process = object()  # type: ignore[assignment]  # 模拟 SSH shell 存在
         await s._auto_switch_to_local()
         await asyncio.sleep(0)  # 让广播协程跑完
 
@@ -138,7 +138,7 @@ class _FakeStdout:
 def test_reader_eof_triggers_auto_switch(monkeypatch):
     """stdout 读到 EOF（用户 exit）→ 触发 _auto_switch_to_local"""
     s = _mk_session()
-    s.process = type("P", (), {"stdout": _FakeStdout(["hello\n"]), "stdin": None})()
+    s.process = type("P", (), {"stdout": _FakeStdout(["hello\n"]), "stdin": None})()  # type: ignore[assignment]
     s._has_shell = True
     s._connected = True
     switch_calls = []
@@ -165,7 +165,7 @@ def test_reader_cancelled_does_not_trigger_switch(monkeypatch):
             await asyncio.sleep(10)  # 永远读不到数据，只能被 cancel
             return ""
 
-    s.process = type("P", (), {"stdout": _SlowStdout(), "stdin": None})()
+    s.process = type("P", (), {"stdout": _SlowStdout(), "stdin": None})()  # type: ignore[assignment]
     s._has_shell = True
     switch_calls = []
 
@@ -206,9 +206,9 @@ def test_is_transport_alive_variants():
         def __init__(self, closing):
             self._transport = _T(closing)
 
-    s.conn = _Conn(False)
+    s.conn = _Conn(False)  # type: ignore[assignment]
     assert s.is_transport_alive() is True
-    s.conn = _Conn(True)
+    s.conn = _Conn(True)  # type: ignore[assignment]
     assert s.is_transport_alive() is False
     s.conn = None
 
@@ -232,7 +232,7 @@ def test_switch_keeps_same_session_log_file(monkeypatch):
 
     async def _run():
         s._has_shell = True
-        s.process = object()
+        s.process = object()  # type: ignore[assignment]
         s._feed_log("ssh phase output\r\n")
         s._flush_log_now()
         await s._auto_switch_to_local()
@@ -269,7 +269,7 @@ def test_eof_auto_switch_to_real_cmd(tmp_path, monkeypatch):
     """端到端：SSH stdout EOF → 自动切换到真实本机 cmd（ConPTY），同一会话日志延续"""
     monkeypatch.setattr(sessions_mod, "_fallback_shell", lambda: "cmd")
     s = _mk_session("eof12345")
-    s.process = type("P", (), {"stdout": _FakeStdout(["remote$ exit\r\n"]), "stdin": None})()
+    s.process = type("P", (), {"stdout": _FakeStdout(["remote$ exit\r\n"]), "stdin": None})()  # type: ignore[assignment]
     s._has_shell = True
     s._connected = True
 

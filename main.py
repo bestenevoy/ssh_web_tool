@@ -58,7 +58,7 @@ def get_resource_path(relative_path: str) -> Path:
     """获取资源文件路径（兼容 PyInstaller 打包）"""
     if hasattr(sys, "_MEIPASS"):
         # PyInstaller 打包后，资源文件在临时目录
-        return Path(sys._MEIPASS) / relative_path
+        return Path(sys._MEIPASS) / relative_path  # type: ignore[attr-defined]
     return Path(__file__).parent / relative_path
 
 
@@ -297,6 +297,7 @@ async def api_create_session(req: CreateSessionRequest):
     """创建 SSH 会话并连接，自动启动交互式 shell（会显示在 Web UI 中）"""
     session_id = session_manager.create_session(req.host, req.port, req.username)
     session = session_manager.get_session(session_id)
+    assert session is not None
     try:
         await session.connect(
             password=req.password,
@@ -330,6 +331,7 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
         host["host"], host["port"], host["username"], host_id=req.host_id, terminal_name=req.terminal_name or ""
     )
     session = session_manager.get_session(session_id)
+    assert session is not None
     try:
         await session.connect(
             password=host.get("password") or None,
@@ -378,6 +380,7 @@ async def api_create_local_session(req: dict | None = None):
         host="localhost", port=0, username=getpass.getuser(), terminal_name=tname
     )
     session = session_manager.get_session(session_id)
+    assert session is not None
     try:
         await session.start_local_shell(shell=shell, cols=120, rows=40)
     except Exception as e:
@@ -438,6 +441,7 @@ async def api_restore_terminal(session_id: str):
         terminal_name=saved["terminal_name"],
     )
     session = session_manager.get_session(session_id)
+    assert session is not None
     try:
         await session.connect(
             password=host.get("password") or None,
@@ -748,7 +752,7 @@ async def api_auto_login_storage(host_id: str):
     result = await auto_login_storage(host)
 
     # 发布事件
-    event_bus.publish(
+    await event_bus.publish(
         "storage_auto_login", "WEB", f"主机 {host.get('name', host['host'])} 管理页面自动登录: {result['status']}"
     )
 
@@ -1254,7 +1258,7 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         initial_cols = 120
         initial_rows = 40
         try:
-            async with asyncio.timeout(0.5):
+            async with asyncio.timeout(0.5):  # type: ignore[attr-defined]
                 raw = await websocket.receive_text()
                 try:
                     first_msg = json.loads(raw)

@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import asyncssh
 
@@ -80,7 +80,11 @@ class SSHSession:
         self._log_buf = ""
         self._log_flush_task: asyncio.Task | None = None
         # 本地 shell（winpty ConPTY，本机 cmd/powershell；SSH 断开后可自动切换）
-        self._local_proc: object | None = None
+        self._local_proc: Any = None  # winpty.PtyProcess（动态导入，类型标注为 Any）
+        # 外部镜像会话属性（paramiko/asyncssh monkey-patch 注册时动态设置）
+        self._external: bool = False
+        self._paramiko_client: Any = None
+        self._asyncssh_conn: Any = None
         self._local_shell = ""
         self._local_reader_task: asyncio.Task | None = None
         # 待处理的终端尺寸（resize 消息在 PTY 创建前到达时保存）
@@ -245,7 +249,7 @@ class SSHSession:
         if password:
             kwargs["password"] = password
         if private_key:
-            kwargs["client_keys"] = [asyncssh.import_private_key(private_key, passphrase)]
+            kwargs["client_keys"] = [asyncssh.import_private_key(private_key, passphrase)]  # type: ignore[list-item]
 
         # 标记为工具内部连接：劫持层（patch_asyncssh）看到该标记直接放行，
         # 不会把工具自身的连接重复注册为镜像会话
@@ -275,6 +279,7 @@ class SSHSession:
         self._last_cols = cols
         self._last_rows = rows
         # asyncssh 的 term_size 参数顺序是 (cols, rows)
+        assert self.conn is not None
         self.process = await self.conn.create_process(
             term_type=term_type,
             term_size=(cols, rows),
@@ -808,7 +813,7 @@ class SSHSession:
             if t is not None:
                 return not t.is_closing()
             if hasattr(self.conn, "is_closing"):
-                return not self.conn.is_closing()
+                return not self.conn.is_closing()  # type: ignore[attr-defined]
         except Exception:
             pass
         return False
@@ -888,6 +893,7 @@ class SSHSession:
 
         try:
             # 发送命令
+            assert self.process is not None
             self.process.stdin.write(f"{command}\n")
             self.last_active = time.time()
 
@@ -953,7 +959,7 @@ class SSHSession:
         total_timeout: int = 30,
         prompt_pattern: str = r"[\w.-]+@[\w.-]+:.+[#$]\s*$",
         capture_exit_code: bool = True,
-    ) -> tuple[int, str, str]:
+    ) -> tuple[int | None, str, str]:
         """
         注入命令到交互式终端，同时捕获输出返回
         - 命令和输出实时显示在 Web 终端中（通过广播机制）
@@ -1081,6 +1087,7 @@ class SSHSession:
             raise RuntimeError("SSH 未连接")
         async with self._cmd_lock:
             self.last_active = time.time()
+            assert self.conn is not None
             process = await self.conn.create_process(command)
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -1124,6 +1131,7 @@ class SSHSession:
         if not self.is_connected:
             raise RuntimeError("SSH 未连接")
         if self._sftp is None:
+            assert self.conn is not None
             self._sftp = await self.conn.start_sftp_client()
         return self._sftp
 
@@ -1228,7 +1236,7 @@ class SSHSession:
         """关闭 SFTP 连接"""
         if self._sftp:
             try:
-                self._sftp.close()
+                self._sftp.close()  # type: ignore[attr-defined]
             except Exception:
                 pass
             self._sftp = None
@@ -1267,7 +1275,7 @@ class SSHSession:
                 if self.conn._transport.is_closing():
                     return False
             # 备用方法：检查 conn 是否有 is_closing 方法
-            elif hasattr(self.conn, "is_closing") and self.conn.is_closing():
+            elif hasattr(self.conn, "is_closing") and self.conn.is_closing():  # type: ignore[attr-defined]
                 return False
             # 补充：检查 shell channel 是否仍可用（transport 可能短暂保持但 channel 已关）
             if self._has_shell and self.process is not None:
@@ -1301,10 +1309,10 @@ class SSHSession:
                 except Exception:
                     pass
             # 1. 优先检查内部进程对象是否存在
-            if hasattr(self.process, "_process") and self.process._process is not None:
+            if hasattr(self.process, "_process") and self.process._process is not None:  # type: ignore[attr-defined]
                 # 检查内部进程是否已退出
                 return not (
-                    hasattr(self.process._process, "returncode") and self.process._process.returncode is not None
+                    hasattr(self.process._process, "returncode") and self.process._process.returncode is not None  # type: ignore[attr-defined]
                 )
             # 备用：检查 exit_status
             return not (hasattr(self.process, "exit_status") and self.process.exit_status is not None)

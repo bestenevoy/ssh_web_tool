@@ -102,6 +102,7 @@ class SSHWebTool:
         """
         session_id = session_manager.create_session(host, port, username, host_id, terminal_name)
         session = session_manager.get_session(session_id)
+        assert session is not None
 
         async def _connect():
             await session.connect(
@@ -124,6 +125,7 @@ class SSHWebTool:
         """
         session_id = session_manager.create_session(host, port, username)
         session = session_manager.get_session(session_id)
+        assert session is not None
 
         async def _connect():
             await session.connect(
@@ -194,7 +196,7 @@ class SSHWebTool:
         if session and session.has_shell:
 
             async def _send():
-                await session.send_input(data)
+                await session.send_input(data)  # type: ignore[attr-defined]
 
             self._run_async(_send())
 
@@ -208,7 +210,7 @@ class SSHWebTool:
         session = session_manager.get_session(session_id)
         if not session:
             return {"prompt_type": "unknown", "is_busy": False, "last_output": ""}
-        return session.detect_state()
+        return session.detect_state()  # type: ignore[attr-defined]
 
     # ============ Web UI ============
 
@@ -226,7 +228,7 @@ class SSHWebTool:
 
         cfg = load_config()
         cfg["server"]["host"] = host if host is not None else self._web_host
-        cfg["server"]["port"] = int(port if port is not None else self._web_port)
+        cfg["server"]["port"] = int(port) if port is not None else self._web_port
         try:
             resolved = resolve_server_config(cfg)
         except (RuntimeError, ValueError) as e:
@@ -240,7 +242,7 @@ class SSHWebTool:
 
             from main import app
 
-            config = uvicorn.Config(app, host=host, port=port, log_level="warning", workers=1)
+            config = uvicorn.Config(app, host=host, port=port, log_level="warning", workers=1)  # type: ignore[arg-type]
             self._uvicorn_server = uvicorn.Server(config)
             self._uvicorn_server.run()
 
@@ -392,8 +394,9 @@ def patch_paramiko(manager: SSHWebTool | None = None):
                 hostname, port, username or "", terminal_name=f"paramiko-{hostname}"
             )
             session = session_manager.get_session(session_id)
+            assert session is not None
             session._external = True  # 外部镜像会话：is_alive 基于真实 client，不参与空闲清理
-            session._paramiko_client = self
+            session._paramiko_client = self  # type: ignore[attr-defined]
             session._connected = True  # is_connected 是只读 property，直接设置内部字段
             session.last_active = time.time()
             print(f"[SSHWebTool] 已注册 paramiko 连接: {username}@{hostname}:{port} (session={session_id})")
@@ -414,7 +417,7 @@ def patch_paramiko(manager: SSHWebTool | None = None):
                     return ret
 
                 self.close = patched_close
-                self._ssh_web_tool_close_hooked = True
+                self._ssh_web_tool_close_hooked = True  # type: ignore[attr-defined]
         except Exception as e:
             # 注册失败：清理半成品会话，避免残留未连接状态
             if session_id:
@@ -423,7 +426,7 @@ def patch_paramiko(manager: SSHWebTool | None = None):
 
         return result
 
-    paramiko.SSHClient.connect = patched_connect
+    paramiko.SSHClient.connect = patched_connect  # type: ignore[method-assign]
     _patched = True
     print("[SSHWebTool] paramiko 已劫持，所有连接将自动注册到管理器")
     return True
@@ -487,8 +490,9 @@ def patch_asyncssh(manager: SSHWebTool | None = None):
         try:
             session_id = session_manager.create_session(host, port, username or "", terminal_name=f"asyncssh-{host}")
             session = session_manager.get_session(session_id)
+            assert session is not None
             session._external = True  # 外部镜像会话：is_alive 基于真实 conn，不参与空闲清理
-            session._asyncssh_conn = conn
+            session._asyncssh_conn = conn  # type: ignore[attr-defined]
             session._connected = True  # is_connected 是只读 property，直接设置内部字段
             session.last_active = time.time()
             print(f"[SSHWebTool] 已注册 asyncssh 连接: {username}@{host}:{port} (session={session_id})")
@@ -509,7 +513,7 @@ def patch_asyncssh(manager: SSHWebTool | None = None):
                     return ret
 
                 conn.close = patched_close
-                conn._ssh_web_tool_close_hooked = True
+                conn._ssh_web_tool_close_hooked = True  # type: ignore[attr-defined]
         except Exception as e:
             # 注册失败：清理半成品会话，避免残留未连接状态
             if session_id:
@@ -518,7 +522,7 @@ def patch_asyncssh(manager: SSHWebTool | None = None):
 
         return conn
 
-    asyncssh.connect = patched_connect
+    asyncssh.connect = patched_connect  # type: ignore[method-assign]
     print("[SSHWebTool] asyncssh 已劫持，所有连接将自动注册到管理器")
     return True
 

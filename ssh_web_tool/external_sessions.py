@@ -12,6 +12,7 @@
 
 import time
 from collections import deque
+from typing import Any
 
 # 每会话历史事件上限
 MAX_HISTORY_PER_SESSION = 2000
@@ -24,7 +25,7 @@ class ExternalSessionHub:
 
     def __init__(self):
         # session_id -> {"meta": dict, "history": deque, "subscribers": set[WebSocket], "last_active": float, "closed": bool}
-        self._sessions: dict[str, dict] = {}
+        self._sessions: dict[str, Any] = {}
 
     # ---------- 接收测试侧事件 ----------
 
@@ -36,7 +37,7 @@ class ExternalSessionHub:
         etype = ev.get("type")
         if not sid or not etype:
             return
-        sess = self._sessions.get(sid)
+        sess: Any = self._sessions.get(sid)
         if sess is None:
             if etype != "connect":
                 return  # 未登记会话的孤儿事件忽略
@@ -59,7 +60,7 @@ class ExternalSessionHub:
             }
             self._sessions[sid] = sess
 
-        meta = sess["meta"]
+        meta: Any = sess["meta"]
         now = time.time()
         # 更新元信息
         if etype == "connect":
@@ -82,7 +83,7 @@ class ExternalSessionHub:
         sess["history"].append(ev)
 
         # 实时转发给订阅者
-        dead = set()
+        dead: set = set()
         for ws in sess["subscribers"]:
             try:
                 await ws.send_json(ev)
@@ -98,7 +99,7 @@ class ExternalSessionHub:
 
     async def subscribe(self, session_id: str, ws) -> bool:
         """浏览器订阅某会话：先回放历史，再实时转发。返回会话是否存在"""
-        sess = self._sessions.get(session_id)
+        sess: Any = self._sessions.get(session_id)
         if sess is None:
             return False
         sess["subscribers"].add(ws)
@@ -111,7 +112,7 @@ class ExternalSessionHub:
         return True
 
     def unsubscribe(self, session_id: str, ws) -> None:
-        sess = self._sessions.get(session_id)
+        sess: Any = self._sessions.get(session_id)
         if sess:
             sess["subscribers"].discard(ws)
 
@@ -131,7 +132,7 @@ class ExternalSessionHub:
         return result
 
     def get_session(self, session_id: str) -> dict | None:
-        sess = self._sessions.get(session_id)
+        sess: Any = self._sessions.get(session_id)
         if sess is None:
             return None
         meta = dict(sess["meta"])
@@ -140,7 +141,7 @@ class ExternalSessionHub:
         return meta
 
     def get_history(self, session_id: str, limit: int = 500) -> list:
-        sess = self._sessions.get(session_id)
+        sess: Any = self._sessions.get(session_id)
         if sess is None:
             return []
         return list(sess["history"])[-limit:]

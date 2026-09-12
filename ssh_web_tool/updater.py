@@ -20,6 +20,7 @@ import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from ssh_web_tool.version import APP_VERSION
 
@@ -228,7 +229,7 @@ def _launch_update_script(script: Path, exe_dir: Path) -> None:
     flags_det = getattr(subprocess, "DETACHED_PROCESS", 0)
     comspec = os.environ.get("COMSPEC", "cmd.exe")
     clean_env = _clean_launcher_env()
-    attempts = [
+    attempts: list[tuple[str, list[str] | str, dict[str, Any]]] = [
         ("cmd/c+CREATE_NO_WINDOW", [comspec, "/c", str(script)], {"creationflags": flags_cnw}),
         ("DETACHED_PROCESS", [str(script)], {"creationflags": flags_det}),
         ("shell=True", f'"{script}"', {"creationflags": flags_cnw, "shell": True}),

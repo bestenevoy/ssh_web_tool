@@ -20,10 +20,13 @@ def test_host_crud(tmp_path):
     assert h["id"] and h["name"] == "web1"
 
     got = s.get_host(h["id"])
+    assert got is not None
     assert got["host"] == "10.0.0.1"
 
     assert s.update_host(h["id"], {"name": "web1-updated"})
-    assert s.get_host(h["id"])["name"] == "web1-updated"
+    updated = s.get_host(h["id"])
+    assert updated is not None
+    assert updated["name"] == "web1-updated"
 
     assert s.delete_host(h["id"])
     assert s.get_host(h["id"]) is None
@@ -33,6 +36,7 @@ def test_host_duplicate(tmp_path):
     s = make_storage(tmp_path)
     h = s.add_host({"name": "web1", "host": "10.0.0.1", "username": "root", "group": "prod"})
     dup = s.duplicate_host(h["id"])
+    assert dup is not None
     assert dup["id"] != h["id"]
     assert dup["name"] == "web1 副本"
     assert dup["host"] == "10.0.0.1"  # 内容一致
@@ -52,6 +56,7 @@ def test_group_duplicate_copies_hosts(tmp_path):
     s.add_host({"name": "a", "host": "10.0.0.1", "username": "root", "group": "prod"})
     s.add_host({"name": "b", "host": "10.0.0.2", "username": "root", "group": "prod"})
     dup = s.duplicate_group("prod")
+    assert dup is not None
     assert dup["name"] == "prod 副本"
     assert len(dup["copied_hosts"]) == 2
     # 副本主机 id 必须全新
