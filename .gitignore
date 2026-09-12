@@ -51,3 +51,7 @@ config.json
 
 # 自动更新过程日志（exe 同目录/TEMP，运行时生成）
 _wstool_update.log
+
+# 临时文件（调试截图 / commit message 等）
+_commit_msg.txt
+_menu_*.bmp
