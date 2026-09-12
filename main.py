@@ -1353,10 +1353,6 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         if msg_type == "input":
             data = msg.get("data", "")
             if data:
-                # 输入色条：用户提交命令（含回车）时，发送标记给前端显示色条
-                # 不写入 shell、不进入 _broadcast_output（不污染日志/echo 解析）
-                if "\r" in data:
-                    await websocket.send_json({"type": "input_marker"})
                 # 本地终端 SSH 拦截：用户输入 ssh user:password@host 时，
                 # 拦截命令（不写入本地 shell），直接建立 SSH 连接切换到远端终端
                 if session.is_local() and "\r" in data:

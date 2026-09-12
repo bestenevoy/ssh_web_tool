@@ -353,7 +353,6 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         try {
           const msg = JSON.parse(event.data)
           if (msg.type === 'output') term.write(msg.data)
-          else if (msg.type === 'input_marker') term.write('\x1b[36m▶\x1b[0m ')
           else if (msg.type === 'ssh_connected') {
             // 本地终端拦截 SSH 后切换为远端终端：更新标签信息
             setTerminals((prev) => {
@@ -484,7 +483,6 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           try {
             const msg = JSON.parse(event.data)
             if (msg.type === 'output') term.write(msg.data)
-            else if (msg.type === 'input_marker') term.write('\x1b[36m▶\x1b[0m ')
             else if (msg.type === 'ssh_connected') {
               // 本地终端拦截 SSH 后切换为远端终端：更新标签信息
               setTerminals((prev) => {
