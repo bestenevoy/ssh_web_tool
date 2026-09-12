@@ -369,6 +369,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         try {
           const msg = JSON.parse(event.data)
           if (msg.type === 'output') term.write(msg.data)
+          else if (msg.type === 'input_marker') term.write('\x1b[36m▶\x1b[0m ')
           else if (msg.type === 'error') term.write(`\r\n\x1b[31m[错误] ${msg.data}\x1b[0m\r\n`)
           else if (msg.type === 'info') term.write(`\r\n\x1b[33m[${msg.data}]\x1b[0m\r\n`)
           else if (msg.type === 'closed') term.write('\r\n\x1b[33m[连接已关闭]\x1b[0m\r\n')
@@ -466,6 +467,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           try {
             const msg = JSON.parse(event.data)
             if (msg.type === 'output') term.write(msg.data)
+            else if (msg.type === 'input_marker') term.write('\x1b[36m▶\x1b[0m ')
             else if (msg.type === 'error') term.write(`\r\n\x1b[31m[错误] ${msg.data}\x1b[0m\r\n`)
             else if (msg.type === 'info') term.write(`\r\n\x1b[33m[${msg.data}]\x1b[0m\r\n`)
             else if (msg.type === 'closed') term.write('\r\n\x1b[33m[连接已关闭]\x1b[0m\r\n')

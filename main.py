@@ -1302,6 +1302,10 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         if msg_type == "input":
             data = msg.get("data", "")
             if data:
+                # 输入色条：用户提交命令（含回车）时，发送标记给前端显示色条
+                # 不写入 shell、不进入 _broadcast_output（不污染日志/echo 解析）
+                if "\r" in data:
+                    await websocket.send_json({"type": "input_marker"})
                 # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入。
                 # SSH 已退出/断开时（自动切换本机终端或自动重连进行中）先等状态收敛：
                 # 期间 process 可能是已关闭的通道，直接写会报 "Channel not open for sending"
