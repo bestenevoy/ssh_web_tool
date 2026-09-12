@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
 """SSH 退出自动切换本机终端（exit/logout → 本机 cmd/powershell）
 
 - shell EOF（用户 exit）→ 自动切换本机 shell（幂等，防与自动重连并发冲突）
 - 切换提示写入终端输出与会话日志（同一会话一份记录）
 - 监控兜底：传输层仍在但 shell 已死 → 切本机；传输层断开 → 走原重连逻辑
 """
+
 import asyncio
 import logging
 import os
@@ -43,6 +43,7 @@ def _read_log(s: SSHSession) -> str:
 
 
 # ---------- _auto_switch_to_local ----------
+
 
 def test_auto_switch_uses_configured_shell_and_broadcasts(tmp_path, monkeypatch):
     """自动切换：使用 fallback_local_shell 配置；提示进入终端输出与会话日志"""
@@ -120,6 +121,7 @@ def test_reconnect_bails_while_switching():
 
 # ---------- shell EOF 触发自动切换 ----------
 
+
 class _FakeStdout:
     """模拟 asyncssh stdout：先输出数据，然后 EOF（clean eof）"""
 
@@ -184,6 +186,7 @@ def test_reader_cancelled_does_not_trigger_switch(monkeypatch):
 
 # ---------- is_transport_alive ----------
 
+
 def test_is_transport_alive_variants():
     s = _mk_session()
     # 本机会话 / 无连接 → False
@@ -211,6 +214,7 @@ def test_is_transport_alive_variants():
 
 
 # ---------- 日志：切换后仍写同一会话日志 ----------
+
 
 def test_switch_keeps_same_session_log_file(monkeypatch):
     """SSH → 本机切换后日志延续同一份文件（以会话为主，不拆分新文件）"""
@@ -251,6 +255,7 @@ def test_switch_keeps_same_session_log_file(monkeypatch):
 
 try:
     import winpty  # noqa: F401
+
     HAVE_WINPTY = True
 except ImportError:
     HAVE_WINPTY = False

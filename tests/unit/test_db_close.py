@@ -1,9 +1,9 @@
-﻿# -*- coding: utf-8 -*-
 """close_db 幂等与单例清理测试（Bug A 回归）
 
 背景：history_db 单例 aiosqlite 连接若不关闭，非 daemon worker 线程会导致
 进程正常退出（Ctrl+C/uvicorn 停止）时挂住。close_db 应幂等可重复调用。
 """
+
 import pytest
 
 

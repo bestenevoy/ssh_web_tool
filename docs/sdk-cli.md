@@ -17,8 +17,8 @@ for h in hosts:
 # 2. 最常用：在指定主机执行命令（自动复用已有会话，没有则新建）
 # 输出会同步显示在 Web 终端中，CLI 也能拿到输出
 result = client.exec_host("117d5a13", "df -h && free -m && uptime")
-print(result['stdout'])
-print("返回码:", result['returncode'])
+print(result["stdout"])
+print("返回码:", result["returncode"])
 
 # 3. 直接用 IP 执行命令（自动匹配该主机第1个活跃终端）
 result = client.exec_host("192.168.1.100", "uptime")
@@ -39,8 +39,9 @@ client.sftp_upload("session_id", "./local_file.txt", "/tmp/remote_file.txt")
 client.sftp_delete("session_id", "/tmp/remote_file.txt")
 
 # 7. 主机管理
-client.add_host(name="测试机", host="192.168.1.100", port=22,
-                username="root", password="xxx", type="test", group="测试环境")
+client.add_host(
+    name="测试机", host="192.168.1.100", port=22, username="root", password="xxx", type="test", group="测试环境"
+)
 client.update_host("host_id", {"name": "新名称"})
 client.delete_host("host_id")
 ```

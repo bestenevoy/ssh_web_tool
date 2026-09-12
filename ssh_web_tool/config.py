@@ -17,12 +17,12 @@ config.example.json 模板），用户修改后重启即可生效。
     - server.auto_find_free_port = false：端口被占用时直接报错退出，
       提示用户修改配置文件。
 """
+
 import json
 import shutil
 import socket
 import sys
 from pathlib import Path
-from typing import Dict, Optional
 
 CONFIG_FILE_NAME = "config.json"
 EXAMPLE_FILE_NAME = "config.example.json"
@@ -48,9 +48,9 @@ def ensure_data_dir() -> Path:
     return d
 
 
-def get_example_path() -> Optional[Path]:
+def get_example_path() -> Path | None:
     """config.example.json 模板所在位置（打包后随资源目录 _MEIPASS）"""
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         p = Path(sys._MEIPASS) / EXAMPLE_FILE_NAME
         return p if p.is_file() else None
     p = Path(__file__).resolve().parent.parent / EXAMPLE_FILE_NAME
@@ -64,7 +64,7 @@ def migrate_legacy_data() -> None:
     """
     d = get_app_dir()
     roots = []
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         roots.append(Path(sys.executable).parent)
     roots.append(Path(__file__).resolve().parent.parent)
     for root in roots:
@@ -85,15 +85,16 @@ def migrate_legacy_data() -> None:
             except OSError as e:
                 print(f"[config] 迁移日志目录失败: {e}")
 
+
 # 默认配置（无配置文件时的兜底值）
-DEFAULT_CONFIG: Dict = {
+DEFAULT_CONFIG: dict = {
     "server": {
-        "host": "127.0.0.1",            # 服务监听地址
-        "port": 8765,                   # 服务监听端口
-        "auto_find_free_port": True,    # 端口被占用时自动寻找空闲端口
+        "host": "127.0.0.1",  # 服务监听地址
+        "port": 8765,  # 服务监听端口
+        "auto_find_free_port": True,  # 端口被占用时自动寻找空闲端口
     },
-    "open_browser": True,               # 启动后延迟自动打开浏览器
-    "fallback_local_shell": "cmd",      # SSH 断开自动切换本机终端时使用的 shell（cmd / powershell / pwsh）
+    "open_browser": True,  # 启动后延迟自动打开浏览器
+    "fallback_local_shell": "cmd",  # SSH 断开自动切换本机终端时使用的 shell（cmd / powershell / pwsh）
 }
 
 # 合法本机 shell 取值
@@ -103,7 +104,7 @@ LOCAL_SHELL_CHOICES = ("cmd", "powershell", "pwsh")
 _TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell")
 
 
-def get_fallback_local_shell(cfg: Optional[Dict] = None) -> str:
+def get_fallback_local_shell(cfg: dict | None = None) -> str:
     """读取"SSH 断开后切换本机终端"的 shell 配置，非法取值回退 cmd"""
     c = cfg if cfg is not None else load_config()
     val = (c or {}).get("fallback_local_shell", "cmd")
@@ -112,7 +113,7 @@ def get_fallback_local_shell(cfg: Optional[Dict] = None) -> str:
     return val
 
 
-def save_config(cfg: Dict) -> bool:
+def save_config(cfg: dict) -> bool:
     """把配置写回配置文件（~/.ai4one/wstool/config.json，保留注释不可行——纯 JSON 覆盖写）
 
     仅当配置目录下已有 config.json 时写入；无配置文件则创建。
@@ -127,7 +128,7 @@ def save_config(cfg: Dict) -> bool:
         return False
 
 
-def find_config_file() -> Optional[Path]:
+def find_config_file() -> Path | None:
     """查找配置文件（统一在数据目录 ~/.ai4one/wstool 中）"""
     p = get_app_dir() / CONFIG_FILE_NAME
     return p if p.is_file() else None
@@ -160,7 +161,7 @@ def ensure_config_file() -> Path:
     return target
 
 
-def load_config() -> Dict:
+def load_config() -> dict:
     """加载配置并合并默认值（深拷贝，避免污染 DEFAULT_CONFIG）"""
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     cfg_file = find_config_file()
@@ -195,7 +196,7 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
             return True
 
 
-def find_free_port(start_port: int, host: str = "127.0.0.1", max_tries: int = 100) -> Optional[int]:
+def find_free_port(start_port: int, host: str = "127.0.0.1", max_tries: int = 100) -> int | None:
     """从 start_port 开始向上寻找空闲端口，找不到返回 None"""
     if start_port < 1:
         start_port = 1
@@ -214,7 +215,7 @@ def validate_port(port: int) -> int:
     return port
 
 
-def resolve_server_config(cfg: Dict) -> Dict:
+def resolve_server_config(cfg: dict) -> dict:
     """
     解析服务端监听配置，处理端口占用。
 
@@ -235,8 +236,7 @@ def resolve_server_config(cfg: Dict) -> Dict:
             free_port = find_free_port(port, host)
             if free_port is None:
                 raise RuntimeError(
-                    f"端口 {port} 被占用，且向上未找到空闲端口（已尝试 100 个）。"
-                    "请修改 config.json 中的 server.port。"
+                    f"端口 {port} 被占用，且向上未找到空闲端口（已尝试 100 个）。请修改 config.json 中的 server.port。"
                 )
             print(f"[config] 端口 {port} 已被占用，自动切换到空闲端口 {free_port}")
             return {"host": host, "port": free_port, "changed": True}

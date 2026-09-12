@@ -10,28 +10,31 @@ FastAPI 后端
   - 主机类型管理
   - SFTP 文件管理（列目录、读文件、写文件、删文件）
 """
+
 import asyncio
 import json
-import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional, List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ssh_web_tool.sessions import session_manager, SSHSession
-from ssh_web_tool.storage import storage
-from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
-from ssh_web_tool.config import (
-    load_config, get_app_dir, get_fallback_local_shell, save_config, LOCAL_SHELL_CHOICES,
-)
 from ssh_web_tool import history_db
-from ssh_web_tool.version import APP_VERSION
+from ssh_web_tool.config import (
+    LOCAL_SHELL_CHOICES,
+    get_app_dir,
+    get_fallback_local_shell,
+    load_config,
+    save_config,
+)
 from ssh_web_tool.external_sessions import external_hub
+from ssh_web_tool.playwright_mgmt import auto_login_storage, close_browser, list_active_browsers
+from ssh_web_tool.sessions import SSHSession, session_manager
+from ssh_web_tool.storage import storage
+from ssh_web_tool.version import APP_VERSION
 
 app = FastAPI(title="SSH Web Tool", version=APP_VERSION)
 
@@ -49,17 +52,20 @@ async def _shutdown_cleanup():
     except Exception:
         pass
 
+
 # PyInstaller 打包兼容：静态文件从临时目录读取，数据文件保存在 EXE 所在目录
 def get_resource_path(relative_path: str) -> Path:
     """获取资源文件路径（兼容 PyInstaller 打包）"""
-    if hasattr(sys, '_MEIPASS'):
+    if hasattr(sys, "_MEIPASS"):
         # PyInstaller 打包后，资源文件在临时目录
         return Path(sys._MEIPASS) / relative_path
     return Path(__file__).parent / relative_path
 
+
 def get_data_path(relative_path: str) -> Path:
     """获取数据文件路径（统一存放在 ~/.ai4one/wstool，不随打包丢失）"""
     return get_app_dir() / relative_path
+
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = get_resource_path("static")
@@ -73,6 +79,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 # ============ 事件总线（前端观察 Server 交互过程） ============
+
 
 class EventBus:
     """事件总线 - 所有操作发布事件，前端通过 WebSocket 订阅观察"""
@@ -106,28 +113,26 @@ class EventBus:
             **kwargs: 附加数据
         """
         import time
+
         event = {
             "type": "event",
             "event_type": event_type,
             "source": source,
             "detail": detail,
             "timestamp": time.time(),
-            "time_str": time.strftime('%H:%M:%S'),
-            **kwargs
+            "time_str": time.strftime("%H:%M:%S"),
+            **kwargs,
         }
         self._history.append(event)
         if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
+            self._history = self._history[-self._max_history :]
         # 并行广播给所有订阅者（原串行 await 会因慢客户端阻塞其他客户端）
         if not self._subscribers:
             return
-        results = await asyncio.gather(
-            *[ws.send_json(event) for ws in self._subscribers],
-            return_exceptions=True
-        )
+        results = await asyncio.gather(*[ws.send_json(event) for ws in self._subscribers], return_exceptions=True)
         # 清理失败的订阅者
         dead = set()
-        for ws, result in zip(self._subscribers, results):
+        for ws, result in zip(self._subscribers, results, strict=False):
             if isinstance(result, Exception):
                 dead.add(ws)
         for ws in dead:
@@ -139,18 +144,19 @@ event_bus = EventBus()
 
 # ============ 请求模型 ============
 
+
 class CreateSessionRequest(BaseModel):
     host: str
     port: int = 22
     username: str
-    password: Optional[str] = None
-    private_key: Optional[str] = None
-    passphrase: Optional[str] = None
+    password: str | None = None
+    private_key: str | None = None
+    passphrase: str | None = None
 
 
 class CreateSessionFromHostRequest(BaseModel):
     host_id: str
-    terminal_name: Optional[str] = ""  # 可选：指定终端名称，不填则自动生成
+    terminal_name: str | None = ""  # 可选：指定终端名称，不填则自动生成
 
 
 class RunCommandRequest(BaseModel):
@@ -161,31 +167,31 @@ class RunCommandRequest(BaseModel):
 
 
 class HostRequest(BaseModel):
-    name: Optional[str] = ""
+    name: str | None = ""
     host: str
     port: int = 22
     username: str = "root"
-    password: Optional[str] = ""
-    private_key: Optional[str] = ""
-    passphrase: Optional[str] = ""
-    type: Optional[str] = "other"
-    group: Optional[str] = ""
+    password: str | None = ""
+    private_key: str | None = ""
+    passphrase: str | None = ""
+    type: str | None = "other"
+    group: str | None = ""
     # 设备类型：linux（普通主机）/ storage（存储阵列）
-    device_type: Optional[str] = "linux"
+    device_type: str | None = "linux"
     # 存储阵列管理页面配置
-    mgmt_port: Optional[int] = 8088
-    mgmt_username: Optional[str] = ""
-    mgmt_password: Optional[str] = ""
+    mgmt_port: int | None = 8088
+    mgmt_username: str | None = ""
+    mgmt_password: str | None = ""
     # Playwright 自动登录选择器配置
-    pw_username_selector: Optional[str] = ""
-    pw_password_selector: Optional[str] = ""
-    pw_login_btn_selector: Optional[str] = ""
-    pw_old_password_selector: Optional[str] = ""
-    pw_new_password_selector: Optional[str] = ""
-    pw_confirm_password_selector: Optional[str] = ""
-    pw_confirm_btn_selector: Optional[str] = ""
-    pw_success_selector: Optional[str] = ""
-    pw_headless: Optional[bool] = False
+    pw_username_selector: str | None = ""
+    pw_password_selector: str | None = ""
+    pw_login_btn_selector: str | None = ""
+    pw_old_password_selector: str | None = ""
+    pw_new_password_selector: str | None = ""
+    pw_confirm_password_selector: str | None = ""
+    pw_confirm_btn_selector: str | None = ""
+    pw_success_selector: str | None = ""
+    pw_headless: bool | None = False
 
 
 class GroupRequest(BaseModel):
@@ -223,6 +229,7 @@ class SftpDeleteRequest(BaseModel):
 
 # ============ 页面路由 ============
 
+
 @app.get("/")
 async def index():
     """主页：网页 UI（禁用缓存，确保每次打开/刷新都加载最新构建，避免旧页面缓存导致功能不一致）"""
@@ -233,6 +240,7 @@ async def index():
 
 
 # ============ 配置 API ============
+
 
 @app.get("/api/config")
 async def api_get_config():
@@ -246,6 +254,7 @@ async def api_get_config():
 
 class FallbackShellRequest(BaseModel):
     """设置 SSH 断开后切换的本机 shell"""
+
     shell: str
 
 
@@ -282,6 +291,7 @@ async def api_reload_config():
 
 # ============ SSH 会话 API ============
 
+
 @app.post("/api/sessions")
 async def api_create_session(req: CreateSessionRequest):
     """创建 SSH 会话并连接，自动启动交互式 shell（会显示在 Web UI 中）"""
@@ -298,11 +308,14 @@ async def api_create_session(req: CreateSessionRequest):
         await session.start_interactive_shell(cols=120, rows=40)
     except Exception as e:
         await session_manager.remove_session(session_id)
-        raise HTTPException(status_code=400, detail=f"SSH 连接失败: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
     await event_bus.publish(
-        "session_create", "api",
+        "session_create",
+        "api",
         f"创建SSH会话 {session_id} -> {req.host}:{req.port}",
-        session_id=session_id, host=req.host, port=req.port
+        session_id=session_id,
+        host=req.host,
+        port=req.port,
     )
     return {"session_id": session_id, "status": "connected", "has_shell": True}
 
@@ -314,8 +327,7 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
     if not host:
         raise HTTPException(status_code=404, detail="主机不存在")
     session_id = session_manager.create_session(
-        host["host"], host["port"], host["username"],
-        host_id=req.host_id, terminal_name=req.terminal_name or ""
+        host["host"], host["port"], host["username"], host_id=req.host_id, terminal_name=req.terminal_name or ""
     )
     session = session_manager.get_session(session_id)
     try:
@@ -328,21 +340,29 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
         await session.start_interactive_shell(cols=120, rows=40)
     except Exception as e:
         await session_manager.remove_session(session_id)
-        raise HTTPException(status_code=400, detail=f"SSH 连接失败: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
     await event_bus.publish(
-        "session_create", "api",
+        "session_create",
+        "api",
         f"创建SSH会话 {session_id} -> {host['host']}:{host['port']} ({session.terminal_name})",
-        session_id=session_id, host=host['host'], port=host['port'],
-        host_id=req.host_id, terminal_name=session.terminal_name
+        session_id=session_id,
+        host=host["host"],
+        port=host["port"],
+        host_id=req.host_id,
+        terminal_name=session.terminal_name,
     )
     # 持久化终端信息（会话ID复用，重启后可恢复）
     storage.save_terminal(session_id, req.host_id, session.terminal_name)
-    return {"session_id": session_id, "status": "connected",
-            "terminal_name": session.terminal_name, "host": _sanitize_host(host)}
+    return {
+        "session_id": session_id,
+        "status": "connected",
+        "terminal_name": session.terminal_name,
+        "host": _sanitize_host(host),
+    }
 
 
 @app.post("/api/local/session")
-async def api_create_local_session(req: dict = None):
+async def api_create_local_session(req: dict | None = None):
     """创建本机终端（cmd / powershell，winpty ConPTY 交互式 shell，不经过 SSH）
 
     前端"本机终端"入口调用；会话协议与 SSH 终端完全一致（output/input/resize）。
@@ -352,24 +372,28 @@ async def api_create_local_session(req: dict = None):
     if shell not in ("cmd", "powershell", "pwsh"):
         shell = "cmd"
     import getpass
+
     tname = "本机 cmd" if shell == "cmd" else ("本机 PowerShell" if shell == "powershell" else "本机 pwsh")
     session_id = session_manager.create_session(
-        host="localhost", port=0, username=getpass.getuser(),
-        terminal_name=tname
+        host="localhost", port=0, username=getpass.getuser(), terminal_name=tname
     )
     session = session_manager.get_session(session_id)
     try:
         await session.start_local_shell(shell=shell, cols=120, rows=40)
     except Exception as e:
         await session_manager.remove_session(session_id)
-        raise HTTPException(status_code=400, detail=f"启动本地 shell 失败: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"启动本地 shell 失败: {e!s}")
     await event_bus.publish(
-        "session_create", "api",
-        f"创建本地终端 {session_id} ({tname})",
-        session_id=session_id, host="localhost", port=0
+        "session_create", "api", f"创建本地终端 {session_id} ({tname})", session_id=session_id, host="localhost", port=0
     )
-    return {"session_id": session_id, "status": "connected", "has_shell": True,
-            "terminal_name": tname, "host": "localhost", "shell": shell}
+    return {
+        "session_id": session_id,
+        "status": "connected",
+        "has_shell": True,
+        "terminal_name": tname,
+        "host": "localhost",
+        "shell": shell,
+    }
 
 
 @app.get("/api/sessions")
@@ -383,9 +407,9 @@ async def api_list_saved_terminals():
     """获取所有持久化的终端（可恢复的终端列表）"""
     saved = storage.list_saved_terminals()
     # 标记哪些终端当前活跃
-    active_ids = {s['session_id'] for s in session_manager.list_sessions()}
+    active_ids = {s["session_id"] for s in session_manager.list_sessions()}
     for t in saved:
-        t['is_active'] = t['session_id'] in active_ids
+        t["is_active"] = t["session_id"] in active_ids
     return {"terminals": saved}
 
 
@@ -395,20 +419,23 @@ async def api_restore_terminal(session_id: str):
     saved = storage.get_saved_terminal(session_id)
     if not saved:
         raise HTTPException(status_code=404, detail="终端不存在")
-    host = storage.get_host(saved['host_id'])
+    host = storage.get_host(saved["host_id"])
     if not host:
         raise HTTPException(status_code=404, detail="主机不存在")
 
     # 如果会话已存在，直接返回
     existing = session_manager.get_session(session_id)
     if existing and existing.is_connected:
-        return {"session_id": session_id, "status": "already_connected",
-                "terminal_name": saved['terminal_name']}
+        return {"session_id": session_id, "status": "already_connected", "terminal_name": saved["terminal_name"]}
 
     # 创建会话（复用 session_id）
     session_manager.create_session_with_id(
-        session_id, host["host"], host["port"], host["username"],
-        host_id=saved['host_id'], terminal_name=saved['terminal_name']
+        session_id,
+        host["host"],
+        host["port"],
+        host["username"],
+        host_id=saved["host_id"],
+        terminal_name=saved["terminal_name"],
     )
     session = session_manager.get_session(session_id)
     try:
@@ -419,11 +446,10 @@ async def api_restore_terminal(session_id: str):
         )
     except Exception as e:
         await session_manager.remove_session(session_id)
-        raise HTTPException(status_code=400, detail=f"SSH 连接失败: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
 
-    storage.save_terminal(session_id, saved['host_id'], saved['terminal_name'])
-    return {"session_id": session_id, "status": "connected",
-            "terminal_name": saved['terminal_name']}
+    storage.save_terminal(session_id, saved["host_id"], saved["terminal_name"])
+    return {"session_id": session_id, "status": "connected", "terminal_name": saved["terminal_name"]}
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -434,9 +460,10 @@ async def api_delete_session(session_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail="会话不存在")
     await event_bus.publish(
-        "session_close", "api",
+        "session_close",
+        "api",
         f"关闭SSH会话 {session_id}" + (f" ({session.host})" if session else ""),
-        session_id=session_id
+        session_id=session_id,
     )
     return {"status": "deleted"}
 
@@ -464,9 +491,12 @@ async def api_run_command(session_id: str, req: RunCommandRequest):
     use_inject = (not req.process) and session.has_shell
 
     await event_bus.publish(
-        "command_run", "api",
-        f"[{session_id}] {'注入' if use_inject else '执行'}命令: {req.command[:80]}" + ("..." if len(req.command) > 80 else ""),
-        session_id=session_id, command=req.command[:200]
+        "command_run",
+        "api",
+        f"[{session_id}] {'注入' if use_inject else '执行'}命令: {req.command[:80]}"
+        + ("..." if len(req.command) > 80 else ""),
+        session_id=session_id,
+        command=req.command[:200],
     )
 
     if use_inject:
@@ -474,17 +504,19 @@ async def api_run_command(session_id: str, req: RunCommandRequest):
         try:
             # 确保输出读取器在运行
             await session.start_output_reader()
-            code, stdout, stderr = await session.inject_and_capture(req.command, total_timeout=req.timeout, capture_exit_code=req.capture_exit_code)
+            code, stdout, stderr = await session.inject_and_capture(
+                req.command, total_timeout=req.timeout, capture_exit_code=req.capture_exit_code
+            )
             return {"returncode": code, "stdout": stdout, "stderr": stderr, "mode": "inject"}
         except asyncio.TimeoutError:
             raise HTTPException(status_code=408, detail="命令执行超时")
-        except Exception as e:
+        except Exception:
             # 注入失败，回退到独立进程模式
             try:
                 code, stdout, stderr = await session.run_command(req.command, req.timeout)
                 return {"returncode": code, "stdout": stdout, "stderr": stderr, "mode": "fallback_process"}
             except Exception as e2:
-                raise HTTPException(status_code=500, detail=f"执行失败: {str(e2)}")
+                raise HTTPException(status_code=500, detail=f"执行失败: {e2!s}")
     else:
         # 独立进程模式（process=True 或没有交互式终端）
         try:
@@ -493,7 +525,7 @@ async def api_run_command(session_id: str, req: RunCommandRequest):
         except asyncio.TimeoutError:
             raise HTTPException(status_code=408, detail="命令执行超时")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"执行失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"执行失败: {e!s}")
 
 
 @app.get("/api/sessions/{session_id}/state")
@@ -511,7 +543,7 @@ async def api_get_session_state(session_id: str):
 
 
 @app.post("/api/sessions/states")
-async def api_get_session_states(session_ids: List[str]):
+async def api_get_session_states(session_ids: list[str]):
     """批量获取多个终端状态（合并为单一 HTTP 请求，减少轮询开销）
 
     优化：原前端每个终端每 3 秒单独轮询 /api/sessions/{id}/state，
@@ -558,7 +590,8 @@ async def api_get_session_logs_by_file(session_id: str, offset: int = 0, limit: 
     log_dir.mkdir(parents=True, exist_ok=True)
     matches = sorted(
         (p for p in log_dir.glob(f"*{session_id}*.log") if p.is_file()),
-        key=lambda p: p.stat().st_mtime, reverse=True,
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
     )
     if not matches:
         return {"session_id": session_id, "content": ""}
@@ -567,7 +600,7 @@ async def api_get_session_logs_by_file(session_id: str, offset: int = 0, limit: 
         size = f.stat().st_size
         start_pos = max(0, size - offset - limit)
         read_size = min(limit, size - start_pos)
-        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+        with open(f, encoding="utf-8", errors="replace") as fh:
             fh.seek(start_pos)
             content = fh.read(read_size)
         return {"session_id": session_id, "content": SSHSession._format_history_logs(content)}
@@ -577,6 +610,7 @@ async def api_get_session_logs_by_file(session_id: str, offset: int = 0, limit: 
 
 
 # ============ 主机配置 API（持久化） ============
+
 
 def _sanitize_host(h: dict) -> dict:
     """主机信息（本地工具：密码等敏感字段明文下发，便于前端展示/编辑确认）"""
@@ -611,11 +645,11 @@ async def api_list_hosts():
 
 
 class ReorderHostsRequest(BaseModel):
-    ids: List[str]
+    ids: list[str]
 
 
 class ReorderGroupsRequest(BaseModel):
-    names: List[str]
+    names: list[str]
 
 
 @app.post("/api/hosts/reorder")
@@ -641,18 +675,20 @@ async def api_list_active_terminals():
         host_info = None
         if s.host_id:
             host_info = storage.get_host(s.host_id)
-        result.append({
-            "session_id": s.session_id,
-            "host_id": s.host_id,
-            "host": s.host,
-            "port": s.port,
-            "username": s.username,
-            "terminal_name": s.terminal_name,
-            "host_name": (host_info.get("name") or s.host) if host_info else s.host,
-            "host_type": host_info["type"] if host_info else "other",
-            "created_at": s.created_at,
-            "last_active": s.last_active,
-        })
+        result.append(
+            {
+                "session_id": s.session_id,
+                "host_id": s.host_id,
+                "host": s.host,
+                "port": s.port,
+                "username": s.username,
+                "terminal_name": s.terminal_name,
+                "host_name": (host_info.get("name") or s.host) if host_info else s.host,
+                "host_type": host_info["type"] if host_info else "other",
+                "created_at": s.created_at,
+                "last_active": s.last_active,
+            }
+        )
     return {"terminals": result}
 
 
@@ -698,6 +734,7 @@ async def api_duplicate_host(host_id: str):
 
 # ============ 存储阵列管理页面自动登录 API（Playwright） ============
 
+
 @app.post("/api/hosts/{host_id}/auto-login")
 async def api_auto_login_storage(host_id: str):
     """存储阵列管理页面自动登录（启动浏览器，自动填写账号密码并登录）"""
@@ -711,8 +748,9 @@ async def api_auto_login_storage(host_id: str):
     result = await auto_login_storage(host)
 
     # 发布事件
-    event_bus.publish("storage_auto_login", "WEB",
-                      f"主机 {host.get('name', host['host'])} 管理页面自动登录: {result['status']}")
+    event_bus.publish(
+        "storage_auto_login", "WEB", f"主机 {host.get('name', host['host'])} 管理页面自动登录: {result['status']}"
+    )
 
     return result
 
@@ -731,6 +769,7 @@ async def api_list_browsers():
 
 
 # ============ 分组管理 API ============
+
 
 @app.get("/api/groups")
 async def api_list_groups():
@@ -780,6 +819,7 @@ async def api_duplicate_group(name: str):
 
 
 # ============ 全局命令历史 API（跨终端，按使用频次排序） ============
+
 
 class RecordCommandRequest(BaseModel):
     command: str
@@ -845,32 +885,37 @@ async def api_unified_search(keyword: str = "", limit: int = 50):
     # 1. 搜索快捷命令（排在前面）
     quick_commands = storage.list_quick_commands()
     for qc in quick_commands:
-        if not kw or kw in qc.get('name', '').lower() or kw in qc.get('command', '').lower():
-            results.append({
-                'type': 'quick',
-                'id': qc.get('id', ''),
-                'name': qc.get('name', ''),
-                'command': qc.get('command', ''),
-                'cmd_type': qc.get('type', 'direct'),  # direct=直接执行 / param=输入到终端后编辑
-                'pre_ops': qc.get('pre_ops', []),      # 预操作：搜索执行与点击快捷指令行为一致
-            })
+        if not kw or kw in qc.get("name", "").lower() or kw in qc.get("command", "").lower():
+            results.append(
+                {
+                    "type": "quick",
+                    "id": qc.get("id", ""),
+                    "name": qc.get("name", ""),
+                    "command": qc.get("command", ""),
+                    "cmd_type": qc.get("type", "direct"),  # direct=直接执行 / param=输入到终端后编辑
+                    "pre_ops": qc.get("pre_ops", []),  # 预操作：搜索执行与点击快捷指令行为一致
+                }
+            )
 
     # 2. 搜索历史命令（按使用频次排序，SQLite，已忽略的不返回）
     history_commands = await history_db.search_commands(keyword, limit)
     for hc in history_commands:
         # 避免和快捷命令重复（相同命令只显示一次，优先显示快捷命令）
-        if not any(r['type'] == 'quick' and r['command'] == hc['command'] for r in results):
-            results.append({
-                'type': 'history',
-                'command': hc['command'],
-                'count': hc.get('count', 1),
-                'last_used': hc.get('last_used', 0),
-            })
+        if not any(r["type"] == "quick" and r["command"] == hc["command"] for r in results):
+            results.append(
+                {
+                    "type": "history",
+                    "command": hc["command"],
+                    "count": hc.get("count", 1),
+                    "last_used": hc.get("last_used", 0),
+                }
+            )
 
     return {"keyword": keyword, "results": results[:limit]}
 
 
 # ============ 快速指令 API ============
+
 
 @app.get("/api/quick-commands")
 async def api_list_quick_commands():
@@ -881,13 +926,12 @@ async def api_list_quick_commands():
 @app.post("/api/quick-commands")
 async def api_add_quick_command(req: QuickCommandRequest):
     """新增快速指令"""
-    qc = storage.add_quick_command(req.name, req.command, req.description,
-                                   req.type, req.pre_ops)
+    qc = storage.add_quick_command(req.name, req.command, req.description, req.type, req.pre_ops)
     return qc
 
 
 class ReorderQuickCommandsRequest(BaseModel):
-    ids: List[str]
+    ids: list[str]
 
 
 @app.put("/api/quick-commands/reorder")
@@ -900,8 +944,7 @@ async def api_reorder_quick_commands(req: ReorderQuickCommandsRequest):
 @app.put("/api/quick-commands/{qc_id}")
 async def api_update_quick_command(qc_id: str, req: QuickCommandRequest):
     """更新快速指令"""
-    qc = storage.update_quick_command(qc_id, req.name, req.command, req.description,
-                                      req.type, req.pre_ops)
+    qc = storage.update_quick_command(qc_id, req.name, req.command, req.description, req.type, req.pre_ops)
     if not qc:
         raise HTTPException(status_code=404, detail="快速指令不存在")
     return qc
@@ -917,6 +960,7 @@ async def api_delete_quick_command(qc_id: str):
 
 
 # ============ 主机类型 API ============
+
 
 @app.get("/api/host-types")
 async def api_list_host_types():
@@ -944,6 +988,7 @@ async def api_delete_host_type(key: str):
 
 # ============ SFTP 文件管理 API ============
 
+
 @app.post("/api/sftp/{session_id}/list")
 async def api_sftp_list(session_id: str, req: SftpListRequest):
     """列出远程目录内容"""
@@ -953,13 +998,16 @@ async def api_sftp_list(session_id: str, req: SftpListRequest):
     try:
         items = await session.list_directory(req.path)
         await event_bus.publish(
-            "sftp_list", "api",
+            "sftp_list",
+            "api",
             f"[{session_id}] SFTP 列目录: {req.path} ({len(items)}项)",
-            session_id=session_id, path=req.path, count=len(items)
+            session_id=session_id,
+            path=req.path,
+            count=len(items),
         )
         return {"path": req.path, "items": items}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"列出目录失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"列出目录失败: {e!s}")
 
 
 @app.get("/api/sftp/{session_id}/read")
@@ -972,7 +1020,7 @@ async def api_sftp_read(session_id: str, path: str):
         content = await session.read_file(path)
         return {"path": path, "content": content}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取文件失败: {e!s}")
 
 
 @app.get("/api/sftp/{session_id}/download")
@@ -985,18 +1033,22 @@ async def api_sftp_download(session_id: str, path: str):
         data = await session.read_file_bytes(path)
         filename = path.split("/")[-1] or "download"
         await event_bus.publish(
-            "sftp_download", "api",
+            "sftp_download",
+            "api",
             f"[{session_id}] SFTP 下载: {path} ({len(data)} bytes)",
-            session_id=session_id, path=path, size=len(data)
+            session_id=session_id,
+            path=path,
+            size=len(data),
         )
         from fastapi.responses import Response
+
         return Response(
             content=data,
             media_type="application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"下载失败: {e!s}")
 
 
 @app.post("/api/sftp/{session_id}/write")
@@ -1008,13 +1060,16 @@ async def api_sftp_write(session_id: str, req: SftpWriteRequest):
     try:
         await session.write_file(req.path, req.content)
         await event_bus.publish(
-            "sftp_upload", "api",
+            "sftp_upload",
+            "api",
             f"[{session_id}] SFTP 上传/写入: {req.path} ({len(req.content)} bytes)",
-            session_id=session_id, path=req.path, size=len(req.content)
+            session_id=session_id,
+            path=req.path,
+            size=len(req.content),
         )
         return {"status": "written", "path": req.path}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"写入文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"写入文件失败: {e!s}")
 
 
 @app.post("/api/sftp/{session_id}/delete")
@@ -1027,7 +1082,7 @@ async def api_sftp_delete(session_id: str, req: SftpDeleteRequest):
         await session.delete_file(req.path)
         return {"status": "deleted", "path": req.path}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {e!s}")
 
 
 @app.post("/api/sftp/{session_id}/upload")
@@ -1045,20 +1100,23 @@ async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = 
         content = await file.read()
         await session.write_file(remote_path, content)
         await event_bus.publish(
-            "sftp_upload", "api",
+            "sftp_upload",
+            "api",
             f"[{session_id}] SFTP 上传: {remote_path} ({len(content)} bytes)",
-            session_id=session_id, path=remote_path, size=len(content)
+            session_id=session_id,
+            path=remote_path,
+            size=len(content),
         )
         return {"status": "uploaded", "path": remote_path, "size": len(content)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"上传失败: {e!s}")
 
 
 class PreopUploadRequest(BaseModel):
     session_id: str
-    source: str          # 源文件：本机绝对路径，或 scripts 目录下的文件名
+    source: str  # 源文件：本机绝对路径，或 scripts 目录下的文件名
     source_type: str = "path"  # path=本机绝对路径 / script=scripts 目录文件
-    remote: str          # 远端目标路径
+    remote: str  # 远端目标路径
 
 
 @app.post("/api/preop/upload")
@@ -1090,7 +1148,7 @@ async def api_preop_upload(req: PreopUploadRequest):
         await session.write_file(req.remote, data)
         return {"status": "uploaded", "source": str(src), "path": req.remote, "size": len(data)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"上传失败: {e!s}")
 
 
 @app.get("/api/scripts")
@@ -1103,6 +1161,7 @@ async def api_list_scripts():
 
 
 # ============ WebSocket（交互式终端） ============
+
 
 @app.websocket("/ws/ssh/{session_id}")
 async def websocket_ssh(websocket: WebSocket, session_id: str):
@@ -1156,13 +1215,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 try:
                     await session._auto_switch_to_local()
                 except Exception as e:
-                    await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {str(e)}"})
+                    await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {e!s}"})
                     await websocket.close()
                     return
             else:
                 await websocket.send_json({"type": "info", "data": "自动重连成功"})
         except Exception as e:
-            await websocket.send_json({"type": "error", "data": f"重连异常: {str(e)}"})
+            await websocket.send_json({"type": "error", "data": f"重连异常: {e!s}"})
             await websocket.close()
             return
 
@@ -1214,7 +1273,7 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         try:
             await session.start_interactive_shell(cols=initial_cols, rows=initial_rows)
         except Exception as e:
-            await websocket.send_json({"type": "error", "data": f"启动 shell 失败: {str(e)}"})
+            await websocket.send_json({"type": "error", "data": f"启动 shell 失败: {e!s}"})
             await websocket.close()
             return
 
@@ -1310,6 +1369,7 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
 
 # ============ 事件订阅 WebSocket（前端观察 Server 交互过程） ============
 
+
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
     """WebSocket 事件订阅 - 前端通过此连接实时观察所有操作"""
@@ -1334,6 +1394,7 @@ async def websocket_events(websocket: WebSocket):
 
 
 # ============ 外部 SSH 会话（跨进程观测：ssh-monkeypatch 推送） ============
+
 
 @app.get("/api/external-sessions")
 async def api_external_sessions():
@@ -1405,23 +1466,32 @@ async def websocket_external(websocket: WebSocket, session_id: str):
 
 # ============ 启动 ============
 
+
 def main():
     """启动 SSH Web Tool 服务"""
     # PyInstaller 打包后多进程支持
-    if hasattr(sys, 'frozen'):
+    if hasattr(sys, "frozen"):
         import multiprocessing
+
         multiprocessing.freeze_support()
 
-    import uvicorn
-    import webbrowser
-    import threading
     import logging
+    import threading
+    import webbrowser
+
+    import uvicorn
 
     from ssh_web_tool.config import (
-        load_config, resolve_server_config, ensure_config_file, CONFIG_FILE_NAME,
-        find_config_file, get_app_dir, ensure_data_dir, migrate_legacy_data,
+        CONFIG_FILE_NAME,
+        ensure_config_file,
+        ensure_data_dir,
+        find_config_file,
+        get_app_dir,
+        load_config,
+        migrate_legacy_data,
+        resolve_server_config,
     )
-    from ssh_web_tool.tray import start_tray, acquire_single_instance
+    from ssh_web_tool.tray import acquire_single_instance, start_tray
 
     # 统一数据目录：~/.ai4one/wstool；首次运行迁移旧位置（EXE 目录/项目根）的数据
     ensure_data_dir()
@@ -1455,7 +1525,7 @@ def main():
     except (RuntimeError, ValueError) as e:
         print(f"\n启动失败：{e}")
         print(f"提示：可编辑 {CONFIG_FILE_NAME} 修改 server.port / server.host 后重启")
-        if hasattr(sys, 'frozen'):
+        if hasattr(sys, "frozen"):
             input("\n按回车键退出...")
         return
 
@@ -1475,17 +1545,13 @@ def main():
     if not server_log.is_file():
         server_log.write_text("", encoding="utf-8")
     file_handler = logging.FileHandler(str(server_log), encoding="utf-8")
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
-    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S"))
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(file_handler)
     if sys.stderr is not None:
         stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(
-            logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%H:%M:%S")
-        )
+        stream_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%H:%M:%S"))
         root_logger.addHandler(stream_handler)
 
     print("=" * 50)
@@ -1511,7 +1577,9 @@ def main():
     # 启动时后台静默检查更新（有新版才弹提示，不自动更新）
     try:
         import threading as _th
+
         from ssh_web_tool.updater import check_for_update_quiet
+
         _th.Thread(target=check_for_update_quiet, daemon=True).start()
     except Exception as e:
         print(f"[updater] 启动更新检查失败: {e}")

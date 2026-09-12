@@ -1,4 +1,3 @@
-﻿# -*- coding: utf-8 -*-
 """
 Windows 系统托盘（纯 ctypes Win32 实现，零第三方依赖）
 
@@ -13,13 +12,13 @@ Windows 系统托盘（纯 ctypes Win32 实现，零第三方依赖）
 
 配合 PyInstaller --noconsole 打包：双击 EXE 无黑窗口，服务常驻托盘。
 """
+
 import ctypes
 import ctypes.wintypes as wt
 import json
 import logging
 import os
 import subprocess
-import sys
 import threading
 from pathlib import Path
 
@@ -34,8 +33,15 @@ user32.AppendMenuW.restype = wt.BOOL
 user32.CreatePopupMenu.restype = wt.HANDLE
 user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
 user32.GetCursorPos.restype = wt.BOOL
-user32.TrackPopupMenu.argtypes = [wt.HANDLE, wt.UINT, ctypes.c_int, ctypes.c_int,
-                                  ctypes.c_int, wt.HWND, ctypes.c_void_p]
+user32.TrackPopupMenu.argtypes = [
+    wt.HANDLE,
+    wt.UINT,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wt.HWND,
+    ctypes.c_void_p,
+]
 user32.TrackPopupMenu.restype = wt.UINT
 user32.DestroyMenu.argtypes = [wt.HANDLE]
 user32.DestroyMenu.restype = wt.BOOL
@@ -112,28 +118,46 @@ def RGB(r, g, b):
 
 class WNDCLASSEXW(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wt.UINT), ("style", wt.UINT), ("lpfnWndProc", ctypes.c_void_p),
-        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON), ("hCursor", wt.HANDLE),
-        ("hbrBackground", wt.HBRUSH), ("lpszMenuName", wt.LPCWSTR),
-        ("lpszClassName", wt.LPCWSTR), ("hIconSm", wt.HICON),
+        ("cbSize", wt.UINT),
+        ("style", wt.UINT),
+        ("lpfnWndProc", ctypes.c_void_p),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wt.HINSTANCE),
+        ("hIcon", wt.HICON),
+        ("hCursor", wt.HANDLE),
+        ("hbrBackground", wt.HBRUSH),
+        ("lpszMenuName", wt.LPCWSTR),
+        ("lpszClassName", wt.LPCWSTR),
+        ("hIconSm", wt.HICON),
     ]
 
 
 class NOTIFYICONDATAW(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT),
-        ("uFlags", wt.UINT), ("uCallbackMessage", wt.UINT), ("hIcon", wt.HICON),
-        ("szTip", wt.WCHAR * 128), ("dwState", wt.DWORD), ("dwStateMask", wt.DWORD),
-        ("szInfo", wt.WCHAR * 256), ("uVersion", wt.UINT), ("szInfoTitle", wt.WCHAR * 64),
+        ("cbSize", wt.DWORD),
+        ("hWnd", wt.HWND),
+        ("uID", wt.UINT),
+        ("uFlags", wt.UINT),
+        ("uCallbackMessage", wt.UINT),
+        ("hIcon", wt.HICON),
+        ("szTip", wt.WCHAR * 128),
+        ("dwState", wt.DWORD),
+        ("dwStateMask", wt.DWORD),
+        ("szInfo", wt.WCHAR * 256),
+        ("uVersion", wt.UINT),
+        ("szInfoTitle", wt.WCHAR * 64),
         ("dwInfoFlags", wt.DWORD),
     ]
 
 
 class ICONINFO(ctypes.Structure):
     _fields_ = [
-        ("fIcon", wt.BOOL), ("xHotspot", wt.DWORD), ("yHotspot", wt.DWORD),
-        ("hbmMask", wt.HBITMAP), ("hbmColor", wt.HBITMAP),
+        ("fIcon", wt.BOOL),
+        ("xHotspot", wt.DWORD),
+        ("yHotspot", wt.DWORD),
+        ("hbmMask", wt.HBITMAP),
+        ("hbmColor", wt.HBITMAP),
     ]
 
 
@@ -171,8 +195,7 @@ def _create_icon():
     # 绿色 ">_"
     gdi32.SetBkMode(hdc, TRANSPARENT)
     gdi32.SetTextColor(hdc, RGB(82, 196, 26))
-    font = gdi32.CreateFontW(20, 0, 0, 0, 700, 0, 0, 0,
-                             0, 0, 0, 0, 0, "Consolas")
+    font = gdi32.CreateFontW(20, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Consolas")
     old_font = gdi32.SelectObject(hdc, font)
     gdi32.TextOutA(hdc, 3, 6, b">_", 2)
     gdi32.SelectObject(hdc, old_font)
@@ -182,7 +205,6 @@ def _create_icon():
     hdc_mono = gdi32.CreateCompatibleDC(hdc_screen)
     hbmp_mono = gdi32.CreateCompatibleBitmap(hdc_mono, W, H)
     old_mono = gdi32.SelectObject(hdc_mono, hbmp_mono)
-    rc3 = RECT(0, 0, W, H)
     gdi32.PatBlt(hdc_mono, 0, 0, W, H, BLACKNESS)
     gdi32.SelectObject(hdc_mono, old_mono)
     gdi32.DeleteDC(hdc_mono)
@@ -217,6 +239,7 @@ class TrayIcon:
     def check_update(self):
         """检查更新：后台线程执行（弹窗阻塞不能卡托盘消息循环）"""
         import threading
+
         from ssh_web_tool.updater import check_and_update
 
         def _do():
@@ -229,6 +252,7 @@ class TrayIcon:
 
     def open_web(self):
         import webbrowser
+
         try:
             webbrowser.open(self.base_url)
         except Exception as e:
@@ -236,20 +260,20 @@ class TrayIcon:
 
     def open_dir(self):
         try:
-            os.startfile(self.app_dir)  # noqa: S606
+            os.startfile(self.app_dir)
         except Exception as e:
             print(f"[tray] 打开配置目录失败: {e}")
 
     def open_config(self):
         try:
-            os.startfile(self.config_path)  # noqa: S606
+            os.startfile(self.config_path)
         except Exception as e:
             print(f"[tray] 打开配置文件失败: {e}")
 
     def open_log(self):
         try:
             log = self.log_path
-            cmd = f'cmd /k powershell -NoExit -Command "Get-Content -LiteralPath \'{log}\' -Wait -Tail 200"'
+            cmd = f"cmd /k powershell -NoExit -Command \"Get-Content -LiteralPath '{log}' -Wait -Tail 200\""
             subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
         except Exception as e:
             print(f"[tray] 打开日志窗口失败: {e}")
@@ -259,6 +283,7 @@ class TrayIcon:
 
         def _do():
             import urllib.request
+
             try:
                 url = self.base_url.rstrip("/") + "/api/config/reload"
                 req = urllib.request.Request(url, method="POST", data=b"")
@@ -285,11 +310,13 @@ class TrayIcon:
         # 托盘线程无 running loop，用 asyncio.run 同步执行
         try:
             import asyncio
+
             from ssh_web_tool import history_db
+
             asyncio.run(history_db.close_db())
         except Exception:
             pass
-        os._exit(0)  # noqa: PLR1722
+        os._exit(0)
 
     # ---------- 窗口过程 ----------
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
@@ -354,13 +381,6 @@ class TrayIcon:
             return
 
         # 持久保存字符串引用：某些情况下菜单只保存指针而不拷贝文本
-        labels = [
-            (ID_OPEN_WEB, "打开界面 (Web)"),
-            (ID_OPEN_DIR, "打开配置目录"),
-            (ID_OPEN_CONFIG, "打开配置文件 config.json"),
-            (ID_OPEN_LOG, "打开日志窗口"),
-            (ID_EXIT, "退出"),
-        ]
         self._menu_labels = []
 
         def _append(mid, text):
@@ -389,8 +409,7 @@ class TrayIcon:
         pt = wt.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         self._force_foreground()
-        cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
-                                    pt.x, pt.y, 0, self.hwnd, None)
+        cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, self.hwnd, None)
         user32.DestroyMenu(menu)
         # 菜单关闭后发 WM_NULL，避免菜单窗口残留不消失（标准技巧）
         user32.PostMessageW(self.hwnd, 0x0000, 0, 0)  # WM_NULL
@@ -431,9 +450,18 @@ class TrayIcon:
         self._class_atom = user32.RegisterClassExW(ctypes.byref(wc))
 
         self.hwnd = user32.CreateWindowExW(
-            WS_EX_TOOLWINDOW, "SSHWebToolTrayWnd", "SSHWebToolTray",
-            WS_OVERLAPPED, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,
-            None, None, hinst, None,
+            WS_EX_TOOLWINDOW,
+            "SSHWebToolTrayWnd",
+            "SSHWebToolTray",
+            WS_OVERLAPPED,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            0,
+            0,
+            None,
+            None,
+            hinst,
+            None,
         )
         if not self.hwnd:
             print("[tray] 创建托盘窗口失败")

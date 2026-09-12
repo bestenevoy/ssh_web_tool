@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """本机终端（winpty ConPTY：cmd / powershell）—— 真实进程级测试
 
 仅在 Windows + pywinpty 可用时运行；失败不影响主测试套件。
@@ -6,6 +5,7 @@
 （start → write → sleep → 检查），不能多次 asyncio.run。
 日志断言读文件（0.6s 静默期后缓冲已 flush 落盘，_log_buf 会为空）。
 """
+
 import asyncio
 import sys
 
@@ -15,6 +15,7 @@ from ssh_web_tool.sessions import SSHSession
 
 try:
     import winpty  # noqa: F401
+
     HAVE_WINPTY = True
 except ImportError:
     HAVE_WINPTY = False

@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 """/api/logs/{session_id} 接口测试：会话删除后仍可从日志文件读取历史（重连保留旧内容的关键）"""
-import tempfile
+
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -51,6 +50,7 @@ def test_logs_by_file_matches_running_name(monkeypatch, tmp_path):
 
 def test_logs_by_file_prefers_live_session(monkeypatch, tmp_path):
     """会话还活着 → 优先走内存 get_history_logs"""
+
     class FakeSession:
         def get_history_logs(self, offset=0, limit=2000):
             return "LIVE-SESSION-CONTENT"

@@ -7,28 +7,29 @@
 
 优化：使用单例连接 + WAL 模式，避免每次操作都新建/关闭连接。
 """
+
 import json
 import re
 import time
 from pathlib import Path
-from typing import List, Dict, Optional
 
 import aiosqlite
 
 # ANSI/控制字符清洗：方向键等 ESC 序列若被拆解残留（如 [D、[C），也会被清理
-_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
-_OSC_RE = re.compile(r'\x1b\][\s\S]*?(\x07|\x1b\\)')
-_CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_OSC_RE = re.compile(r"\x1b\][\s\S]*?(\x07|\x1b\\)")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def clean_command(command: str) -> str:
     """清洗命令：剥离 ANSI 转义序列与残留控制字符，返回规范命令"""
-    text = _ANSI_RE.sub('', command)
-    text = _OSC_RE.sub('', text)
-    text = _CTRL_RE.sub('', text)
+    text = _ANSI_RE.sub("", command)
+    text = _OSC_RE.sub("", text)
+    text = _CTRL_RE.sub("", text)
     return text.strip()
 
-from .config import get_app_dir
+
+from .config import get_app_dir  # noqa: E402
 
 DB_NAME = "history.db"
 
@@ -41,8 +42,8 @@ def get_db_path() -> Path:
 # ========== 单例连接池 ==========
 # 原：每次操作都 async with aiosqlite.connect(...) 新建+关闭连接，开销大
 # 新：全局单例连接 + WAL 模式，复用连接，减少 IO 开销
-_db_conn: Optional[aiosqlite.Connection] = None
-_db_lock = __import__('asyncio').Lock()
+_db_conn: aiosqlite.Connection | None = None
+_db_lock = __import__("asyncio").Lock()
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -96,9 +97,7 @@ async def init_db() -> None:
         )
         """
     )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_history_last ON command_history(last_used)"
-    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_history_last ON command_history(last_used)")
     await conn.commit()
     await _purge_dirty_commands(conn)
     await conn.commit()
@@ -106,7 +105,7 @@ async def init_db() -> None:
 
 # 孤立方向键/功能键残留模式：如 [T、[D、[C、[A、[B、[3~ 等（旧版本输入处理把
 # ESC 序列拆开后残留的字面片段，无 ESC 前缀无法用 ANSI 正则清除）
-_GARBAGE_RE = re.compile(r'^\[\S{0,3}$')
+_GARBAGE_RE = re.compile(r"^\[\S{0,3}$")
 
 
 async def _purge_dirty_commands(conn) -> int:
@@ -123,8 +122,7 @@ async def _purge_dirty_commands(conn) -> int:
                 await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
             else:
                 try:
-                    await conn.execute(
-                        "UPDATE command_history SET command = ? WHERE id = ?", (clean, rid))
+                    await conn.execute("UPDATE command_history SET command = ? WHERE id = ?", (clean, rid))
                 except Exception:
                     # 清洗后与已有记录冲突：保留原记录，删除脏行
                     await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
@@ -187,12 +185,12 @@ async def record_echo_command(cmd: str) -> None:
     await conn.commit()
 
 
-async def search_commands(keyword: str = "", limit: int = 50, include_ignored: bool = False) -> List[Dict]:
+async def search_commands(keyword: str = "", limit: int = 50, include_ignored: bool = False) -> list[dict]:
     """搜索命令，按使用频次降序（频次相同按最后使用时间降序）；默认过滤已忽略"""
     conn = await get_db()
     kw = keyword.strip()
-    conds: List[str] = []
-    args: List = []
+    conds: list[str] = []
+    args: list = []
     if not include_ignored:
         conds.append("ignored = 0")
     if kw:
@@ -208,24 +206,22 @@ async def search_commands(keyword: str = "", limit: int = 50, include_ignored: b
     return [dict(r) for r in rows]
 
 
-async def list_recent_commands(limit: int = 100) -> List[Dict]:
+async def list_recent_commands(limit: int = 100) -> list[dict]:
     """最近使用的命令（按最后使用时间降序），过滤已忽略"""
     conn = await get_db()
     cur = await conn.execute(
-        "SELECT command, count, last_used FROM command_history "
-        "WHERE ignored = 0 ORDER BY last_used DESC LIMIT ?",
+        "SELECT command, count, last_used FROM command_history WHERE ignored = 0 ORDER BY last_used DESC LIMIT ?",
         (limit,),
     )
     rows = await cur.fetchall()
     return [dict(r) for r in rows]
 
 
-async def list_ignored_commands(limit: int = 200) -> List[Dict]:
+async def list_ignored_commands(limit: int = 200) -> list[dict]:
     """已忽略的命令列表（供恢复管理）"""
     conn = await get_db()
     cur = await conn.execute(
-        "SELECT command, count, last_used FROM command_history "
-        "WHERE ignored = 1 ORDER BY last_used DESC LIMIT ?",
+        "SELECT command, count, last_used FROM command_history WHERE ignored = 1 ORDER BY last_used DESC LIMIT ?",
         (limit,),
     )
     rows = await cur.fetchall()
@@ -238,9 +234,7 @@ async def ignore_command(command: str) -> bool:
     if not cmd:
         return False
     conn = await get_db()
-    cur = await conn.execute(
-        "UPDATE command_history SET ignored = 1 WHERE command = ?", (cmd,)
-    )
+    cur = await conn.execute("UPDATE command_history SET ignored = 1 WHERE command = ?", (cmd,))
     await conn.commit()
     return cur.rowcount > 0
 
@@ -251,9 +245,7 @@ async def unignore_command(command: str) -> bool:
     if not cmd:
         return False
     conn = await get_db()
-    cur = await conn.execute(
-        "UPDATE command_history SET ignored = 0 WHERE command = ?", (cmd,)
-    )
+    cur = await conn.execute("UPDATE command_history SET ignored = 0 WHERE command = ?", (cmd,))
     await conn.commit()
     return cur.rowcount > 0
 

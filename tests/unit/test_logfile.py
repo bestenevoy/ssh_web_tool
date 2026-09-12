@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """会话日志：命名（ip-开始-结束-sessionid）/ 同会话复用 / 聚合写入 / \r 覆盖合并"""
+
 import asyncio
 import glob
 import logging
@@ -31,6 +31,7 @@ def _mk_session(session_id: str = "abc12345", host: str = "8.137.52.71"):
 
 # ---------- 命名 ----------
 
+
 def test_log_file_naming_format():
     s = _mk_session()
     name = os.path.basename(s._log_file)
@@ -41,6 +42,7 @@ def test_log_file_naming_format():
     assert parts[-2] == "running"
     # 中间是时间戳 YYYYMMDD-HHMMSS
     import re
+
     assert re.fullmatch(r"\d{8}-\d{6}", parts[1])
 
 
@@ -71,12 +73,13 @@ def test_finalize_log_file_replaces_running_with_end(tmp_path):
 
 def re_fullmatch(pattern, s):
     import re
+
     return re.fullmatch(pattern, s)
 
 
 def test_resolve_existing_log_reuses_same_session_file(tmp_path):
     """同一 session_id 恢复：沿用旧文件（同一终端 = 同一份记录）"""
-    s1 = _mk_session()
+    _mk_session()
     # 模拟旧文件已存在（含结束时间，命名 ip_start_end_sid.log）
     old = os.path.join(tmp_path, "8.137.52.71_20260909-100000_20260909-110000_abc12345.log")
     open(old, "w").close()
@@ -85,6 +88,7 @@ def test_resolve_existing_log_reuses_same_session_file(tmp_path):
 
 
 # ---------- \r 覆盖合并 ----------
+
 
 def test_collapse_cr_lines_keeps_last_cr_state():
     text = "wget 10%\rwget 50%\rwget 100%\nOK\n"
@@ -108,6 +112,7 @@ def test_collapse_cr_lines_keeps_crlf_lines():
 
 # ---------- 聚合写入 ----------
 
+
 def test_feed_log_flush_writes_cleaned_single_block(tmp_path):
     """聚合 flush：ANSI 清洗 + \r 合并，日志文件只含最终显示内容"""
     s = _mk_session()
@@ -120,11 +125,12 @@ def test_feed_log_flush_writes_cleaned_single_block(tmp_path):
         assert s._log_buf == ""
 
     asyncio.run(_run())
-    content = open(s._log_file, encoding="utf-8").read()
-    assert "10%" not in content          # \r 覆盖前的状态不落盘
+    with open(s._log_file, encoding="utf-8") as f:
+        content = f.read()
+    assert "10%" not in content  # \r 覆盖前的状态不落盘
     assert "100%" in content
-    assert "完成" in content             # CRLF 行不得被 \r 误吞（回归）
-    assert "\x1b" not in content         # ANSI 已清洗
+    assert "完成" in content  # CRLF 行不得被 \r 误吞（回归）
+    assert "\x1b" not in content  # ANSI 已清洗
 
 
 def test_feed_log_flush_schedules_async(tmp_path):
@@ -137,7 +143,8 @@ def test_feed_log_flush_schedules_async(tmp_path):
         assert s._log_buf == ""
 
     asyncio.run(_run())
-    content = open(s._log_file, encoding="utf-8").read()
+    with open(s._log_file, encoding="utf-8") as f:
+        content = f.read()
     assert "hello world" in content
 
 
@@ -147,7 +154,8 @@ def test_feed_log_flush_threshold(tmp_path):
     big = "x" * (s.LOG_FLUSH_MAX + 100)
     s._feed_log(big)
     assert s._log_buf == ""  # 已同步 flush
-    content = open(s._log_file, encoding="utf-8").read()
+    with open(s._log_file, encoding="utf-8") as f:
+        content = f.read()
     assert content.count("x") == s.LOG_FLUSH_MAX + 100
 
 
@@ -176,7 +184,9 @@ def test_close_flushes_remaining_log(tmp_path):
     # 找到最终文件
     files = glob.glob(os.path.join(tmp_path, "*.log"))
     assert len(files) == 1
-    assert "tail data" in open(files[0], encoding="utf-8").read()
+    with open(files[0], encoding="utf-8") as f:
+        content = f.read()
+    assert "tail data" in content
 
 
 def test_cleanup_old_logs_removes_stale_only(tmp_path):

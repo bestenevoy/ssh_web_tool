@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """pytest 公共配置：测试隔离 + 共享 fixtures
 
 隔离原则：
@@ -6,8 +5,8 @@
 - history_db.get_db_path 由各测试 monkeypatch 到临时目录
 - API 测试通过替换 main.session_manager 为 FakeSessionManager，不发起真实 SSH
 """
+
 import sys
-import os
 import tempfile
 from pathlib import Path
 
@@ -31,7 +30,9 @@ import main  # noqa: E402
 # ---- e2e 开关：默认跳过需要真实 SSH 的测试 ----
 def pytest_addoption(parser):
     parser.addoption(
-        "--e2e", action="store_true", default=False,
+        "--e2e",
+        action="store_true",
+        default=False,
         help="运行需要真实 SSH 连接的端到端测试（需配置测试机）",
     )
 
@@ -55,6 +56,7 @@ def app():
 def client(app, tmp_path):
     """TestClient：每个测试使用全新的数据文件，杜绝测试间数据污染"""
     from fastapi.testclient import TestClient
+
     storage.data_file = str(tmp_path / "data.json")
     storage._data = storage._load()
     with TestClient(app) as c:
@@ -72,6 +74,7 @@ class FakeSessionManager:
 
     def create_session(self, session_id, host, port, username, **kwargs):
         from ssh_web_tool.sessions import SSHSession
+
         s = SSHSession(session_id, host, port, username, **kwargs)
         self.sessions[session_id] = s
         return s
@@ -106,7 +109,7 @@ def fake_sessions(monkeypatch):
 @pytest.fixture()
 def fake_history_db(monkeypatch, tmp_path):
     """把 history.db 指到临时目录并初始化，避免污染真实历史库
-    
+
     重要：需要重置单例连接 _db_conn，否则会复用上一个测试的数据库连接
     """
     import ssh_web_tool.history_db as history_db
@@ -123,6 +126,7 @@ def fake_history_db(monkeypatch, tmp_path):
         await history_db.init_db()
 
     import asyncio
+
     asyncio.run(_init())
 
     # 测试结束后清理单例连接

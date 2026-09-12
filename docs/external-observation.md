@@ -41,13 +41,14 @@ ssh_monkeypatch.start_streamer("ws://127.0.0.1:8765/ws/stream")
 
 # 3. 原有测试业务代码照常执行，不修改任何逻辑：
 import paramiko
+
 c = paramiko.SSHClient()
 c.connect("192.168.1.10", username="root", password="xxx")
 
 stdin, stdout, stderr = c.exec_command("uname -a")
-print(stdout.read())        # 读到的输出同时被采集并推送
+print(stdout.read())  # 读到的输出同时被采集并推送
 
-c.close()                   # 登记移除 + close 事件
+c.close()  # 登记移除 + close 事件
 ```
 
 特点：

@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 """history_db 单元测试：记录/搜索/忽略/清理（数据库隔离在 conftest.fake_history_db）"""
-import asyncio
 
 import pytest
 
@@ -69,6 +67,7 @@ async def test_dedup_same_command(fake_history_db):
 
 def test_clean_command():
     from ssh_web_tool.history_db import clean_command
+
     assert clean_command("  ls -la  ") == "ls -la"
     assert clean_command("") == ""
     assert clean_command("sudo apt update") == "sudo apt update"

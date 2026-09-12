@@ -14,8 +14,6 @@
 """
 
 import asyncio
-from typing import Optional
-
 
 # 保存已启动的浏览器实例，避免重复启动
 _browsers: dict[str, dict] = {}
@@ -59,7 +57,7 @@ async def auto_login_storage(host_config: dict) -> dict:
         return {
             "status": "error",
             "message": "当前运行环境未安装 Playwright（打包版为减小体积已排除）。"
-                       "请使用源码方式运行（python main.py），或 pip install playwright 后重试。",
+            "请使用源码方式运行（python main.py），或 pip install playwright 后重试。",
         }
 
     url = f"https://{host}:{port}"
@@ -218,7 +216,7 @@ async def auto_login_storage(host_config: dict) -> dict:
             del _browsers[host_id]
         return {
             "status": "error",
-            "message": f"自动登录失败: {str(e)}",
+            "message": f"自动登录失败: {e!s}",
         }
 
 
@@ -237,7 +235,4 @@ async def close_browser(host_id: str) -> dict:
 
 def list_active_browsers() -> list[dict]:
     """列出所有运行中的浏览器实例"""
-    return [
-        {"host_id": hid, "url": info["url"]}
-        for hid, info in _browsers.items()
-    ]
+    return [{"host_id": hid, "url": info["url"]} for hid, info in _browsers.items()]

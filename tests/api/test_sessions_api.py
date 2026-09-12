@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 """会话 API 回归测试（Bug2：注入命令并发锁 / Bug3：广播队列有界）
 
 不发起真实 SSH：FakeSession 提供可注入的 stdin 与 _inject_and_wait。
 """
+
 import asyncio
 
 import pytest
@@ -25,6 +25,7 @@ class FakeProcess:
 
 def make_session_with_shell(session_id="sess-1"):
     from ssh_web_tool.sessions import SSHSession
+
     s = SSHSession(session_id, "10.0.0.1", 22, "root")
     s.process = FakeProcess()
     s._has_shell = True
@@ -40,6 +41,7 @@ def shell_session(fake_sessions):
 
 
 # ---------- Bug2：注入命令并发锁 ----------
+
 
 @pytest.mark.asyncio
 async def test_inject_command_writes_stdin(shell_session, monkeypatch, fake_history_db):
@@ -95,6 +97,7 @@ async def test_concurrent_inject_commands_no_interleave(shell_session, monkeypat
 
 # ---------- Bug3：输出广播有界队列 ----------
 
+
 @pytest.fixture()
 def quiet_session(shell_session):
     """去掉回显解析与日志副作用，专注广播逻辑"""
@@ -143,9 +146,11 @@ async def test_broadcast_still_reaches_fast_listener(quiet_session):
 
 # ---------- 会话 API 路由 ----------
 
+
 def test_run_command_route_injects(shell_session, monkeypatch):
     """POST /api/sessions/{id}/run 走注入链路（mock 捕获层，不真实等终端输出）"""
     from fastapi.testclient import TestClient
+
     from main import app
 
     async def fake_capture(cmd, **kwargs):
@@ -163,6 +168,7 @@ def test_run_command_route_injects(shell_session, monkeypatch):
 def test_run_command_process_mode_when_no_shell(fake_sessions, monkeypatch, tmp_path):
     """无交互式终端时 run 走独立进程模式"""
     from fastapi.testclient import TestClient
+
     from main import app
 
     s = make_session_with_shell("sess-noshell")
@@ -181,7 +187,9 @@ def test_run_command_process_mode_when_no_shell(fake_sessions, monkeypatch, tmp_
 
 def test_close_session_route(fake_sessions, shell_session):
     from fastapi.testclient import TestClient
+
     from main import app
+
     with TestClient(app) as c:
         r = c.delete("/api/sessions/sess-1")
     assert r.status_code == 200

@@ -1,0 +1,47 @@
+# Pyrefly 类型检查配置
+# 文档: https://pyrefly.org/eng/configuration/
+# Pyrefly 是 Meta 开发的快速 Python 类型检查器（Rust 实现）
+# 严重程度: ignore < info < warn < error
+
+project_includes = [
+    "main.py",
+    "ssh_client.py",
+    "ssh_web_tool/",
+    "tests/",
+    "example_embed.py",
+]
+
+project_excludes = [
+    "packages/ssh-monkeypatch/**",
+    "ssh_web_tool.egg-info/**",
+    "build/**",
+    "dist/**",
+    ".venv/**",
+    "frontend/node_modules/**",
+    "**/__pycache__/**",
+]
+
+python_version = "3.10"
+
+# --- 规则覆盖 ---
+# 完整错误代码列表: https://pyrefly.org/eng/error_codes/
+# 严重程度: ignore | info | warn | error
+[errors]
+# 未使用的导入/变量: 由 Ruff 管理，Pyrefly 忽略
+no-access = "ignore"
+# 不可达代码: PyInstaller 打包/条件导入场景常见假阳性
+unreachable = "ignore"
+# 缺少导入: warn（部分可选依赖如 pywinpty / paramiko 可能未安装）
+missing-import = "warn"
+# 未绑定名称 (None.xxx): warn
+unbound-name = "warn"
+# 名称不匹配（类型不兼容）: warn
+name-mismatch = "warn"
+# 重定义: warn
+redefinition = "warn"
+# 错误的方法重写: ignore
+bad-override = "ignore"
+# 无效语法: error
+parse-error = "error"
+# 未知名称（未定义变量）: error
+unknown-name = "error"

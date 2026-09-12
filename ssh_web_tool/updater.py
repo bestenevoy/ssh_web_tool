@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """程序自动更新：检查 GitHub Release → 提示（断开所有 SSH 连接）→ 下载 → 替换重启
 
 设计：
@@ -12,6 +11,7 @@
   替换脚本轮询等待旧进程退出（最长 60s，延时用 ping——timeout 在无控制台/
   stdin 重定向下立即失败会导致等待循环空转）；启动失败保留新包供重试/手动替换
 """
+
 import os
 import re
 import subprocess
@@ -20,7 +20,6 @@ import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
 
 from ssh_web_tool.version import APP_VERSION
 
@@ -34,14 +33,14 @@ RETRY_TIMES = 3
 
 
 # 当前可执行文件
-def _current_exe() -> Optional[Path]:
+def _current_exe() -> Path | None:
     """当前运行的 EXE 路径（PyInstaller onefile：sys.executable）；源码模式返回 None"""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve()
     return None
 
 
-def parse_version(v: str) -> Tuple[int, ...]:
+def parse_version(v: str) -> tuple[int, ...]:
     """解析版本号 v0.1.28 / 0.1.28 → (0, 1, 28)；非法返回 (0,)"""
     m = re.search(r"(\d+(?:\.\d+){1,3})", v or "")
     if not m:
@@ -54,7 +53,7 @@ def is_newer(latest: str, current: str) -> bool:
     return parse_version(latest) > parse_version(current)
 
 
-def get_latest_release(timeout: float = 15.0) -> Optional[dict]:
+def get_latest_release(timeout: float = 15.0) -> dict | None:
     """获取最新 Release 信息，返回 {version, download_url, size, url}；失败返回 None
 
     网络异常自动重试（RETRY_TIMES 次，退避 1s/2s）。
@@ -69,6 +68,7 @@ def get_latest_release(timeout: float = 15.0) -> Optional[dict]:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = resp.read()
             import json
+
             rel = json.loads(data)
             version = rel.get("tag_name", "")
             asset_url = None
@@ -80,9 +80,8 @@ def get_latest_release(timeout: float = 15.0) -> Optional[dict]:
                     break
             if not asset_url:
                 return None
-            return {"version": version, "download_url": asset_url, "size": size,
-                    "url": rel.get("html_url", "")}
-        except Exception as e:  # noqa: BLE001
+            return {"version": version, "download_url": asset_url, "size": size, "url": rel.get("html_url", "")}
+        except Exception as e:
             last_err = e
             if attempt < RETRY_TIMES - 1:
                 time.sleep(1 + attempt)
@@ -100,13 +99,12 @@ def download_exe(url: str, dest: Path, expected_size: int = 0, timeout: float = 
         tmp = dest.with_suffix(dest.suffix + ".part")
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "ssh-web-tool-updater"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                with open(tmp, "wb") as f:
-                    while True:
-                        chunk = resp.read(1 << 16)
-                        if not chunk:
-                            break
-                        f.write(chunk)
+            with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
             size = tmp.stat().st_size
             # 校验非空 + 大小匹配
             if size == 0 or (expected_size > 0 and size != expected_size):
@@ -117,7 +115,7 @@ def download_exe(url: str, dest: Path, expected_size: int = 0, timeout: float = 
                 continue
             os.replace(tmp, dest)
             return True
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[updater] 下载失败（第 {attempt + 1} 次）: {e}")
             tmp.unlink(missing_ok=True)
             if attempt < RETRY_TIMES - 1:
@@ -134,7 +132,7 @@ def build_update_script(exe_dir: Path, old_name: str, new_name: str, pid: int = 
     会立即报错退出，等待循环瞬间空转 60 次直接 fail（"闪失败"的元凶之一）。
     """
     script = exe_dir / "_wstool_update.bat"
-    pid_kill = f'taskkill /f /pid {pid} >nul 2>&1\r\n' if pid else ""
+    pid_kill = f"taskkill /f /pid {pid} >nul 2>&1\r\n" if pid else ""
     content = (
         "@echo off\r\n"
         'set "LOG=%~dp0_wstool_update.log"\r\n'
@@ -163,7 +161,7 @@ def build_update_script(exe_dir: Path, old_name: str, new_name: str, pid: int = 
     return script
 
 
-def _ulog(msg: str, base: Optional[Path] = None) -> None:
+def _ulog(msg: str, base: Path | None = None) -> None:
     """更新流程文件日志（打包版 --noconsole 没有 stdout，print 不可见）
 
     写 base/_wstool_update.log（追加）；写失败静默（更新流程不能因日志中断）。
@@ -182,7 +180,7 @@ def _ulog(msg: str, base: Optional[Path] = None) -> None:
             with open(d / "_wstool_update.log", "a", encoding="utf-8", errors="replace") as f:
                 f.write(line)
             return
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
 
 
@@ -249,7 +247,7 @@ def _launch_update_script(script: Path, exe_dir: Path) -> None:
             )
             _ulog(f"update script launched via {desc}", base=exe_dir)
             return
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last_err = e
             _ulog(f"launch via {desc} failed: {type(e).__name__}: {e}", base=exe_dir)
     raise last_err
@@ -320,7 +318,7 @@ def _ask_and_apply(msg: str, rel: dict, show_dialog=None) -> None:
     # 多种启动方式逐个尝试（杀软拦截 bat 直启等环境差异会毙掉单一方式），见 _launch_update_script
     try:
         _launch_update_script(script, exe_dir)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # 不删已下载的新包：保留供重试更新或手动重命名替换，避免白白重下 20+ MB
         _info(
             f"启动更新脚本失败：{type(e).__name__}: {e}\n\n"
@@ -330,7 +328,7 @@ def _ask_and_apply(msg: str, rel: dict, show_dialog=None) -> None:
             show_dialog,
         )
         return
-    os._exit(0)  # noqa: PLR1722
+    os._exit(0)
 
 
 # ---------- Windows 弹窗（默认实现） ----------
@@ -339,9 +337,16 @@ def _confirm(msg: str, show_dialog=None) -> bool:
         return bool(show_dialog(msg))
     try:
         import ctypes
-        return ctypes.windll.user32.MessageBoxW(
-            None, msg, "SSH Web Tool - 更新", 0x4 | 0x20  # MB_YESNO | MB_ICONQUESTION
-        ) == 6  # IDYES
+
+        return (
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                msg,
+                "SSH Web Tool - 更新",
+                0x4 | 0x20,  # MB_YESNO | MB_ICONQUESTION
+            )
+            == 6
+        )  # IDYES
     except Exception:
         return False
 
@@ -352,8 +357,12 @@ def _info(msg: str, show_dialog=None) -> None:
         return
     try:
         import ctypes
+
         ctypes.windll.user32.MessageBoxW(
-            None, msg, "SSH Web Tool", 0x40  # MB_ICONINFORMATION
+            None,
+            msg,
+            "SSH Web Tool",
+            0x40,  # MB_ICONINFORMATION
         )
     except Exception:
         print(msg)

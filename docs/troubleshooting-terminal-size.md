@@ -30,11 +30,11 @@ stty size         # 输出格式是 "rows cols"，应该是 "17 96"，如果是 
 # 创建 PTY：term_size=(cols, rows)
 self.process = await self.conn.create_process(
     term_type="xterm-256color",
-    term_size=(cols, rows),   # ✓ 正确
+    term_size=(cols, rows),  # ✓ 正确
 )
 
 # 调整尺寸：change_terminal_size(cols, rows) —— 注意不是 (rows, cols)！
-self.process.change_terminal_size(cols, rows)   # ✓ 正确（和文档相反）
+self.process.change_terminal_size(cols, rows)  # ✓ 正确（和文档相反）
 ```
 
 ## 其他可能导致输入错乱的原因

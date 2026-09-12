@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """端到端测试：真实 SSH 连接（默认跳过，需 --e2e 参数）
 
 测试机来源优先级：
@@ -7,6 +6,7 @@
 
 注意：这些测试会真实连接远端，运行前确认目标主机可访问。
 """
+
 import asyncio
 import os
 
@@ -30,6 +30,7 @@ def _e2e_target():
     # 从 data.json 找第一台有密码的主机
     try:
         from ssh_web_tool.storage import storage
+
         for h in storage.list_hosts():
             if h.get("password"):
                 return (h["host"], h.get("port", 22), h.get("username", "root"), h["password"])

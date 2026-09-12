@@ -5,16 +5,16 @@ SSH 会话池管理
 - 支持交互式 pty shell（供网页 WebSocket 使用）
 - 支持非交互命令执行（供 AI / HTTP API 调用）
 """
+
 import asyncio
+import logging
 import os
-import sys
-import uuid
-import time
 import re
 import threading
-import logging
-from logging.handlers import TimedRotatingFileHandler
-from typing import Dict, List, Optional, Tuple
+import time
+import uuid
+from typing import ClassVar
+
 import asyncssh
 
 # 供 asyncssh.connect 劫持（patch_asyncssh）识别"工具内部连接"的标记：
@@ -26,12 +26,14 @@ _patch_guard = threading.local()
 def get_data_dir() -> str:
     """获取数据文件目录（统一在 ~/.ai4one/wstool）"""
     from .config import get_app_dir
+
     return str(get_app_dir())
 
 
 def _fallback_shell() -> str:
     """读取"SSH 退出后切换本机终端"的 shell 配置（cmd / powershell / pwsh）"""
     from .config import get_fallback_local_shell
+
     return get_fallback_local_shell()
 
 
@@ -43,18 +45,19 @@ class SSHSession:
     # 日志轮转保留天数
     LOG_BACKUP_DAYS = 7
     # 已创建的 logger 缓存（避免同一 session_id 重复创建 handler）
-    _logger_cache: Dict[str, logging.Logger] = {}
+    _logger_cache: ClassVar[dict[str, logging.Logger]] = {}
 
-    def __init__(self, session_id: str, host: str, port: int, username: str,
-                 host_id: str = "", terminal_name: str = ""):
+    def __init__(
+        self, session_id: str, host: str, port: int, username: str, host_id: str = "", terminal_name: str = ""
+    ):
         self.session_id = session_id
         self.host = host
         self.port = port
         self.username = username
-        self.host_id = host_id          # 关联的保存主机 ID
+        self.host_id = host_id  # 关联的保存主机 ID
         self.terminal_name = terminal_name  # 终端名称（如 "终端1"、"终端2"）
-        self.conn: Optional[asyncssh.SSHClientConnection] = None
-        self.process: Optional[asyncssh.SSHClientProcess] = None
+        self.conn: asyncssh.SSHClientConnection | None = None
+        self.process: asyncssh.SSHClientProcess | None = None
         self._sftp = None
         self.created_at = time.time()
         self.last_active = time.time()
@@ -63,9 +66,9 @@ class SSHSession:
         # 用于非交互命令执行的锁，防止并发冲突
         self._cmd_lock = asyncio.Lock()
         # 输出广播机制：一个协程读 stdout，广播给所有监听器
-        self._output_listeners: List[asyncio.Queue] = []
-        self._output_buffer: List[str] = []  # 终端输出缓冲区（用于状态检测）
-        self._reader_task: Optional[asyncio.Task] = None
+        self._output_listeners: list[asyncio.Queue] = []
+        self._output_buffer: list[str] = []  # 终端输出缓冲区（用于状态检测）
+        self._reader_task: asyncio.Task | None = None
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
@@ -74,64 +77,65 @@ class SSHSession:
         self._logger = self._get_or_create_logger(session_id, self._log_file)
         # 日志聚合缓冲：输出先累积，静默期/超阈值后清洗一次性写入，
         # 避免把每次刷新的中间回显都写进日志（只记录最终显示内容）
-        self._log_buf = ''
-        self._log_flush_task: Optional[asyncio.Task] = None
+        self._log_buf = ""
+        self._log_flush_task: asyncio.Task | None = None
         # 本地 shell（winpty ConPTY，本机 cmd/powershell；SSH 断开后可自动切换）
-        self._local_proc: Optional[object] = None
-        self._local_shell = ''
-        self._local_reader_task: Optional[asyncio.Task] = None
+        self._local_proc: object | None = None
+        self._local_shell = ""
+        self._local_reader_task: asyncio.Task | None = None
         # 待处理的终端尺寸（resize 消息在 PTY 创建前到达时保存）
-        self._pending_size: Optional[Tuple[int, int]] = None
+        self._pending_size: tuple[int, int] | None = None
         # resize 事件：PTY 创建后等待第一个 resize 消息，确保 shell 第一帧输出使用正确尺寸
         self._resize_event = asyncio.Event()
         # 自动重连相关
-        self._password: Optional[str] = None
-        self._private_key: Optional[str] = None
-        self._passphrase: Optional[str] = None
+        self._password: str | None = None
+        self._private_key: str | None = None
+        self._passphrase: str | None = None
         self._last_cols = 120
         self._last_rows = 40
-        self._keepalive_task: Optional[asyncio.Task] = None
+        self._keepalive_task: asyncio.Task | None = None
         self._reconnecting = False
         self._reconnect_count = 0
         self._max_reconnect = 5  # 最大自动重连次数
         self._switching_local = False  # 正在自动切换本机 shell（防止与自动重连并发冲突）
-        self._switch_task: Optional[asyncio.Task] = None  # 持有切换任务引用（loop 只保留弱引用）
+        self._switch_task: asyncio.Task | None = None  # 持有切换任务引用（loop 只保留弱引用）
         # 命令回显解析（从终端输出流提取"提示符后的实际命令"，含 Tab 补全/历史翻查结果）
-        self._echo_buf = ''          # 输出行缓冲（可能被数据块截断，留到下一块补齐）
-        self._echo_last_cmd = ''     # 最近一次解析记录的命令（去重防重复记录）
-        self._echo_last_time = 0.0   # 最近一次记录时间
+        self._echo_buf = ""  # 输出行缓冲（可能被数据块截断，留到下一块补齐）
+        self._echo_last_cmd = ""  # 最近一次解析记录的命令（去重防重复记录）
+        self._echo_last_time = 0.0  # 最近一次记录时间
         # 状态检测缓存：增量清洗后的缓冲区（避免每次 get_terminal_state 全量正则）
-        self._clean_buffer = ''      # 已清洗 ANSI 的输出缓冲区（与 _output_buffer 同步）
+        self._clean_buffer = ""  # 已清洗 ANSI 的输出缓冲区（与 _output_buffer 同步）
         self._clean_buffer_dirty = False  # 标记是否有新输出需要重新计算状态
         # 会话级通知（如 shell 异常提示）：由全局监控协程写入，WebSocket read_output 循环取出推送。
         # 不直接走 _broadcast_output，避免提示文本混入 run_command 的注入捕获/echo 解析
-        self._shell_notice: Optional[str] = None
+        self._shell_notice: str | None = None
 
     # ---------- 日志文件命名 ----------
 
-    _LOG_NAME_SAFE_RE = re.compile(r'[^\w.\-]')
-    _LOG_TIME_FMT = '%Y%m%d-%H%M%S'
+    _LOG_NAME_SAFE_RE = re.compile(r"[^\w.\-]")
+    _LOG_TIME_FMT = "%Y%m%d-%H%M%S"
 
     @classmethod
     def _sanitize_host(cls, host: str) -> str:
         """主机名清洗为合法文件名（IPv6 冒号、路径分隔符等 → _）"""
-        s = cls._LOG_NAME_SAFE_RE.sub('_', host or 'unknown')
-        return s[:48] or 'unknown'
+        s = cls._LOG_NAME_SAFE_RE.sub("_", host or "unknown")
+        return s[:48] or "unknown"
 
     @classmethod
-    def _fmt_time(cls, ts: Optional[float]) -> str:
+    def _fmt_time(cls, ts: float | None) -> str:
         import datetime
+
         if not ts:
-            return 'running'
+            return "running"
         return datetime.datetime.fromtimestamp(ts).strftime(cls._LOG_TIME_FMT)
 
-    def _resolve_existing_log(self) -> Optional[str]:
+    def _resolve_existing_log(self) -> str | None:
         """恢复场景：同 session_id 已存在日志文件则沿用（同一终端同一份记录）
 
         匹配新命名 *_{sid}.log；兼容旧命名 {sid}.log（历史版本遗留）"""
         try:
             os.makedirs(self.LOG_DIR, exist_ok=True)
-            pat = re.compile(r'.*_{}\.log$'.format(re.escape(self.session_id)))
+            pat = re.compile(rf".*_{re.escape(self.session_id)}\.log$")
             cands = [p for p in os.listdir(self.LOG_DIR) if pat.match(p)]
             if not cands and os.path.exists(os.path.join(self.LOG_DIR, f"{self.session_id}.log")):
                 return os.path.join(self.LOG_DIR, f"{self.session_id}.log")
@@ -164,10 +168,10 @@ class SSHSession:
 
         文件存在则重命名；不存在（会话无任何输出）也更新路径保持一致"""
         try:
-            if not self._log_file or '_running_' not in self._log_file:
+            if not self._log_file or "_running_" not in self._log_file:
                 return
             end = self._fmt_time(time.time())
-            new_path = self._log_file.replace('_running_', f'_{end}_', 1)
+            new_path = self._log_file.replace("_running_", f"_{end}_", 1)
             if new_path == self._log_file:
                 return
             if os.path.exists(self._log_file):
@@ -192,7 +196,7 @@ class SSHSession:
             os.makedirs(cls.LOG_DIR, exist_ok=True)
             cutoff = time.time() - days * 86400
             for name in os.listdir(cls.LOG_DIR):
-                if not name.endswith('.log'):
+                if not name.endswith(".log"):
                     continue
                 p = os.path.join(cls.LOG_DIR, name)
                 try:
@@ -209,7 +213,7 @@ class SSHSession:
         """设置会话级通知（全局监控协程调用）"""
         self._shell_notice = msg
 
-    def take_shell_notice(self) -> Optional[str]:
+    def take_shell_notice(self) -> str | None:
         """取出并清空会话级通知（WebSocket read_output 循环调用，只取一次）"""
         n = self._shell_notice
         self._shell_notice = None
@@ -223,9 +227,7 @@ class SSHSession:
     def has_shell(self) -> bool:
         return self._has_shell and (self.process is not None or self._local_proc is not None)
 
-    async def connect(self, password: Optional[str] = None,
-                      private_key: Optional[str] = None,
-                      passphrase: Optional[str] = None):
+    async def connect(self, password: str | None = None, private_key: str | None = None, passphrase: str | None = None):
         """建立 SSH 连接（带 keepalive 防止空闲超时断开）"""
         # 保存认证信息，用于自动重连
         self._password = password
@@ -257,8 +259,7 @@ class SSHSession:
         self.last_active = time.time()
         print(f"[SSHSystem] 连接成功: {self.username}@{self.host}:{self.port} (keepalive=30s)")
 
-    async def start_interactive_shell(self, cols: int = 120, rows: int = 40,
-                                      term_type: str = "xterm-256color"):
+    async def start_interactive_shell(self, cols: int = 120, rows: int = 40, term_type: str = "xterm-256color"):
         """启动交互式 pty shell（供网页终端使用）
         注意：初始尺寸由调用方传入（WebSocket 层先等待前端的 resize 消息），
         不要在这里等待 resize 事件，因为此时消息循环还没开始，会导致死锁。
@@ -315,27 +316,27 @@ class SSHSession:
     # mysql/sqlite/redis/mongo/postgres 等交互式程序的提示符。
     # 不匹配单独的 ">"（node 提示符，太通用容易误判普通输出行）。
     _ECHO_PROMPT_RE = re.compile(
-        r'^(?:'
-        r'[\w.-]+@[\w.-]+:[^#$\n]*[#$]'   # shell: user@host:path$ 或 user@host:path#
-        r'|>>>'                            # python
-        r'|\.\.\.'                         # python 续行（跳过）
-        r'|mysql>'                         # mysql
-        r'|sqlite>'                        # sqlite
-        r'|[\d.]+:\d+>'                    # redis: 127.0.0.1:6379>
-        r'|[a-zA-Z_][\w.-]*>'              # 通用: xxx> (mongo, postgres 等)
-        r')\s*'
+        r"^(?:"
+        r"[\w.-]+@[\w.-]+:[^#$\n]*[#$]"  # shell: user@host:path$ 或 user@host:path#
+        r"|>>>"  # python
+        r"|\.\.\."  # python 续行（跳过）
+        r"|mysql>"  # mysql
+        r"|sqlite>"  # sqlite
+        r"|[\d.]+:\d+>"  # redis: 127.0.0.1:6379>
+        r"|[a-zA-Z_][\w.-]*>"  # 通用: xxx> (mongo, postgres 等)
+        r")\s*"
     )
 
     # 清 ANSI 但保留 \r\n（回显解析需要 \r 判断行内覆盖）
-    _ANSI_KEEP_CR_RE = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
-    _OSC_KEEP_CR_RE = re.compile(r'\x1b\][\s\S]*?(\x07|\x1b\\)')
+    _ANSI_KEEP_CR_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+    _OSC_KEEP_CR_RE = re.compile(r"\x1b\][\s\S]*?(\x07|\x1b\\)")
 
     @classmethod
     def _clean_ansi_keep_cr(cls, text: str) -> str:
         """清理 ANSI 转义序列，但保留 \r\n（区别于 _clean_ansi 会去掉 \r）"""
-        text = cls._ANSI_KEEP_CR_RE.sub('', text)
-        text = cls._OSC_KEEP_CR_RE.sub('', text)
-        text = re.sub(r'\x1b[=><]', '', text)
+        text = cls._ANSI_KEEP_CR_RE.sub("", text)
+        text = cls._OSC_KEEP_CR_RE.sub("", text)
+        text = re.sub(r"\x1b[=><]", "", text)
         return text
 
     @classmethod
@@ -348,10 +349,10 @@ class SSHSession:
           宽松匹配失败 = 普通输出行，不记录"""
         s = line.strip()
         if not s:
-            return ''
+            return ""
         # python 续行提示符(...)：是上一命令的延续内容，不作为独立命令记录
-        if s.startswith('...'):
-            return ''
+        if s.startswith("..."):
+            return ""
         # 1. 精确已知提示符：循环剥离（readline 清屏重绘可能一行内多个提示符）
         stripped = False
         cmd = s
@@ -360,22 +361,22 @@ class SSHSession:
             if not m:
                 break
             stripped = True
-            rest = cmd[m.end():]
+            rest = cmd[m.end() :]
             if not rest.strip():
-                return ''  # 只剩提示符（空命令回车）
+                return ""  # 只剩提示符（空命令回车）
             cmd = rest
         # 2. 未识别出已知提示符时，才尝试自定义 PS1 宽松匹配；失败 = 普通输出行
         if not stripped:
-            m2 = re.match(r'^[\[\]~\w@.\- :/\\]*?[#$]\s*', cmd)
+            m2 = re.match(r"^[\[\]~\w@.\- :/\\]*?[#$]\s*", cmd)
             if not m2:
-                return ''
-            rest2 = cmd[m2.end():].strip()
+                return ""
+            rest2 = cmd[m2.end() :].strip()
             if not rest2:
-                return ''  # 提示符后无内容（空命令回车）
+                return ""  # 提示符后无内容（空命令回车）
             cmd = rest2
         cmd = cmd.strip()
         if not cmd or len(cmd) > 500:
-            return ''
+            return ""
         return cmd
 
     def _parse_echo_line(self, data: str):
@@ -392,17 +393,17 @@ class SSHSession:
             text = self._clean_ansi_keep_cr(data)
             self._echo_buf += text
             if len(self._echo_buf) > 4000:
-                self._echo_buf = ''  # 异常情况下防止无限增长
+                self._echo_buf = ""  # 异常情况下防止无限增长
                 return
-            if '\n' not in self._echo_buf:
+            if "\n" not in self._echo_buf:
                 return
-            parts = self._echo_buf.split('\n')
+            parts = self._echo_buf.split("\n")
             self._echo_buf = parts[-1]  # 最后一段不完整，留到下一块
             for raw in parts[:-1]:
-                line = raw.rstrip('\r')
-                if '\r' in line:
+                line = raw.rstrip("\r")
+                if "\r" in line:
                     # 行内多次 \r 覆盖（Tab 补全会重写整行）：只保留最后一次覆盖后的内容
-                    line = line.rsplit('\r', 1)[-1]
+                    line = line.rsplit("\r", 1)[-1]
                 cmd = self._extract_echo_command(line)
                 if not cmd:
                     continue
@@ -413,7 +414,7 @@ class SSHSession:
                 self._echo_last_cmd = cmd
                 self._echo_last_time = now
                 try:
-                    asyncio.create_task(self._record_echo(cmd))
+                    self._echo_task = asyncio.create_task(self._record_echo(cmd))
                 except Exception:
                     pass
         except Exception:
@@ -425,6 +426,7 @@ class SSHSession:
         3 秒内同命令去重（前端/CLI 已即时记录过则不重复）"""
         try:
             from .history_db import record_echo_command
+
             await record_echo_command(cmd)
         except Exception:
             pass
@@ -437,7 +439,7 @@ class SSHSession:
         self._output_buffer.append(data)
         total = sum(len(s) for s in self._output_buffer)
         if total > 8000:
-            combined = ''.join(self._output_buffer)
+            combined = "".join(self._output_buffer)
             self._output_buffer = [combined[-8000:]]
             # 缓冲区压缩后同步更新清洗缓冲区
             self._clean_buffer = self._clean_ansi(combined)[-8000:]
@@ -459,7 +461,7 @@ class SSHSession:
                 self._drop_oldest(q, data)
 
     @classmethod
-    def _get_or_create_logger(cls, session_id: str, log_file: Optional[str] = None) -> logging.Logger:
+    def _get_or_create_logger(cls, session_id: str, log_file: str | None = None) -> logging.Logger:
         """获取或创建会话专属 logger（FileHandler 追加模式，会话关闭时关闭 handler）
 
         同一 session_id 同一文件（日志文件路径在 __init__ 已固定：恢复会话沿用旧文件）；
@@ -484,8 +486,8 @@ class SSHSession:
                     logger.removeHandler(h)
         # 避免重复添加 handler（logger 会被全局注册）
         if not logger.handlers:
-            handler = logging.FileHandler(path, mode='a', encoding='utf-8')
-            handler.setFormatter(logging.Formatter('%(message)s'))
+            handler = logging.FileHandler(path, mode="a", encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(message)s"))
             handler.setLevel(logging.INFO)
             logger.addHandler(handler)
             # 不向上传播到 root logger（避免重复输出到 server.log）
@@ -494,8 +496,8 @@ class SSHSession:
         return logger
 
     # 日志聚合写入：静默期（LOG_FLUSH_DELAY）或缓冲超阈值时一次性清洗写入
-    LOG_FLUSH_DELAY = 0.6   # 秒：无新输出多久后 flush
-    LOG_FLUSH_MAX = 65536   # 字符：缓冲超过该阈值立即 flush
+    LOG_FLUSH_DELAY = 0.6  # 秒：无新输出多久后 flush
+    LOG_FLUSH_MAX = 65536  # 字符：缓冲超过该阈值立即 flush
 
     def _schedule_log_flush(self):
         """有新输出进入日志缓冲时调度一次延迟 flush（已调度则不重复）"""
@@ -521,7 +523,7 @@ class SSHSession:
         if not self._log_buf:
             return
         text = self._log_buf
-        self._log_buf = ''
+        self._log_buf = ""
         try:
             # 只记录最终显示：清洗 ANSI + 行内 \r 覆盖合并（进度条等只留最后状态）
             text = self._clean_ansi_keep_cr(text)
@@ -539,13 +541,13 @@ class SSHSession:
         注意：先把 CRLF 归一化为 LF，避免把 \r\n 换行误判为进度条覆盖
         而丢掉整行内容。
         """
-        lines = text.replace('\r\n', '\n').split('\n')
+        lines = text.replace("\r\n", "\n").split("\n")
         out = []
         for line in lines:
-            if '\r' in line:
-                line = line.rsplit('\r', 1)[-1]
+            if "\r" in line:
+                line = line.rsplit("\r", 1)[-1]
             out.append(line)
-        return '\n'.join(out)
+        return "\n".join(out)
 
     def _feed_log(self, data: str):
         """输出进入日志聚合缓冲（替代逐块 _write_log，减少刷新回显碎片）"""
@@ -572,7 +574,7 @@ class SSHSession:
             # 计算读取起始位置（从文件末尾倒数）
             start_pos = max(0, file_size - offset - limit)
             read_size = min(limit, file_size - start_pos)
-            with open(self._log_file, 'r', encoding='utf-8', errors='replace') as f:
+            with open(self._log_file, encoding="utf-8", errors="replace") as f:
                 f.seek(start_pos)
                 content = f.read(read_size)
             # 清理 ANSI 并格式化
@@ -584,24 +586,24 @@ class SSHSession:
     def _format_history_logs(content: str) -> str:
         """格式化历史日志：清理ANSI、处理回车、压缩多余空格和空行"""
         # 1. 清理 ANSI 转义序列
-        text = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', content)
-        text = re.sub(r'\x1b\][\s\S]*?(\x07|\x1b\\)', '', text)
-        text = re.sub(r'\x1b[=><]', '', text)
+        text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", content)
+        text = re.sub(r"\x1b\][\s\S]*?(\x07|\x1b\\)", "", text)
+        text = re.sub(r"\x1b[=><]", "", text)
 
         # 2. 处理回车 \r：同一行中 \r 后面的内容覆盖前面的，只保留最后一段
-        lines = text.split('\n')
+        lines = text.split("\n")
         formatted_lines = []
         for line in lines:
-            if '\r' in line:
+            if "\r" in line:
                 # 只保留最后一个 \r 后面的内容
-                line = line.rsplit('\r', 1)[-1]
+                line = line.rsplit("\r", 1)[-1]
             # 去掉行尾空格
             line = line.rstrip()
             # 压缩行首多余空格（超过8个的压缩为4个，保留有意义的缩进）
             stripped = line.lstrip()
             leading_spaces = len(line) - len(stripped)
             if leading_spaces > 8:
-                line = '    ' + stripped
+                line = "    " + stripped
             formatted_lines.append(line)
 
         # 3. 合并连续空行（最多保留2个连续空行）
@@ -616,7 +618,7 @@ class SSHSession:
                 empty_count = 0
                 result.append(line)
 
-        return '\n'.join(result)
+        return "\n".join(result)
 
     async def start_output_reader(self):
         """启动后台协程持续读取 stdout 并广播（幂等，重复调用不会重复启动）
@@ -723,6 +725,7 @@ class SSHSession:
                 pass
             except Exception:
                 import traceback
+
                 print(f"[local-shell] reader 异常: {traceback.format_exc()}")
 
         self._local_reader_task = asyncio.create_task(_reader())
@@ -796,15 +799,15 @@ class SSHSession:
 
     def is_transport_alive(self) -> bool:
         """SSH 传输层是否存活（shell channel 可能已关闭：用户 exit 后连接尚未断开）"""
-        if self.is_local() or getattr(self, '_external', False):
+        if self.is_local() or getattr(self, "_external", False):
             return False
         if self.conn is None:
             return False
         try:
-            t = getattr(self.conn, '_transport', None)
+            t = getattr(self.conn, "_transport", None)
             if t is not None:
                 return not t.is_closing()
-            if hasattr(self.conn, 'is_closing'):
+            if hasattr(self.conn, "is_closing"):
                 return not self.conn.is_closing()
         except Exception:
             pass
@@ -839,44 +842,36 @@ class SSHSession:
     @staticmethod
     def _clean_ansi(text: str) -> str:
         """清理 ANSI 转义序列（颜色、光标移动、OSC 等）"""
-        text = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', text)
+        text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
         # OSC 序列支持两种结尾：\x07 (BEL) 和 \x1b\\ (ST)
-        text = re.sub(r'\x1b\][\s\S]*?(\x07|\x1b\\)', '', text)
-        text = re.sub(r'\x1b[=><]', '', text)
-        text = re.sub(r'\r', '', text)
+        text = re.sub(r"\x1b\][\s\S]*?(\x07|\x1b\\)", "", text)
+        text = re.sub(r"\x1b[=><]", "", text)
+        text = re.sub(r"\r", "", text)
         return text
 
     # 通用提示符模式列表（按优先级排序，匹配到任意一个即认为命令完成）
-    PROMPT_PATTERNS = [
-        r'[\w.-]+@[\w.-]+:.+[#$]\s*$',           # shell: root@host:~# 或 user@host:~$
-        r'^>>>\s*$',                                 # Python: >>>
-        r'^\.\.\.\s*$',                              # Python 续行: ...
-        r'^mysql>\s*$',                              # MySQL: mysql>
-        r'^sqlite>\s*$',                             # SQLite: sqlite>
-        r'^[\d.]+:\d+>\s*$',                        # Redis: 127.0.0.1:6379>
-        r'^>\s*$',                                   # Node.js: >
-        r'^\w+>\s*$',                                # 通用: xxx> (mongo, postgres 等)
+    PROMPT_PATTERNS: ClassVar[list[str]] = [
+        r"[\w.-]+@[\w.-]+:.+[#$]\s*$",  # shell: root@host:~# 或 user@host:~$
+        r"^>>>\s*$",  # Python: >>>
+        r"^\.\.\.\s*$",  # Python 续行: ...
+        r"^mysql>\s*$",  # MySQL: mysql>
+        r"^sqlite>\s*$",  # SQLite: sqlite>
+        r"^[\d.]+:\d+>\s*$",  # Redis: 127.0.0.1:6379>
+        r"^>\s*$",  # Node.js: >
+        r"^\w+>\s*$",  # 通用: xxx> (mongo, postgres 等)
     ]
 
     @classmethod
     def _match_any_prompt(cls, text: str) -> bool:
         """检查文本是否匹配任意一种已知提示符"""
-        for pattern in cls.PROMPT_PATTERNS:
-            if re.search(pattern, text, re.MULTILINE):
-                return True
-        return False
+        return any(re.search(pattern, text, re.MULTILINE) for pattern in cls.PROMPT_PATTERNS)
 
     @classmethod
     def _is_prompt_line(cls, line: str) -> bool:
         """检查单行是否是提示符行"""
-        for pattern in cls.PROMPT_PATTERNS:
-            if re.match(pattern, line.strip()):
-                return True
-        return False
+        return any(re.match(pattern, line.strip()) for pattern in cls.PROMPT_PATTERNS)
 
-    async def _inject_and_wait(self, command: str,
-                                idle_timeout: float = 0.5,
-                                total_timeout: int = 15) -> str:
+    async def _inject_and_wait(self, command: str, idle_timeout: float = 0.5, total_timeout: int = 15) -> str:
         """
         注入命令到交互式终端，等待提示符出现，返回清理后的输出
         - 使用独立的输出监听器捕获新输出，不受历史输出和缓冲区清理影响
@@ -889,7 +884,7 @@ class SSHSession:
         listener = self.add_output_listener()
         captured_parts = []
         # 增量清洗后的文本（避免每次新输出都全量拼接+清洗 captured_parts）
-        cleaned_recent = ''
+        cleaned_recent = ""
 
         try:
             # 发送命令
@@ -940,21 +935,25 @@ class SSHSession:
             self.remove_output_listener(listener)
 
         # 提取并清理输出
-        output = self._clean_ansi(''.join(captured_parts))
+        output = self._clean_ansi("".join(captured_parts))
 
         # 去掉第一行命令回显
-        lines = output.split('\n')
+        lines = output.split("\n")
         if lines and command.strip() in lines[0]:
             lines = lines[1:]
         # 去掉末尾的提示符行（多提示符匹配）
         while lines and self._is_prompt_line(lines[-1]):
             lines = lines[:-1]
-        return '\n'.join(lines).strip()
+        return "\n".join(lines).strip()
 
-    async def inject_and_capture(self, command: str, idle_timeout: float = 0.5,
-                                  total_timeout: int = 30,
-                                  prompt_pattern: str = r'[\w.-]+@[\w.-]+:.+[#$]\s*$',
-                                  capture_exit_code: bool = True) -> Tuple[int, str, str]:
+    async def inject_and_capture(
+        self,
+        command: str,
+        idle_timeout: float = 0.5,
+        total_timeout: int = 30,
+        prompt_pattern: str = r"[\w.-]+@[\w.-]+:.+[#$]\s*$",
+        capture_exit_code: bool = True,
+    ) -> tuple[int, str, str]:
         """
         注入命令到交互式终端，同时捕获输出返回
         - 命令和输出实时显示在 Web 终端中（通过广播机制）
@@ -973,9 +972,7 @@ class SSHSession:
                 await asyncio.sleep(1.5)
 
             # 1. 执行命令并捕获输出
-            output = await self._inject_and_wait(
-                command, idle_timeout=idle_timeout, total_timeout=total_timeout
-            )
+            output = await self._inject_and_wait(command, idle_timeout=idle_timeout, total_timeout=total_timeout)
 
             # 2. 自动获取退出码（仅在 shell 环境中）
             exit_code = None
@@ -983,10 +980,15 @@ class SSHSession:
                 try:
                     state = self.get_terminal_state()
                     # 仅在普通 shell 环境中获取退出码（Python/MySQL/vim 等不适用）
-                    if state.get('in_shell') and not state.get('in_python') and not state.get('in_mysql') and not state.get('in_pager'):
+                    if (
+                        state.get("in_shell")
+                        and not state.get("in_python")
+                        and not state.get("in_mysql")
+                        and not state.get("in_pager")
+                    ):
                         exit_output = await self._inject_and_wait("echo $?", total_timeout=10)
                         # 解析退出码（取最后一行的数字）
-                        for line in reversed(exit_output.split('\n')):
+                        for line in reversed(exit_output.split("\n")):
                             line = line.strip()
                             if line.isdigit():
                                 exit_code = int(line)
@@ -1009,20 +1011,20 @@ class SSHSession:
         # 直接使用增量清洗后的缓冲区（在 _broadcast_output 中维护）
         clean_text = self._clean_buffer
 
-        lines = clean_text.split('\n')
+        lines = clean_text.split("\n")
         # 去掉末尾空行（输出通常以 \n 结尾，split 后最后一个元素是空字符串）
-        while lines and lines[-1].strip() == '':
+        while lines and lines[-1].strip() == "":
             lines = lines[:-1]
         last_line = lines[-1] if lines else ""
         # 取最后两行做更准确的判断
-        last_two = '\n'.join(lines[-2:]) if len(lines) >= 2 else last_line
+        last_two = "\n".join(lines[-2:]) if len(lines) >= 2 else last_line
 
         state = {
             "last_line": last_line[-120:],
-            "in_python": bool(re.search(r'>>>\s*$', last_line)),
-            "in_mysql": bool(re.search(r'mysql>\s*$', last_line)),
-            "in_pager": bool(re.search(r':\s*$', last_line)),  # less/man 分页器
-            "in_shell": bool(re.search(r'[#$]\s*$', last_line)),
+            "in_python": bool(re.search(r">>>\s*$", last_line)),
+            "in_mysql": bool(re.search(r"mysql>\s*$", last_line)),
+            "in_pager": bool(re.search(r":\s*$", last_line)),  # less/man 分页器
+            "in_shell": bool(re.search(r"[#$]\s*$", last_line)),
             "has_prompt": False,
             "foreground_process": "unknown",
         }
@@ -1043,9 +1045,9 @@ class SSHSession:
         else:
             # 没有识别到提示符，可能在运行程序（如 vim、top、编译中）
             # 检查是否有常见的程序特征
-            if re.search(r'-- INSERT --|-- VISUAL --|:\w*$', last_two):
+            if re.search(r"-- INSERT --|-- VISUAL --|:\w*$", last_two):
                 state["foreground_process"] = "vim"
-            elif re.search(r'load average|Tasks:', last_two):
+            elif re.search(r"load average|Tasks:", last_two):
                 state["foreground_process"] = "top"
             else:
                 state["foreground_process"] = "running"
@@ -1069,7 +1071,7 @@ class SSHSession:
         # 通知等待中的 start_interactive_shell：已收到 resize 消息
         self._resize_event.set()
 
-    async def run_command(self, command: str, timeout: int = 30) -> Tuple[int, str, str]:
+    async def run_command(self, command: str, timeout: int = 30) -> tuple[int, str, str]:
         """
         非交互执行命令（供 AI / HTTP API 调用）
         返回 (退出码, stdout, stderr)
@@ -1109,6 +1111,7 @@ class SSHSession:
             self.last_active = time.time()
         try:
             from .history_db import record_command
+
             await record_command(command)
         except Exception:
             pass  # 历史记录失败不影响命令执行
@@ -1124,7 +1127,7 @@ class SSHSession:
             self._sftp = await self.conn.start_sftp_client()
         return self._sftp
 
-    async def list_directory(self, path: str = "/") -> List[dict]:
+    async def list_directory(self, path: str = "/") -> list[dict]:
         """列出目录内容
 
         优化：直接使用 readdir 返回的 item.attrs 字段，不再逐文件 stat。
@@ -1141,21 +1144,25 @@ class SSHSession:
         for item in items:
             try:
                 attrs = item.attrs
-                result.append({
-                    "name": item.filename,
-                    "type": "dir" if (attrs.type or 0) == 2 else "file",  # 2=directory
-                    "size": attrs.size or 0,
-                    "mtime": attrs.mtime or 0,
-                    "mode": oct(attrs.permissions) if attrs.permissions else "",
-                })
+                result.append(
+                    {
+                        "name": item.filename,
+                        "type": "dir" if (attrs.type or 0) == 2 else "file",  # 2=directory
+                        "size": attrs.size or 0,
+                        "mtime": attrs.mtime or 0,
+                        "mode": oct(attrs.permissions) if attrs.permissions else "",
+                    }
+                )
             except Exception:
-                result.append({
-                    "name": item.filename,
-                    "type": "unknown",
-                    "size": 0,
-                    "mtime": 0,
-                    "mode": "",
-                })
+                result.append(
+                    {
+                        "name": item.filename,
+                        "type": "unknown",
+                        "size": 0,
+                        "mtime": 0,
+                        "mode": "",
+                    }
+                )
         # 目录排在前面，然后按名称排序
         result.sort(key=lambda x: (x["type"] != "dir", x["name"]))
         return result
@@ -1170,7 +1177,7 @@ class SSHSession:
                 raise RuntimeError(f"文件过大 ({stat.size} bytes)，超过限制 {max_size} bytes")
         except Exception as e:
             raise RuntimeError(f"无法读取文件: {e}")
-        async with sftp.open(path, 'r') as f:
+        async with sftp.open(path, "r") as f:
             data = await f.read()
         if isinstance(data, bytes):
             return data.decode("utf-8", errors="replace")
@@ -1185,7 +1192,7 @@ class SSHSession:
                 raise RuntimeError(f"文件过大 ({stat.size} bytes)，超过限制 {max_size} bytes")
         except Exception as e:
             raise RuntimeError(f"无法读取文件: {e}")
-        async with sftp.open(path, 'rb') as f:
+        async with sftp.open(path, "rb") as f:
             data = await f.read()
         if isinstance(data, str):
             data = data.encode("utf-8")
@@ -1197,10 +1204,10 @@ class SSHSession:
         - content 为 bytes：二进制模式写入（不做解码，避免二进制文件损坏）"""
         sftp = await self.get_sftp()
         if isinstance(content, bytes):
-            async with sftp.open(path, 'wb') as f:
+            async with sftp.open(path, "wb") as f:
                 await f.write(content)
         else:
-            async with sftp.open(path, 'w') as f:
+            async with sftp.open(path, "w") as f:
                 await f.write(str(content))
         return True
 
@@ -1235,18 +1242,18 @@ class SSHSession:
             except Exception:
                 return False
         # 外部镜像会话（paramiko/asyncssh 劫持注册）：基于外部 client 的真实状态
-        if getattr(self, '_external', False):
-            client = getattr(self, '_paramiko_client', None)
+        if getattr(self, "_external", False):
+            client = getattr(self, "_paramiko_client", None)
             if client is not None:
                 try:
                     transport = client.get_transport()
                     return transport is not None and transport.is_active()
                 except Exception:
                     return False
-            conn = getattr(self, '_asyncssh_conn', None)
+            conn = getattr(self, "_asyncssh_conn", None)
             if conn is not None:
                 try:
-                    if hasattr(conn, 'is_closing'):
+                    if hasattr(conn, "is_closing"):
                         return not conn.is_closing()
                     return True
                 except Exception:
@@ -1256,15 +1263,15 @@ class SSHSession:
             return False
         try:
             # 检查连接对象是否还活着
-            if hasattr(self.conn, '_transport') and self.conn._transport:
+            if hasattr(self.conn, "_transport") and self.conn._transport:
                 if self.conn._transport.is_closing():
                     return False
             # 备用方法：检查 conn 是否有 is_closing 方法
-            elif hasattr(self.conn, 'is_closing') and self.conn.is_closing():
+            elif hasattr(self.conn, "is_closing") and self.conn.is_closing():
                 return False
             # 补充：检查 shell channel 是否仍可用（transport 可能短暂保持但 channel 已关）
             if self._has_shell and self.process is not None:
-                ch = getattr(self.process, '_channel', None)
+                ch = getattr(self.process, "_channel", None)
                 if ch is not None:
                     try:
                         if ch.is_closing():
@@ -1286,7 +1293,7 @@ class SSHSession:
             return False
         try:
             # 0. channel 层检查：channel 已关闭则 shell 不可用
-            ch = getattr(self.process, '_channel', None)
+            ch = getattr(self.process, "_channel", None)
             if ch is not None:
                 try:
                     if ch.is_closing():
@@ -1294,17 +1301,13 @@ class SSHSession:
                 except Exception:
                     pass
             # 1. 优先检查内部进程对象是否存在
-            if hasattr(self.process, '_process') and self.process._process is not None:
+            if hasattr(self.process, "_process") and self.process._process is not None:
                 # 检查内部进程是否已退出
-                if hasattr(self.process._process, 'returncode'):
-                    if self.process._process.returncode is not None:
-                        return False
-                return True
+                return not (
+                    hasattr(self.process._process, "returncode") and self.process._process.returncode is not None
+                )
             # 备用：检查 exit_status
-            if hasattr(self.process, 'exit_status'):
-                if self.process.exit_status is not None:
-                    return False
-            return True
+            return not (hasattr(self.process, "exit_status") and self.process.exit_status is not None)
         except Exception as e:
             print(f"[SSHSystem] is_shell_alive 检测异常: {e}")
             # 检测异常时默认认为活着，避免阻止输入
@@ -1348,7 +1351,9 @@ class SSHSession:
         cols = self._last_cols
         rows = self._last_rows
 
-        print(f"[SSHSystem] 开始重连 ({self._reconnect_count}/{self._max_reconnect}): {self.username}@{self.host}:{self.port}")
+        print(
+            f"[SSHSystem] 开始重连 ({self._reconnect_count}/{self._max_reconnect}): {self.username}@{self.host}:{self.port}"
+        )
 
         try:
             # 清理旧连接
@@ -1372,20 +1377,18 @@ class SSHSession:
             await asyncio.sleep(1)
 
             # 重新连接
-            await self.connect(
-                password=self._password,
-                private_key=self._private_key,
-                passphrase=self._passphrase
-            )
+            await self.connect(password=self._password, private_key=self._private_key, passphrase=self._passphrase)
 
             # 如果之前有 shell，重新启动
             if had_shell:
                 await self.start_interactive_shell(cols=cols, rows=rows)
                 # 广播重连成功消息
-                await self._broadcast_output(f"\r\n\x1b[33m[连接已恢复] 重连成功 ({self._reconnect_count}次)\x1b[0m\r\n")
+                await self._broadcast_output(
+                    f"\r\n\x1b[33m[连接已恢复] 重连成功 ({self._reconnect_count}次)\x1b[0m\r\n"
+                )
                 print(f"[SSHSystem] 重连成功，shell 已恢复: {self.session_id}")
             else:
-                await self._broadcast_output(f"\r\n\x1b[33m[连接已恢复] SSH 重连成功\x1b[0m\r\n")
+                await self._broadcast_output("\r\n\x1b[33m[连接已恢复] SSH 重连成功\x1b[0m\r\n")
                 print(f"[SSHSystem] 重连成功: {self.session_id}")
 
             self._reconnecting = False
@@ -1449,9 +1452,9 @@ class SessionManager:
     """
 
     def __init__(self):
-        self._sessions: Dict[str, SSHSession] = {}
+        self._sessions: dict[str, SSHSession] = {}
         # 反向索引：host_id -> set of session_id（加速 get_sessions_by_host / get_host_terminal_count）
-        self._host_index: Dict[str, set] = {}
+        self._host_index: dict[str, set] = {}
 
     def _add_to_index(self, session: SSHSession):
         """将会话加入反向索引"""
@@ -1467,8 +1470,7 @@ class SessionManager:
                 if not sids:
                     del self._host_index[session.host_id]
 
-    def create_session(self, host: str, port: int, username: str,
-                       host_id: str = "", terminal_name: str = "") -> str:
+    def create_session(self, host: str, port: int, username: str, host_id: str = "", terminal_name: str = "") -> str:
         """创建会话（仅分配 ID，尚未连接）"""
         session_id = str(uuid.uuid4())[:8]
         # 如果没指定终端名，自动生成
@@ -1479,8 +1481,9 @@ class SessionManager:
         self._add_to_index(session)
         return session_id
 
-    def create_session_with_id(self, session_id: str, host: str, port: int, username: str,
-                                host_id: str = "", terminal_name: str = "") -> str:
+    def create_session_with_id(
+        self, session_id: str, host: str, port: int, username: str, host_id: str = "", terminal_name: str = ""
+    ) -> str:
         """创建会话（复用指定的 session_id，用于恢复终端）"""
         if session_id in self._sessions:
             return session_id  # 已存在则不重复创建
@@ -1493,24 +1496,23 @@ class SessionManager:
 
     def _get_next_terminal_name(self, host_id: str) -> str:
         """获取某主机的下一个终端名称"""
-        existing = [s.terminal_name for s in self._sessions.values()
-                    if s.host_id == host_id and s.terminal_name]
+        existing = [s.terminal_name for s in self._sessions.values() if s.host_id == host_id and s.terminal_name]
         n = 1
         while f"终端{n}" in existing:
             n += 1
         return f"终端{n}"
 
-    def get_session(self, session_id: str) -> Optional[SSHSession]:
+    def get_session(self, session_id: str) -> SSHSession | None:
         return self._sessions.get(session_id)
 
-    def get_sessions_by_host(self, host_id: str) -> List[SSHSession]:
+    def get_sessions_by_host(self, host_id: str) -> list[SSHSession]:
         """获取某主机的所有会话（通过反向索引 O(1) 查找）"""
         sids = self._host_index.get(host_id)
         if not sids:
             return []
         return [self._sessions[sid] for sid in sids if sid in self._sessions]
 
-    def get_active_terminals(self) -> List[SSHSession]:
+    def get_active_terminals(self) -> list[SSHSession]:
         """获取所有有交互式终端的活跃会话
         - 外部镜像会话（paramiko/asyncssh 劫持）：保持原有判断（is_connected + has_shell）
         - 内部会话：额外验证 shell 真实存活（channel/进程未关闭），避免前端恢复已死的会话"""
@@ -1518,7 +1520,7 @@ class SessionManager:
         for s in self._sessions.values():
             if not (s.is_connected and s.has_shell):
                 continue
-            if getattr(s, '_external', False) or s.is_shell_alive():
+            if getattr(s, "_external", False) or s.is_shell_alive():
                 result.append(s)
         return result
 
@@ -1555,7 +1557,7 @@ class SessionManager:
         ]
 
     # 全局连接监控协程（单例，避免每个 WebSocket 连接创建一个监控任务）
-    _monitor_task: Optional[asyncio.Task] = None
+    _monitor_task: asyncio.Task | None = None
 
     def start_global_monitor(self):
         """启动全局连接监控协程（只启动一次，检查所有会话）
@@ -1575,6 +1577,7 @@ class SessionManager:
         - SSH 会话 shell 已退出（用户 exit/logout，传输层仍在）→ 自动切换本机 shell
         - SSH 传输层断开（网络异常等）→ 自动重连
         """
+
         async def _try_reconnect(session: SSHSession):
             print(f"[Monitor] 检测到 SSH 连接断开，尝试自动重连: {session.session_id}")
             try:
@@ -1591,7 +1594,7 @@ class SessionManager:
                 for session in list(self._sessions.values()):
                     try:
                         shell_dead = session._has_shell and not session.is_shell_alive()
-                        if getattr(session, '_external', False):
+                        if getattr(session, "_external", False):
                             # 外部镜像会话（paramiko/asyncssh 劫持）：保持原有行为
                             # （断开时重连；shell 异常仅提示，不做本机切换）
                             if not session.is_alive():
@@ -1649,9 +1652,9 @@ class SessionManager:
         """
         now = time.time()
         to_remove = [
-            sid for sid, s in self._sessions.items()
-            if not getattr(s, '_external', False)
-            and now - s.last_active > idle_timeout
+            sid
+            for sid, s in self._sessions.items()
+            if not getattr(s, "_external", False) and now - s.last_active > idle_timeout
         ]
         for sid in to_remove:
             await self.remove_session(sid)

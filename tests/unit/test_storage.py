@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """storage 单元测试：主机/分组/快捷指令 CRUD、原子写（回归 Bug4）、排序、复制"""
+
 import json
 from pathlib import Path
 
@@ -12,6 +12,7 @@ def make_storage(tmp_path):
 
 
 # ---------- 主机 CRUD ----------
+
 
 def test_host_crud(tmp_path):
     s = make_storage(tmp_path)
@@ -61,6 +62,7 @@ def test_group_duplicate_copies_hosts(tmp_path):
 
 # ---------- 快捷指令 ----------
 
+
 def test_quick_command_crud(tmp_path):
     s = make_storage(tmp_path)
     default_count = len(s.list_quick_commands())  # 预置默认指令（如系统信息等）
@@ -88,6 +90,7 @@ def test_quick_command_has_no_param_hint(tmp_path):
 
 
 # ---------- 原子写（回归 Bug4） ----------
+
 
 def test_save_is_atomic_no_tmp_residue(tmp_path):
     s = make_storage(tmp_path)

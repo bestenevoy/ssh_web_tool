@@ -4,6 +4,7 @@ SSH Web Tool 嵌入式使用示例
 展示如何在其他 Python 项目中导入并使用这个库。
 """
 
+
 # ============================================================
 # 示例1：基本使用 - 创建连接、执行命令
 # ============================================================
@@ -14,12 +15,7 @@ def example_basic():
     tool = SSHWebTool(web_ui=False)
 
     # 连接到远程主机
-    session_id = tool.connect(
-        host="192.168.1.100",
-        username="root",
-        password="your_password",
-        port=22
-    )
+    session_id = tool.connect(host="192.168.1.100", username="root", password="your_password", port=22)
     print(f"已连接，会话ID: {session_id}")
 
     # 执行命令（注入到交互式终端，结果会显示在终端中）
@@ -45,8 +41,9 @@ def example_basic():
 # 示例2：启动 Web UI - 在浏览器中观察和操作
 # ============================================================
 def example_with_web_ui():
-    from ssh_web_tool import SSHWebTool
     import time
+
+    from ssh_web_tool import SSHWebTool
 
     # 创建管理器并启动 Web UI
     tool = SSHWebTool(web_ui=True, host="127.0.0.1", port=8765)
@@ -95,7 +92,7 @@ def example_patch_paramiko():
     client.connect("192.168.1.100", username="root", password="pass")
 
     # 执行命令（使用 paramiko 原生方式）
-    stdin, stdout, stderr = client.exec_command("ls -la")
+    _stdin, stdout, _stderr = client.exec_command("ls -la")
     print(stdout.read().decode())
 
     # 会话列表中可以看到这个镜像会话
@@ -156,12 +153,7 @@ def example_saved_hosts():
 
     # 保存主机配置（持久化到 data.json）
     tool.save_host(
-        name="生产服务器",
-        host="192.168.1.100",
-        username="root",
-        password="pass",
-        group="生产环境",
-        device_type="linux"
+        name="生产服务器", host="192.168.1.100", username="root", password="pass", group="生产环境", device_type="linux"
     )
 
     # 列出所有已保存主机
@@ -185,12 +177,7 @@ def example_quick_connect():
     from ssh_web_tool import quick_connect
 
     # 一行代码连接并启动 Web UI
-    tool, session_id = quick_connect(
-        host="192.168.1.100",
-        username="root",
-        password="pass",
-        web_ui=True
-    )
+    tool, session_id = quick_connect(host="192.168.1.100", username="root", password="pass", web_ui=True)
 
     result = tool.run_command(session_id, "uname -a")
     print(result["output"])

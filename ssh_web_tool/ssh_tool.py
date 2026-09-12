@@ -24,9 +24,9 @@ SSH Web Tool - 可嵌入 Python 库
 import asyncio
 import threading
 import time
-from typing import Optional, Dict, List, Any
+from typing import Any
 
-from .sessions import session_manager, SSHSession
+from .sessions import SSHSession, session_manager
 from .storage import storage
 
 
@@ -38,7 +38,7 @@ class SSHWebTool:
     所有连接由本实例统一维护，关闭 Python 进程前连接保持活跃。
     """
 
-    def __init__(self, web_ui: bool = False, host: Optional[str] = None, port: Optional[int] = None):
+    def __init__(self, web_ui: bool = False, host: str | None = None, port: int | None = None):
         """
         初始化管理器
 
@@ -75,7 +75,16 @@ class SSHWebTool:
 
     # ============ 连接管理 ============
 
-    def connect(self, host: str, username: str, password: str = "", port: int = 22, private_key: str = "", terminal_name: str = "", host_id: str = "") -> str:
+    def connect(
+        self,
+        host: str,
+        username: str,
+        password: str = "",
+        port: int = 22,
+        private_key: str = "",
+        terminal_name: str = "",
+        host_id: str = "",
+    ) -> str:
         """
         创建 SSH 连接并启动交互式终端
 
@@ -104,7 +113,9 @@ class SSHWebTool:
         self._run_async(_connect())
         return session_id
 
-    def connect_without_shell(self, host: str, username: str, password: str = "", port: int = 22, private_key: str = "") -> str:
+    def connect_without_shell(
+        self, host: str, username: str, password: str = "", port: int = 22, private_key: str = ""
+    ) -> str:
         """
         创建 SSH 连接但不启动交互式终端（仅用于执行命令）
 
@@ -123,11 +134,11 @@ class SSHWebTool:
         self._run_async(_connect())
         return session_id
 
-    def get_session(self, session_id: str) -> Optional[SSHSession]:
+    def get_session(self, session_id: str) -> SSHSession | None:
         """获取会话对象"""
         return session_manager.get_session(session_id)
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
+    def list_sessions(self) -> list[dict[str, Any]]:
         """列出所有会话"""
         return session_manager.list_sessions()
 
@@ -142,7 +153,7 @@ class SSHWebTool:
 
     # ============ 命令执行 ============
 
-    def run_command(self, session_id: str, command: str, timeout: int = 30, inject: bool = True) -> Dict[str, Any]:
+    def run_command(self, session_id: str, command: str, timeout: int = 30, inject: bool = True) -> dict[str, Any]:
         """
         在会话中执行命令
 
@@ -187,7 +198,7 @@ class SSHWebTool:
 
             self._run_async(_send())
 
-    def get_terminal_state(self, session_id: str) -> Dict[str, Any]:
+    def get_terminal_state(self, session_id: str) -> dict[str, Any]:
         """
         获取终端当前状态（提示符类型、是否忙碌等）
 
@@ -201,7 +212,7 @@ class SSHWebTool:
 
     # ============ Web UI ============
 
-    def start_web_ui(self, host: Optional[str] = None, port: Optional[int] = None):
+    def start_web_ui(self, host: str | None = None, port: int | None = None):
         """
         在后台线程启动 Web UI 服务器
 
@@ -226,6 +237,7 @@ class SSHWebTool:
 
         def _run_server():
             import uvicorn
+
             from main import app
 
             config = uvicorn.Config(app, host=host, port=port, log_level="warning", workers=1)
@@ -248,7 +260,16 @@ class SSHWebTool:
 
     # ============ 主机配置（持久化） ============
 
-    def save_host(self, name: str, host: str, username: str, password: str = "", port: int = 22, group: str = "", device_type: str = "linux") -> dict:
+    def save_host(
+        self,
+        name: str,
+        host: str,
+        username: str,
+        password: str = "",
+        port: int = 22,
+        group: str = "",
+        device_type: str = "linux",
+    ) -> dict:
         """保存主机配置到 data.json（重启不丢失）"""
         return storage.add_host(
             {
@@ -262,7 +283,7 @@ class SSHWebTool:
             }
         )
 
-    def list_hosts(self) -> List[dict]:
+    def list_hosts(self) -> list[dict]:
         """列出所有已保存的主机"""
         return storage.list_hosts()
 
@@ -271,7 +292,14 @@ class SSHWebTool:
         host = storage.get_host(host_id)
         if not host:
             raise ValueError(f"主机不存在: {host_id}")
-        return self.connect(host=host["host"], username=host["username"], password=host.get("password", ""), port=host.get("port", 22), terminal_name=terminal_name, host_id=host_id)
+        return self.connect(
+            host=host["host"],
+            username=host["username"],
+            password=host.get("password", ""),
+            port=host.get("port", 22),
+            terminal_name=terminal_name,
+            host_id=host_id,
+        )
 
     # ============ 清理 ============
 
@@ -293,7 +321,7 @@ _original_asyncssh_connect = None
 _patched = False
 
 
-def patch_paramiko(manager: Optional[SSHWebTool] = None):
+def patch_paramiko(manager: SSHWebTool | None = None):
     """
     劫持 paramiko.SSHClient.connect，让已有代码的 SSH 连接自动注册到管理器
 
@@ -325,7 +353,21 @@ def patch_paramiko(manager: Optional[SSHWebTool] = None):
     if _original_paramiko_connect is None:
         _original_paramiko_connect = paramiko.SSHClient.connect
 
-    def patched_connect(self, hostname, port=22, username=None, password=None, pkey=None, key_filename=None, timeout=None, allow_agent=True, look_for_keys=True, compress=False, sock=None, **kwargs):
+    def patched_connect(
+        self,
+        hostname,
+        port=22,
+        username=None,
+        password=None,
+        pkey=None,
+        key_filename=None,
+        timeout=None,
+        allow_agent=True,
+        look_for_keys=True,
+        compress=False,
+        sock=None,
+        **kwargs,
+    ):
         # 执行原有连接（失败会正常向上抛异常，不会注册镜像会话）
         result = _original_paramiko_connect(
             self,
@@ -350,14 +392,14 @@ def patch_paramiko(manager: Optional[SSHWebTool] = None):
                 hostname, port, username or "", terminal_name=f"paramiko-{hostname}"
             )
             session = session_manager.get_session(session_id)
-            session._external = True       # 外部镜像会话：is_alive 基于真实 client，不参与空闲清理
+            session._external = True  # 外部镜像会话：is_alive 基于真实 client，不参与空闲清理
             session._paramiko_client = self
-            session._connected = True      # is_connected 是只读 property，直接设置内部字段
+            session._connected = True  # is_connected 是只读 property，直接设置内部字段
             session.last_active = time.time()
             print(f"[SSHWebTool] 已注册 paramiko 连接: {username}@{hostname}:{port} (session={session_id})")
 
             # hook client.close：连接关闭时同步移除镜像会话，避免残留"已连接"僵尸会话
-            if not getattr(self, '_ssh_web_tool_close_hooked', False):
+            if not getattr(self, "_ssh_web_tool_close_hooked", False):
                 original_close = self.close
 
                 def patched_close():
@@ -387,7 +429,7 @@ def patch_paramiko(manager: Optional[SSHWebTool] = None):
     return True
 
 
-def patch_asyncssh(manager: Optional[SSHWebTool] = None):
+def patch_asyncssh(manager: SSHWebTool | None = None):
     """
     劫持 asyncssh.connect，让已有代码的 SSH 连接自动注册到管理器
 
@@ -412,34 +454,47 @@ def patch_asyncssh(manager: Optional[SSHWebTool] = None):
     if _original_asyncssh_connect is None:
         _original_asyncssh_connect = asyncssh.connect
 
-    async def patched_connect(host, port=22, username=None, password=None, client_keys=None, known_hosts=None, **kwargs):
+    async def patched_connect(
+        host, port=22, username=None, password=None, client_keys=None, known_hosts=None, **kwargs
+    ):
         # 工具自身连接（SSHSession.connect 内部调用）：直接放行，不注册镜像
         from .sessions import _patch_guard
 
-        if getattr(_patch_guard, 'active', False):
+        if getattr(_patch_guard, "active", False):
             return await _original_asyncssh_connect(
-                host, port=port, username=username, password=password,
-                client_keys=client_keys, known_hosts=known_hosts, **kwargs
+                host,
+                port=port,
+                username=username,
+                password=password,
+                client_keys=client_keys,
+                known_hosts=known_hosts,
+                **kwargs,
             )
 
         # 执行原有连接
-        conn = await _original_asyncssh_connect(host, port=port, username=username, password=password, client_keys=client_keys, known_hosts=known_hosts, **kwargs)
+        conn = await _original_asyncssh_connect(
+            host,
+            port=port,
+            username=username,
+            password=password,
+            client_keys=client_keys,
+            known_hosts=known_hosts,
+            **kwargs,
+        )
 
         # 在管理器中注册镜像会话
         session_id = None
         try:
-            session_id = session_manager.create_session(
-                host, port, username or "", terminal_name=f"asyncssh-{host}"
-            )
+            session_id = session_manager.create_session(host, port, username or "", terminal_name=f"asyncssh-{host}")
             session = session_manager.get_session(session_id)
-            session._external = True       # 外部镜像会话：is_alive 基于真实 conn，不参与空闲清理
+            session._external = True  # 外部镜像会话：is_alive 基于真实 conn，不参与空闲清理
             session._asyncssh_conn = conn
-            session._connected = True      # is_connected 是只读 property，直接设置内部字段
+            session._connected = True  # is_connected 是只读 property，直接设置内部字段
             session.last_active = time.time()
             print(f"[SSHWebTool] 已注册 asyncssh 连接: {username}@{host}:{port} (session={session_id})")
 
             # hook conn.close：连接关闭时同步移除镜像会话（尽力而为，失败不影响连接）
-            if not getattr(conn, '_ssh_web_tool_close_hooked', False):
+            if not getattr(conn, "_ssh_web_tool_close_hooked", False):
                 original_close = conn.close
 
                 def patched_close():
@@ -468,7 +523,7 @@ def patch_asyncssh(manager: Optional[SSHWebTool] = None):
     return True
 
 
-def patch_all(manager: Optional[SSHWebTool] = None) -> Optional[SSHWebTool]:
+def patch_all(manager: SSHWebTool | None = None) -> SSHWebTool | None:
     """
     一次调用，劫持当前进程内所有主流 SSH 连接入口：
     - paramiko（SSHClient.connect）—— fabric / scp / pssh 等基于 paramiko 的库自动覆盖

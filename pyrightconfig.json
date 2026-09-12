@@ -1,0 +1,42 @@
+{
+  "include": [
+    "main.py",
+    "ssh_client.py",
+    "ssh_web_tool/",
+    "tests/",
+    "example_embed.py"
+  ],
+  "exclude": [
+    "packages/ssh-monkeypatch",
+    "ssh_web_tool.egg-info",
+    "build",
+    "dist",
+    ".venv",
+    "frontend/node_modules",
+    "**/__pycache__"
+  ],
+  "pythonVersion": "3.10",
+  "pythonPlatform": "All",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "reportGeneralTypeIssues": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportOptionalCall": "warning",
+  "reportOptionalIterable": "warning",
+  "reportOptionalContextManager": "warning",
+  "reportOptionalOperand": "warning",
+  "reportTypedDictNotRequiredAccess": "none",
+  "reportUnboundVariable": "error",
+  "reportUndefinedVariable": "error",
+  "reportInvalidStringEscapeSequence": "error",
+  "reportUnusedImport": "none",
+  "reportUnusedVariable": "none",
+  "reportDuplicateImport": "warning",
+  "reportIncompatibleMethodOverride": "none",
+  "reportIncompatibleVariableOverride": "none",
+  "ignore": [
+    "packages/ssh-monkeypatch/**"
+  ]
+}

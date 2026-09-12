@@ -3,17 +3,17 @@
 - 主机配置、分组、快速指令、主机类型
 - 用 JSON 文件存储，重启不丢失
 """
+
 import json
 import os
-import sys
 import time
 import uuid
-from typing import Dict, List, Optional
 
 
 def get_data_dir() -> str:
     """获取数据文件目录（统一在 ~/.ai4one/wstool）"""
     from .config import get_app_dir
+
     return str(get_app_dir())
 
 
@@ -34,15 +34,27 @@ DEFAULT_QUICK_COMMANDS = [
     {"id": "qc_2", "name": "磁盘使用", "command": "df -h", "type": "direct", "pre_ops": []},
     {"id": "qc_3", "name": "内存使用", "command": "free -h", "type": "direct", "pre_ops": []},
     {"id": "qc_4", "name": "查看进程", "command": "ps aux --sort=-%mem | head -10", "type": "direct", "pre_ops": []},
-    {"id": "qc_5", "name": "查看监听端口", "command": "netstat -tlnp 2>/dev/null || ss -tlnp", "type": "direct", "pre_ops": []},
-    {"id": "qc_6", "name": "查看日志(最近20行)", "command": "tail -n 20 /var/log/messages 2>/dev/null || journalctl -n 20 --no-pager", "type": "direct", "pre_ops": []},
+    {
+        "id": "qc_5",
+        "name": "查看监听端口",
+        "command": "netstat -tlnp 2>/dev/null || ss -tlnp",
+        "type": "direct",
+        "pre_ops": [],
+    },
+    {
+        "id": "qc_6",
+        "name": "查看日志(最近20行)",
+        "command": "tail -n 20 /var/log/messages 2>/dev/null || journalctl -n 20 --no-pager",
+        "type": "direct",
+        "pre_ops": [],
+    },
 ]
 
 
 class Storage:
     """JSON 文件持久化存储"""
 
-    def __init__(self, data_file: str = None):
+    def __init__(self, data_file: str | None = None):
         if data_file is None:
             data_file = os.path.join(get_data_dir(), "data.json")
         self.data_file = data_file
@@ -52,7 +64,7 @@ class Storage:
         """加载数据文件"""
         if os.path.exists(self.data_file):
             try:
-                with open(self.data_file, "r", encoding="utf-8") as f:
+                with open(self.data_file, encoding="utf-8") as f:
                     data = json.load(f)
                 # 确保所有字段都存在
                 data.setdefault("hosts", [])
@@ -97,11 +109,11 @@ class Storage:
 
     # ============ 主机管理 ============
 
-    def list_hosts(self) -> List[dict]:
+    def list_hosts(self) -> list[dict]:
         """获取所有主机"""
         return self._data.get("hosts", [])
 
-    def get_host(self, host_id: str) -> Optional[dict]:
+    def get_host(self, host_id: str) -> dict | None:
         """根据ID获取主机"""
         for h in self._data.get("hosts", []):
             if h.get("id") == host_id:
@@ -147,17 +159,34 @@ class Storage:
         self._save()
         return host
 
-    def update_host(self, host_id: str, host_data: dict) -> Optional[dict]:
+    def update_host(self, host_id: str, host_data: dict) -> dict | None:
         """更新主机"""
-        for i, h in enumerate(self._data["hosts"]):
+        for _i, h in enumerate(self._data["hosts"]):
             if h["id"] == host_id:
-                for key in ["name", "host", "port", "username", "password",
-                            "private_key", "passphrase", "type", "group",
-                            "device_type", "mgmt_port", "mgmt_username", "mgmt_password",
-                            "pw_username_selector", "pw_password_selector", "pw_login_btn_selector",
-                            "pw_old_password_selector", "pw_new_password_selector",
-                            "pw_confirm_password_selector", "pw_confirm_btn_selector",
-                            "pw_success_selector", "pw_headless"]:
+                for key in [
+                    "name",
+                    "host",
+                    "port",
+                    "username",
+                    "password",
+                    "private_key",
+                    "passphrase",
+                    "type",
+                    "group",
+                    "device_type",
+                    "mgmt_port",
+                    "mgmt_username",
+                    "mgmt_password",
+                    "pw_username_selector",
+                    "pw_password_selector",
+                    "pw_login_btn_selector",
+                    "pw_old_password_selector",
+                    "pw_new_password_selector",
+                    "pw_confirm_password_selector",
+                    "pw_confirm_btn_selector",
+                    "pw_success_selector",
+                    "pw_headless",
+                ]:
                     if key in host_data:
                         h[key] = host_data[key]
                 h["updated_at"] = time.time()
@@ -177,12 +206,13 @@ class Storage:
             return True
         return False
 
-    def duplicate_host(self, host_id: str) -> Optional[dict]:
+    def duplicate_host(self, host_id: str) -> dict | None:
         """复制主机（生成新 ID，名称加"副本"后缀）"""
         original = self.get_host(host_id)
         if not original:
             return None
         import copy
+
         new_host = copy.deepcopy(original)
         new_host["id"] = str(uuid.uuid4())[:8]
         new_host["name"] = f"{original.get('name', original['host'])} 副本"
@@ -194,11 +224,11 @@ class Storage:
 
     # ============ 分组管理 ============
 
-    def list_groups(self) -> List[str]:
+    def list_groups(self) -> list[str]:
         """获取所有分组"""
         return self._data.get("groups", [])
 
-    def reorder_groups(self, names: List[str]) -> bool:
+    def reorder_groups(self, names: list[str]) -> bool:
         """按给定顺序重排分组（忽略不存在的名称，追加未列出的分组）"""
         existing = self._data.get("groups", [])
         seen = set()
@@ -214,7 +244,7 @@ class Storage:
         self._save()
         return True
 
-    def reorder_hosts(self, ids: List[str]) -> bool:
+    def reorder_hosts(self, ids: list[str]) -> bool:
         """按给定顺序重排主机（忽略不存在的 ID，追加未列出的主机）"""
         existing = self._data.get("hosts", [])
         by_id = {h["id"]: h for h in existing}
@@ -264,7 +294,7 @@ class Storage:
         self._save()
         return True
 
-    def duplicate_group(self, name: str) -> Optional[dict]:
+    def duplicate_group(self, name: str) -> dict | None:
         """复制分组：复制分组名（加"副本"后缀），并把组内主机一并复制
 
         Returns:
@@ -302,7 +332,7 @@ class Storage:
 
     # ============ 快速指令管理 ============
 
-    def list_quick_commands(self) -> List[dict]:
+    def list_quick_commands(self) -> list[dict]:
         """获取所有快速指令（兼容旧数据：自动补全 type/pre_ops 字段）"""
         commands = self._data.get("quick_commands", [])
         for qc in commands:
@@ -310,8 +340,9 @@ class Storage:
             qc.setdefault("pre_ops", [])
         return commands
 
-    def add_quick_command(self, name: str, command: str, description: str = "",
-                          cmd_type: str = "direct", pre_ops: Optional[list] = None) -> dict:
+    def add_quick_command(
+        self, name: str, command: str, description: str = "", cmd_type: str = "direct", pre_ops: list | None = None
+    ) -> dict:
         """新增快速指令
 
         Args:
@@ -330,8 +361,15 @@ class Storage:
         self._save()
         return qc
 
-    def update_quick_command(self, qc_id: str, name: str, command: str, description: str = "",
-                             cmd_type: str = "direct", pre_ops: Optional[list] = None) -> Optional[dict]:
+    def update_quick_command(
+        self,
+        qc_id: str,
+        name: str,
+        command: str,
+        description: str = "",
+        cmd_type: str = "direct",
+        pre_ops: list | None = None,
+    ) -> dict | None:
         """更新快速指令"""
         for qc in self._data["quick_commands"]:
             if qc["id"] == qc_id:
@@ -353,7 +391,7 @@ class Storage:
             return True
         return False
 
-    def reorder_quick_commands(self, ids: List[str]) -> bool:
+    def reorder_quick_commands(self, ids: list[str]) -> bool:
         """按给定 id 顺序重排快捷指令（拖拽后保存顺序）"""
         by_id = {q["id"]: q for q in self._data["quick_commands"]}
         ordered = [by_id[i] for i in ids if i in by_id]
@@ -366,11 +404,11 @@ class Storage:
 
     # ============ 主机类型管理 ============
 
-    def list_host_types(self) -> List[dict]:
+    def list_host_types(self) -> list[dict]:
         """获取所有主机类型"""
         return self._data.get("host_types", [])
 
-    def add_host_type(self, key: str, label: str, color: str) -> Optional[dict]:
+    def add_host_type(self, key: str, label: str, color: str) -> dict | None:
         """新增主机类型"""
         if not key:
             return None
@@ -401,11 +439,11 @@ class Storage:
 
     # ============ 持久化终端管理（会话ID复用） ============
 
-    def list_saved_terminals(self) -> List[dict]:
+    def list_saved_terminals(self) -> list[dict]:
         """获取所有持久化的终端"""
         return self._data.get("saved_terminals", [])
 
-    def get_saved_terminal(self, session_id: str) -> Optional[dict]:
+    def get_saved_terminal(self, session_id: str) -> dict | None:
         """根据会话ID获取持久化终端"""
         for t in self._data.get("saved_terminals", []):
             if t.get("session_id") == session_id:
@@ -415,7 +453,7 @@ class Storage:
     def save_terminal(self, session_id: str, host_id: str, terminal_name: str = "") -> dict:
         """保存终端信息（会话ID复用，重启后可恢复）"""
         # 检查是否已存在
-        for i, t in enumerate(self._data.get("saved_terminals", [])):
+        for _i, t in enumerate(self._data.get("saved_terminals", [])):
             if t.get("session_id") == session_id:
                 t["host_id"] = host_id
                 t["terminal_name"] = terminal_name or t.get("terminal_name", "")
@@ -437,7 +475,9 @@ class Storage:
     def delete_saved_terminal(self, session_id: str) -> bool:
         """删除持久化终端"""
         original_len = len(self._data.get("saved_terminals", []))
-        self._data["saved_terminals"] = [t for t in self._data.get("saved_terminals", []) if t.get("session_id") != session_id]
+        self._data["saved_terminals"] = [
+            t for t in self._data.get("saved_terminals", []) if t.get("session_id") != session_id
+        ]
         if len(self._data["saved_terminals"]) < original_len:
             self._save()
             return True
@@ -452,11 +492,13 @@ class Storage:
         results = []
         for cmd, info in history.items():
             if not kw or kw in cmd.lower():
-                results.append({
-                    "command": cmd,
-                    "count": info.get("count", 1),
-                    "last_used": info.get("last_used", 0),
-                })
+                results.append(
+                    {
+                        "command": cmd,
+                        "count": info.get("count", 1),
+                        "last_used": info.get("last_used", 0),
+                    }
+                )
         results.sort(key=lambda x: (-x["count"], -x["last_used"]))
         return results[:limit]
 

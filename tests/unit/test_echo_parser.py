@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """命令回显解析测试：历史记录正确性的核心逻辑
 
 覆盖：多提示符循环剥离（阿里云 readline 重绘）、宽松 PS1 兜底、
 Tab 补全覆盖行、空命令、普通输出行不误记。
 """
+
 import pytest
 
 from ssh_web_tool.sessions import SSHSession
@@ -12,6 +12,7 @@ extract = SSHSession._extract_echo_command
 
 
 # ---------- 已知提示符循环剥离 ----------
+
 
 def test_single_prompt():
     assert extract("root@host:~# ls -la") == "ls -la"
@@ -33,6 +34,7 @@ def test_prompt_only_empty_command():
 
 # ---------- 宽松 PS1 兜底（自定义提示符） ----------
 
+
 def test_custom_ps1_fallback():
     assert extract("[user@host ~]$ git status") == "git status"
     assert extract("root@host# reboot") == "reboot"
@@ -44,6 +46,7 @@ def test_custom_ps1_with_path():
 
 # ---------- 普通输出行不应误记 ----------
 
+
 def test_plain_output_line_not_recorded():
     assert extract("total 48") == ""
     assert extract("drwxr-xr-x 2 root root 4096") == ""
@@ -51,6 +54,7 @@ def test_plain_output_line_not_recorded():
 
 
 # ---------- 特殊命令 ----------
+
 
 def test_python_continuation_not_recorded():
     assert extract("...") == ""
@@ -67,6 +71,7 @@ def test_blank_line():
 
 
 # ---------- 行内 \r 覆盖（Tab 补全重写整行） ----------
+
 
 @pytest.mark.asyncio
 async def test_parse_echo_line_tab_completion_keeps_final():

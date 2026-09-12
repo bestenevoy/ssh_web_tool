@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 """自动更新模块单元测试：版本比较 / Release 解析 / 下载 / 更新脚本生成
 
 网络请求全部 mock（不依赖真实 GitHub），保证测试可重复。
 """
+
 import json
 import sys
 from pathlib import Path
@@ -12,8 +12,8 @@ import pytest
 
 from ssh_web_tool import updater
 
-
 # ---------- 版本比较 ----------
+
 
 def test_parse_version():
     assert updater.parse_version("v0.1.28") == (0, 1, 28)
@@ -32,14 +32,18 @@ def test_is_newer_semver():
 
 # ---------- Release 解析 ----------
 
+
 def _fake_response(payload: dict):
     class FakeResp:
         def read(self):
             return json.dumps(payload).encode()
+
         def __enter__(self):
             return self
+
         def __exit__(self, *a):
             return False
+
     return FakeResp()
 
 
@@ -74,6 +78,7 @@ def test_get_latest_release_network_error_returns_none():
 
 # ---------- 下载 ----------
 
+
 def test_download_exe_success(tmp_path):
     dest = tmp_path / "new.exe"
     chunks = [b"part1", b"part2"]
@@ -81,8 +86,10 @@ def test_download_exe_success(tmp_path):
     class FakeResp:
         def read(self, n):
             return chunks.pop(0) if chunks else b""
+
         def __enter__(self):
             return self
+
         def __exit__(self, *a):
             return False
 
@@ -98,8 +105,10 @@ def test_download_exe_empty_fails(tmp_path):
     class FakeResp:
         def read(self, n):
             return b""
+
         def __enter__(self):
             return self
+
         def __exit__(self, *a):
             return False
 
@@ -118,11 +127,12 @@ def test_download_exe_error_cleans_partial(tmp_path):
 
 # ---------- 更新脚本 ----------
 
+
 def test_build_update_script(tmp_path):
     script = updater.build_update_script(tmp_path, "SSHWebTool.exe", "SSHWebTool_new.exe", pid=12345)
     assert script == tmp_path / "_wstool_update.bat"
     content = script.read_text(encoding="ascii")
-    assert 'taskkill /f /pid 12345' in content  # 指定 PID 兜底强杀
+    assert "taskkill /f /pid 12345" in content  # 指定 PID 兜底强杀
     assert 'del /f /q "%~dp0SSHWebTool.exe"' in content
     assert 'move /y "%~dp0SSHWebTool_new.exe" "%~dp0SSHWebTool.exe"' in content
     assert 'start "" "%~dp0SSHWebTool.exe"' in content
@@ -141,6 +151,7 @@ def test_build_update_script_no_pid(tmp_path):
 
 
 # ---------- 网络重试与下载校验 ----------
+
 
 def test_get_latest_release_retries_on_network_error():
     """网络异常自动重试：前 2 次失败，第 3 次成功"""
@@ -179,10 +190,13 @@ def _chunk_reader(chunks):
     class FakeResp:
         def read(self, n):
             return chunks.pop(0) if chunks else b""
+
         def __enter__(self):
             return self
+
         def __exit__(self, *a):
             return False
+
     return FakeResp()
 
 
@@ -229,13 +243,14 @@ def test_download_exe_retries_on_network_error(tmp_path):
 
 # ---------- 流程（源码模式不自我更新） ----------
 
+
 def test_apply_update_source_mode_no_os_exit(monkeypatch):
     """源码模式（非 frozen）：提示不支持自我更新，不触发下载/退出"""
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     monkeypatch.setattr(updater, "_current_exe", lambda: None)
-    monkeypatch.setattr(updater, "get_latest_release", lambda: {
-        "version": "v9.9.9", "download_url": "https://x", "size": 1, "url": ""
-    })
+    monkeypatch.setattr(
+        updater, "get_latest_release", lambda: {"version": "v9.9.9", "download_url": "https://x", "size": 1, "url": ""}
+    )
     monkeypatch.setattr(updater, "download_exe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应下载")))
     monkeypatch.setattr(updater, "_confirm", lambda *a, **k: True)
     info_shown = []
@@ -255,6 +270,7 @@ def test_apply_update_confirm_false_no_download(monkeypatch):
 
 # ---------- 更新脚本启动 flag（Windows 专用） ----------
 
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows 专用：验证 CreateProcess flag 互斥")
 def test_update_script_launch_flags(tmp_path):
     """CREATE_NEW_CONSOLE | DETACHED_PROCESS 互斥（WinError 87）——
@@ -272,8 +288,10 @@ def test_update_script_launch_flags(tmp_path):
     # 旧组合（互斥 flag）必须抛异常——这正是用户遇到的"启动更新脚本失败"
     with pytest.raises(OSError):
         subprocess.Popen(
-            [str(bat)], cwd=str(tmp_path),
-            creationflags=CREATE_NEW_CONSOLE | DETACHED, close_fds=True,
+            [str(bat)],
+            cwd=str(tmp_path),
+            creationflags=CREATE_NEW_CONSOLE | DETACHED,
+            close_fds=True,
         )
 
     # 新组合（仅 DETACHED_PROCESS）必须成功启动 bat
@@ -288,7 +306,7 @@ def test_update_script_launch_strategy_source_guard(tmp_path):
     - 必须存在多策略启动器 _launch_update_script 且被 _ask_and_apply 调用
     - 必须包含 cmd /c 显式解释 + CREATE_NO_WINDOW（打包版无控制台的兜底主力）"""
     src = Path(updater.__file__).read_text(encoding="utf-8")
-    bad = [l for l in src.splitlines() if "CREATE_NEW_CONSOLE" in l and not l.strip().startswith("#")]
+    bad = [line for line in src.splitlines() if "CREATE_NEW_CONSOLE" in line and not line.strip().startswith("#")]
     assert not bad
     assert "def _launch_update_script" in src
     assert "_launch_update_script(script, exe_dir)" in src
@@ -297,6 +315,7 @@ def test_update_script_launch_strategy_source_guard(tmp_path):
 
 
 # ---------- 启动脚本环境变量清洗（PyInstaller onefile 安全校验规避） ----------
+
 
 def test_clean_launcher_env_strips_pyi_and_mei_vars(monkeypatch):
     """_clean_launcher_env 必须剥离 _PYI_* / _MEI* 变量，保留正常变量
@@ -396,13 +415,21 @@ def test_ask_and_apply_launch_failure_keeps_new_exe(monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "_current_exe", lambda: exe)
     monkeypatch.setattr(updater, "_confirm", lambda *a, **k: True)
     monkeypatch.setattr(updater, "download_exe", fake_download)
-    monkeypatch.setattr(updater, "_launch_update_script",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("blocked by av")))
+    monkeypatch.setattr(
+        updater, "_launch_update_script", lambda *a, **k: (_ for _ in ()).throw(OSError("blocked by av"))
+    )
     info = []
     monkeypatch.setattr(updater, "_info", lambda msg, *a, **k: info.append(msg))
-    updater._ask_and_apply("msg", {
-        "version": "v9.9.9", "download_url": "https://x/exe", "size": 13, "url": "",
-    }, None)
+    updater._ask_and_apply(
+        "msg",
+        {
+            "version": "v9.9.9",
+            "download_url": "https://x/exe",
+            "size": 13,
+            "url": "",
+        },
+        None,
+    )
     assert any("启动更新脚本失败" in m and "blocked by av" in m for m in info)
     assert any("SSHWebTool_new.exe" in m for m in info)  # 提示手动替换路径
     assert (tmp_path / "SSHWebTool_new.exe").exists()  # 新包未被删除

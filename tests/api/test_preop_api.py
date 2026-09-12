@@ -1,10 +1,11 @@
-# -*- coding: utf-8 -*-
 """预操作上传 API 回归测试（Bug1：二进制文件静默损坏 + 路径穿越）"""
+
 import pytest
 
 
 def _make_fake_session():
     """内存会话：write_file 捕获收到的内容，不真实写远端"""
+
     class FakeSession:
         def __init__(self):
             self.is_connected = True
@@ -30,10 +31,15 @@ def test_upload_binary_is_byte_preserving(client, fake_sessions, tmp_path, preop
     payload = bytes([0x00, 0xFF, 0xFE, 0x80, 0x41]) * 100
     src.write_bytes(payload)
 
-    r = client.post("/api/preop/upload", json={
-        "session_id": "sess-1", "source": str(src),
-        "source_type": "path", "remote": "/tmp/payload.bin",
-    })
+    r = client.post(
+        "/api/preop/upload",
+        json={
+            "session_id": "sess-1",
+            "source": str(src),
+            "source_type": "path",
+            "remote": "/tmp/payload.bin",
+        },
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["size"] == len(payload)
@@ -48,10 +54,15 @@ def test_upload_binary_is_byte_preserving(client, fake_sessions, tmp_path, preop
 def test_upload_text_ok(client, fake_sessions, tmp_path, preop_session):
     src = tmp_path / "install.sh"
     src.write_text("#!/bin/bash\necho hi\n", encoding="utf-8")
-    r = client.post("/api/preop/upload", json={
-        "session_id": "sess-1", "source": str(src),
-        "source_type": "path", "remote": "/tmp/install.sh",
-    })
+    r = client.post(
+        "/api/preop/upload",
+        json={
+            "session_id": "sess-1",
+            "source": str(src),
+            "source_type": "path",
+            "remote": "/tmp/install.sh",
+        },
+    )
     assert r.status_code == 200
     _, content = preop_session.written[-1]
     assert content == src.read_bytes()
@@ -67,10 +78,15 @@ def test_script_source_accepts_filename(client, fake_sessions, tmp_path, preop_s
     # main.py 里 get_app_dir 是 import 进来的引用，需 patch main 模块
     monkeypatch.setattr(main_module, "get_app_dir", lambda: tmp_path)
 
-    r = client.post("/api/preop/upload", json={
-        "session_id": "sess-1", "source": "deploy.sh",
-        "source_type": "script", "remote": "/tmp/deploy.sh",
-    })
+    r = client.post(
+        "/api/preop/upload",
+        json={
+            "session_id": "sess-1",
+            "source": "deploy.sh",
+            "source_type": "script",
+            "remote": "/tmp/deploy.sh",
+        },
+    )
     assert r.status_code == 200, r.text
     _, content = preop_session.written[-1]
     assert content == b"echo deploy"
@@ -83,34 +99,54 @@ def test_script_source_rejects_path_traversal(client, fake_sessions, tmp_path, p
     (tmp_path / "data.json").write_text("SECRET", encoding="utf-8")
     monkeypatch.setattr(main_module, "get_app_dir", lambda: tmp_path)
 
-    r = client.post("/api/preop/upload", json={
-        "session_id": "sess-1", "source": "../data.json",
-        "source_type": "script", "remote": "/tmp/x",
-    })
+    r = client.post(
+        "/api/preop/upload",
+        json={
+            "session_id": "sess-1",
+            "source": "../data.json",
+            "source_type": "script",
+            "remote": "/tmp/x",
+        },
+    )
     assert r.status_code == 400
     assert "路径" in r.json()["detail"]
 
     # 子目录形式同样拒绝
-    r = client.post("/api/preop/upload", json={
-        "session_id": "sess-1", "source": "sub/dir/file.sh",
-        "source_type": "script", "remote": "/tmp/x",
-    })
+    r = client.post(
+        "/api/preop/upload",
+        json={
+            "session_id": "sess-1",
+            "source": "sub/dir/file.sh",
+            "source_type": "script",
+            "remote": "/tmp/x",
+        },
+    )
     assert r.status_code == 400
 
 
 def test_upload_missing_source_404(client, fake_sessions, tmp_path, preop_session):
-    r = client.post("/api/preop/upload", json={
-        "session_id": "sess-1", "source": str(tmp_path / "nope.sh"),
-        "source_type": "path", "remote": "/tmp/x",
-    })
+    r = client.post(
+        "/api/preop/upload",
+        json={
+            "session_id": "sess-1",
+            "source": str(tmp_path / "nope.sh"),
+            "source_type": "path",
+            "remote": "/tmp/x",
+        },
+    )
     assert r.status_code == 404
 
 
 def test_upload_no_session_404(client, fake_sessions, tmp_path):
     src = tmp_path / "a.sh"
     src.write_text("x", encoding="utf-8")
-    r = client.post("/api/preop/upload", json={
-        "session_id": "missing", "source": str(src),
-        "source_type": "path", "remote": "/tmp/x",
-    })
+    r = client.post(
+        "/api/preop/upload",
+        json={
+            "session_id": "missing",
+            "source": str(src),
+            "source_type": "path",
+            "remote": "/tmp/x",
+        },
+    )
     assert r.status_code == 404

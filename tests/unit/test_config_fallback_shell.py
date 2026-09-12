@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 """SSH 断开后本地终端 shell 配置（fallback_local_shell）单测
 
 覆盖：默认值、合法/非法取值、保存后读取一致、config.example.json 合法性。
 """
+
 import json
 from pathlib import Path
 

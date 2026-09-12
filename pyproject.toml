@@ -65,6 +65,13 @@ default = true
 [dependency-groups]
 dev = [
     "pyinstaller>=6.22.2",
+    "ruff>=0.8.0",
+    "pyright>=1.1.390",
+    "pyrefly>=0.1.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-timeout>=2.3.0",
+    "httpx>=0.27.0",
 ]
 
 [tool.setuptools]
@@ -76,3 +83,48 @@ ssh_web_tool = ["*.py"]
 
 [tool.setuptools.data-files]
 "static" = ["static/index.html"]
+
+# ==================== Ruff ====================
+# Ruff: linter + formatter（替代 flake8 + isort + black）
+# 文档: https://docs.astral.sh/ruff/
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = [
+    "packages/ssh-monkeypatch",   # 独立子包，单独管理
+    "ssh_web_tool.egg-info",
+    "build",
+    "dist",
+    ".venv",
+    "frontend/node_modules",
+]
+
+[tool.ruff.lint]
+# 规则集说明:
+#   E   pycodestyle errors        — PEP 8 错误
+#   W   pycodestyle warnings      — PEP 8 警告
+#   F   pyflakes                  — 未使用变量/导入、未定义变量等
+#   I   isort                     — import 排序
+#   UP  pyupgrade                 — 自动升级旧语法到新版本 Python 语法
+#   B   flake8-bugbear            — 常见 bug 模式
+#   C4  flake8-comprehensions     — 推导式改进
+#   SIM flake8-simplify           — 简化常见模式
+#   RUF Ruff 特有规则
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",   # 行长度由 formatter 管理（line-length=120），lint 不重复检查
+    "B008",   # FastAPI 依赖注入用 `Depends()` 作默认参数，是惯用模式
+    "B904",   # `raise ... from err` 在广泛异常兜底场景中过于冗长
+    "SIM105", # `contextlib.suppress` 不如裸 `try/except` 直观，保持现状
+    "RUF001", # 中文注释中全角字符误报为 ambiguous unicode，噪音太大
+    "RUF002", # 同上，docstring 中的中文
+    "RUF003", # 同上，字符串中的中文
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ssh_web_tool", "main", "ssh_client"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true

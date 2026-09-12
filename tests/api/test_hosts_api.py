@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """主机/分组/快捷指令 API 测试（原 test_api_smoke.py 用例的 pytest 化 + 扩充）"""
 
 

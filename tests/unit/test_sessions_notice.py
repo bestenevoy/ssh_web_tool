@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
 """会话级通知机制测试（Bug B 回归）
 
 背景：全局连接监控协程原本通过 _broadcast_output 推送 shell 异常提示，
 提示文本会进入 run_command 的注入捕获监听器/echo 解析缓冲，污染命令返回的 stdout。
 改为 session.set_shell_notice / ws 端 take_shell_notice 后，通知只经 WebSocket 通道。
 """
+
 import pytest
 
 from ssh_web_tool.sessions import SSHSession

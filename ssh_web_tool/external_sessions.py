@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 外部 SSH 会话中心（跨进程观测）
 
@@ -10,9 +9,9 @@
 
 与 sessions.py（本进程内交互式终端会话）完全独立。
 """
+
 import time
 from collections import deque
-from typing import Deque, Dict, Optional, Set
 
 # 每会话历史事件上限
 MAX_HISTORY_PER_SESSION = 2000
@@ -25,7 +24,7 @@ class ExternalSessionHub:
 
     def __init__(self):
         # session_id -> {"meta": dict, "history": deque, "subscribers": set[WebSocket], "last_active": float, "closed": bool}
-        self._sessions: Dict[str, dict] = {}
+        self._sessions: dict[str, dict] = {}
 
     # ---------- 接收测试侧事件 ----------
 
@@ -131,7 +130,7 @@ class ExternalSessionHub:
         result.sort(key=lambda x: x.get("connected_at", 0), reverse=True)
         return result
 
-    def get_session(self, session_id: str) -> Optional[dict]:
+    def get_session(self, session_id: str) -> dict | None:
         sess = self._sessions.get(session_id)
         if sess is None:
             return None
@@ -152,7 +151,8 @@ class ExternalSessionHub:
         """清理超过保留期的已关闭会话"""
         now = time.time()
         stale = [
-            sid for sid, sess in self._sessions.items()
+            sid
+            for sid, sess in self._sessions.items()
             if sess["meta"].get("closed") and (now - sess["last_active"]) > SESSION_RETENTION
         ]
         for sid in stale:
