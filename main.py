@@ -1217,7 +1217,7 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 # 使用用户配置的本地终端（fallback_local_shell：cmd / powershell）；
                 # 切换提示通过 _broadcast_output 进入终端输出与会话日志（以会话为主）
                 try:
-                    await session._auto_switch_to_local()
+                    await session._auto_switch_to_local("SSH 连接断开，重连失败")
                 except Exception as e:
                     await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {e!s}"})
                     await websocket.close()

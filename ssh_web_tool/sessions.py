@@ -818,10 +818,11 @@ class SSHSession:
             pass
         return False
 
-    async def _auto_switch_to_local(self):
-        """远端 shell 已退出（用户输入 exit/logout）→ 自动切换到本机 shell
+    async def _auto_switch_to_local(self, reason: str = "SSH 已退出"):
+        """SSH 连接断开/退出时自动切换到本机 shell
 
         - 幂等：已在本机 / 正在切换 / 正在重连时直接跳过（防止与自动重连并发冲突）
+        - reason: 切换原因提示（如"SSH 已退出"、"SSH 连接断开，重连失败"）
         - 切换提示走 _broadcast_output，同步写入会话日志（同一会话一份记录）
         """
         if self.is_local() or self._switching_local or self._reconnecting:
@@ -831,7 +832,7 @@ class SSHSession:
             shell = _fallback_shell()
             label = "PowerShell" if shell in ("powershell", "pwsh") else "cmd"
             await self._broadcast_output(
-                f"\r\n\x1b[33m[SSH 已退出，已切换到本机 {label}，可在界面重新连接主机]\x1b[0m\r\n"
+                f"\r\n\x1b[33m[{reason}，已切换到本机 {label}，可在界面重新连接主机]\x1b[0m\r\n"
             )
             await self.switch_to_local(shell)
         except Exception as e:
@@ -1583,7 +1584,7 @@ class SessionManager:
 
         - 本机 shell 会话：退出即自动重启，保持终端可用
         - SSH 会话 shell 已退出（用户 exit/logout，传输层仍在）→ 自动切换本机 shell
-        - SSH 传输层断开（网络异常等）→ 自动重连
+        - SSH 传输层断开（网络异常等）→ 自动重连，重连失败后切换到本机终端
         """
 
         async def _try_reconnect(session: SSHSession):
@@ -1592,9 +1593,16 @@ class SessionManager:
                 if await session.reconnect():
                     print(f"[Monitor] 自动重连成功: {session.session_id}")
                 else:
-                    print(f"[Monitor] 自动重连失败: {session.session_id}")
+                    # 重连失败（达到最大次数）→ 自动切换到本机终端
+                    print(f"[Monitor] 自动重连失败，切换到本机终端: {session.session_id}")
+                    await session._auto_switch_to_local("SSH 连接断开，重连失败")
             except Exception as e:
                 print(f"[Monitor] 重连异常: {e}")
+                # 重连异常也切换到本机终端，保证终端始终可用
+                try:
+                    await session._auto_switch_to_local("SSH 连接异常")
+                except Exception:
+                    pass
 
         try:
             while True:
