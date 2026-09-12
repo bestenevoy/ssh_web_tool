@@ -24,6 +24,7 @@ export interface TerminalInstance {
   input_buffer: string  // 当前输入行缓冲区（用于记录命令历史）
   input_cursor: number  // 输入行光标位置（行编辑用，精确跟踪命令内容）
   disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
+  ssh_exited: boolean  // SSH exit 退出后自动切换到本地终端，可点重连回到原 SSH 主机
 }
 
 // 获取 shell 类型标签
@@ -68,61 +69,15 @@ export function useTerminals(settings: TerminalSettings) {
   // 保存最新的 terminals 引用，用于回调中（解决闭包捕获旧状态导致 input_buffer 不记录的问题）
   const terminalsRef = useRef(terminals)
   terminalsRef.current = terminals
-  // 输入合并发送：SSH 会话的键盘输入按 50ms 窗口合并后一次 WS 发送，避免逐字符通信
-  // （存储阵列等慢速 SSH 服务在大量小包时可能挂死 channel，合并大幅减少 write 次数）
-  // 本地终端（ConPTY）不需要合并——无网络开销，合并反而导致输入延迟
-  const inputSendBufferRef = useRef<Map<string, string>>(new Map())
-  const inputFlushTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
-  // 合并发送 flush：把缓冲的输入一次性发给后端
-  const flushInputBuffer = useCallback((session_id: string) => {
-    const b = inputSendBufferRef.current.get(session_id) || ''
-    inputSendBufferRef.current.delete(session_id)
-    inputFlushTimerRef.current.delete(session_id)
-    if (!b) return
+  // 直接发送输入到后端，不做任何延迟/合并
+  const sendInput = useCallback((session_id: string, data: string) => {
     const inst = terminalsRef.current.get(session_id)
     if (inst && inst.ws && inst.ws.readyState === WebSocket.OPEN) {
-      inst.ws.send(JSON.stringify({ type: 'input', data: b }))
+      inst.ws.send(JSON.stringify({ type: 'input', data }))
     }
   }, [])
 
-  // 需要立即发送的控制字符（不能进合并缓冲，否则信号延迟导致 Ctrl+C 等不生效）
-  // \x03=Ctrl+C(SIGINT)  \x04=Ctrl+D(EOF)  \x1a=Ctrl+Z(SIGTSTP)  \x1c=Ctrl+\(SIGQUIT)
-  // \r=回车(需即时响应)  \x15=Ctrl+U(清行)  \x17=Ctrl+W(删词)
-  function isImmediateChar(data: string): boolean {
-    if (data.length === 1) {
-      const c = data.charCodeAt(0)
-      return c === 0x03 || c === 0x04 || c === 0x1a || c === 0x1c || c === 0x0d || c === 0x15 || c === 0x17
-    }
-    return data === '\r' || data === '\n' || data === '\r\n'
-  }
-
-  // 把输入字符追加到合并缓冲（逐字符记录历史，合并后发送）
-  // 控制字符和本地终端立即发送，不进合并缓冲
-  const appendInput = useCallback((session_id: string, data: string) => {
-    const inst = terminalsRef.current.get(session_id)
-    // 本地终端：无网络开销，立即发送（合并窗口会导致输入延迟一个字符）
-    if (inst && inst.type === 'local') {
-      if (inst.ws && inst.ws.readyState === WebSocket.OPEN) {
-        inst.ws.send(JSON.stringify({ type: 'input', data }))
-      }
-      return
-    }
-    // SSH 终端：控制字符立即发送（先 flush 已缓冲的内容，再单独发送控制字符）
-    if (isImmediateChar(data)) {
-      flushInputBuffer(session_id)
-      if (inst && inst.ws && inst.ws.readyState === WebSocket.OPEN) {
-        inst.ws.send(JSON.stringify({ type: 'input', data }))
-      }
-      return
-    }
-    // SSH 终端普通字符：进合并缓冲
-    const buf = inputSendBufferRef.current.get(session_id) || ''
-    inputSendBufferRef.current.set(session_id, buf + data)
-    if (!inputFlushTimerRef.current.has(session_id)) {
-      inputFlushTimerRef.current.set(session_id, setTimeout(() => flushInputBuffer(session_id), 50))
-    }
-  }, [flushInputBuffer])
 
   // 后端所有活跃终端列表（包括 CLI/Python 包创建的，Web 页面统一显示）
   const [activeSessions, setActiveSessions] = useState<any[]>([])
@@ -344,8 +299,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       term.onData((data) => {
         // 逐字符更新命令历史缓冲（保持 ESC 序列完整）
         handleTerminalInput(session_id, data)
-        // 合并发送：15ms 窗口内积累后一次 WS 发送，减少 SSH 通信次数
-        appendInput(session_id, data)
+        sendInput(session_id, data)
       })
       setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
 
@@ -418,17 +372,15 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
             })
           }
           else if (msg.type === 'switched_to_local') {
-            // SSH 退出/断开后后端自动切换到本机终端：更新终端类型和标签
+            // SSH 退出/断开后后端自动切换到本机终端：标记 ssh_exited，保留原 host_id 供重连
             setTerminals((prev) => {
               const next = new Map(prev)
               const inst = next.get(session_id)
               if (inst) {
                 next.set(session_id, {
                   ...inst,
-                  type: 'local',
-                  host_name: msg.terminal_name || '本机',
+                  ssh_exited: true,
                   shell_type: 'local',
-                  disconnected: false,
                 })
               }
               return next
@@ -460,6 +412,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         input_buffer: '',
         input_cursor: 0,
         disconnected: false,
+        ssh_exited: false,
       }
 
       setTerminals((prev) => {
@@ -476,7 +429,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       connectingRef.current = false
       setConnecting(false)
     }
-  }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, appendInput, ensureFit])
+  }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, sendInput, ensureFit])
 
   const restoreTerminals = useCallback(async () => {
     try {
@@ -499,7 +452,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
 
         term.onData((data) => {
           handleTerminalInput(t.session_id, data)
-          appendInput(t.session_id, data)
+          sendInput(t.session_id, data)
         })
         setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
 
@@ -550,17 +503,15 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
               })
             }
             else if (msg.type === 'switched_to_local') {
-              // SSH 退出/断开后后端自动切换到本机终端：更新终端类型和标签
+              // SSH 退出/断开后后端自动切换到本机终端：标记 ssh_exited，保留原 host_id 供重连
               setTerminals((prev) => {
                 const next = new Map(prev)
                 const inst = next.get(t.session_id)
                 if (inst) {
                   next.set(t.session_id, {
                     ...inst,
-                    type: 'local',
-                    host_name: msg.terminal_name || '本机',
+                    ssh_exited: true,
                     shell_type: 'local',
-                    disconnected: false,
                   })
                 }
                 return next
@@ -595,6 +546,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           input_buffer: '',
           input_cursor: 0,
           disconnected: false,
+        ssh_exited: false,
         }
 
         setTerminals((prev) => {
@@ -608,7 +560,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     } catch (e) {
       console.error('恢复终端失败', e)
     }
-  }, [activeId, fitTerminal, sendResize, handleTerminalInput, appendInput, ensureFit])
+  }, [activeId, fitTerminal, sendResize, handleTerminalInput, sendInput, ensureFit])
 
   // 定期同步活跃终端列表，并自动恢复新创建的终端（CLI/Python 包创建的）
   useEffect(() => {

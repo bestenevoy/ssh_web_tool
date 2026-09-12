@@ -474,7 +474,8 @@ function App() {
         <span className="status">{status}</span>
         {terminals.activeId && (() => {
           const activeInst = terminals.terminals.get(terminals.activeId!)
-          if (activeInst?.disconnected) {
+          // 断开或 SSH exit 后自动切换本地终端：显示重连按钮（重连到原 SSH 主机）
+          if (activeInst?.disconnected || activeInst?.ssh_exited) {
             return (
               <button
                 className="btn btn-primary btn-sm conn-action-btn"
