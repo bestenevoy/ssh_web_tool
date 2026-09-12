@@ -137,7 +137,7 @@ export function useTerminals(settings: TerminalSettings) {
     })
   }, [sendResize])
 
-  // 终端重同步：清除缓冲区 + 启用自动换行 + 发送 Ctrl+L 让 shell 重绘 + 发送 resize
+  // 终端重同步：清除缓冲区 + 发送 Ctrl+L 让 shell 重绘 + 发送 resize
   // 用于初始连接时，确保 shell 第一帧输出使用正确的终端尺寸
   // （终端复制/粘贴逻辑见 terminalCopy.ts：选中复制、Ctrl+C 复制、Ctrl+V 单次粘贴）
 
@@ -148,15 +148,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       if (clean_screen) {
         // 1. 清除 xterm.js 缓冲区（丢弃可能使用错误尺寸渲染的内容）
         term.reset()
-        // 3. 发送 Ctrl+L（换页符），告诉 shell 清屏并重绘提示符
+        // 2. 发送 Ctrl+L（换页符），告诉 shell 清屏并重绘提示符
         ws.send(JSON.stringify({ type: 'input', data: '\x0c' }))
       }
-      // 2. 延迟到下一帧启用自动换行（DECSET 7）
-      requestAnimationFrame(() => {
-        term.write('\x1b[?7h')  // 启用自动换行
-        console.log('[Terminal] autowrap enabled, size:', term.cols, 'x', term.rows)
-      })
-      // 4. 发送 resize 消息，应用新尺寸
+      // xterm.js 默认已启用自动换行（DECSET 7），不需要显式写入 ESC 序列
+      // 发送 resize 消息，应用新尺寸
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
       console.log('[Terminal] resync size:', term.cols, 'x', term.rows)
     }

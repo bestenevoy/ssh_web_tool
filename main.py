@@ -635,6 +635,10 @@ def _parse_ssh_command(data: str) -> tuple[str, int, str, str] | None:
     """
     # 取回车前的命令行
     line = data.split("\r")[0].split("\n")[0].strip()
+    # 清洗 ANSI 转义序列（PowerShell PSReadLine 会混入光标控制/行重绘序列）
+    line = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", line)
+    line = re.sub(r"\x1b\][\s\S]*?(\x07|\x1b\\)", "", line)
+    line = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", line)
     # 匹配 ssh 前缀（允许前面有空白）
     m = re.match(r"^ssh\s+(.+)$", line)
     if not m:
