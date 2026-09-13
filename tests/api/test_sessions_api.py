@@ -147,8 +147,12 @@ async def test_broadcast_still_reaches_fast_listener(quiet_session):
 # ---------- 会话 API 路由 ----------
 
 
-def test_run_command_route_injects(shell_session, monkeypatch):
-    """POST /api/sessions/{id}/run 走注入链路（mock 捕获层，不真实等终端输出）"""
+def test_run_command_route_injects(shell_session, monkeypatch, fake_history_db):
+    """POST /api/sessions/{id}/run 走注入链路（mock 捕获层，不真实等终端输出）
+
+    fake_history_db：run 路由会把命令写入历史库，必须隔离到临时目录，
+    否则会污染真实历史库，且与运行中的主程序抢锁导致 disk I/O error
+    """
     from fastapi.testclient import TestClient
 
     from main import app
@@ -165,8 +169,8 @@ def test_run_command_route_injects(shell_session, monkeypatch):
     assert "echo hi" in body["stdout"]
 
 
-def test_run_command_process_mode_when_no_shell(fake_sessions, monkeypatch, tmp_path):
-    """无交互式终端时 run 走独立进程模式"""
+def test_run_command_process_mode_when_no_shell(fake_sessions, monkeypatch, tmp_path, fake_history_db):
+    """无交互式终端时 run 走独立进程模式（fake_history_db 同上：隔离历史库）"""
     from fastapi.testclient import TestClient
 
     from main import app

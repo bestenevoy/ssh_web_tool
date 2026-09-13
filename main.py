@@ -13,9 +13,11 @@ FastAPI 后端
 
 import asyncio
 import json
+import os
 import re
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -45,8 +47,7 @@ async def _shutdown_cleanup():
     """程序退出前关闭数据库单例连接。
 
     history_db 使用全局单例 aiosqlite 连接（非 daemon worker 线程），
-    若不显式关闭，开发模式 Ctrl+C / uvicorn 异常退出时进程会挂住无法退出。
-    （托盘"退出"走 os._exit 不经此路径，由 tray.exit_app 自行清理。）
+    若不显式关闭，进程异常退出时可能残留 -wal/-shm 文件。
     """
     try:
         await history_db.close_db()
@@ -87,14 +88,14 @@ class EventBus:
 
     def __init__(self):
         self._subscribers: set[WebSocket] = set()
-        self._history: list[dict] = []
+        self._history: deque[dict] = deque(maxlen=500)
         self._max_history = 500
 
     async def subscribe(self, ws: WebSocket):
         """订阅事件"""
         self._subscribers.add(ws)
-        # 发送历史事件
-        for event in self._history[-100:]:
+        # 发送历史事件（deque 不支持切片，取最后 100 条）
+        for event in list(self._history)[-100:]:
             try:
                 await ws.send_json(event)
             except Exception:
@@ -113,8 +114,6 @@ class EventBus:
             detail: 事件描述
             **kwargs: 附加数据
         """
-        import time
-
         event = {
             "type": "event",
             "event_type": event_type,
@@ -124,9 +123,7 @@ class EventBus:
             "time_str": time.strftime("%H:%M:%S"),
             **kwargs,
         }
-        self._history.append(event)
-        if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history :]
+        self._history.append(event)  # deque(maxlen=500) 自动淘汰旧事件，无需手动截断
         # 并行广播给所有订阅者（原串行 await 会因慢客户端阻塞其他客户端）
         if not self._subscribers:
             return
@@ -649,13 +646,13 @@ def _parse_ssh_command(data: str) -> tuple[str, int, str, str] | None:
     if at_idx <= 0:
         return None
     user_pass = rest[:at_idx]
-    host_port = rest[at_idx + 1:]
+    host_port = rest[at_idx + 1 :]
     # user:password 分割（第一个冒号）
     colon_idx = user_pass.find(":")
     if colon_idx <= 0:
         return None
     username = user_pass[:colon_idx]
-    password = user_pass[colon_idx + 1:]
+    password = user_pass[colon_idx + 1 :]
     if not username or not password or not host_port:
         return None
     # 解析 host:port
@@ -1243,11 +1240,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 switch = session.take_switch_notice()
                 if switch:
                     label = "PowerShell" if switch in ("powershell", "pwsh") else "cmd"
-                    await websocket.send_json({
-                        "type": "switched_to_local",
-                        "shell": switch,
-                        "terminal_name": f"本机 {label}",
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "switched_to_local",
+                            "shell": switch,
+                            "terminal_name": f"本机 {label}",
+                        }
+                    )
                 data = await listener.get()
                 await websocket.send_json({"type": "output", "data": data})
         except Exception:
@@ -1368,22 +1367,25 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                         )
                         try:
                             await session.switch_to_ssh(ssh_host, ssh_port, ssh_user, ssh_pass)
-                            await websocket.send_json({
-                                "type": "ssh_connected",
-                                "host": ssh_host,
-                                "port": ssh_port,
-                                "username": ssh_user,
-                                "terminal_name": f"{ssh_user}@{ssh_host}",
-                            })
+                            await websocket.send_json(
+                                {
+                                    "type": "ssh_connected",
+                                    "host": ssh_host,
+                                    "port": ssh_port,
+                                    "username": ssh_user,
+                                    "terminal_name": f"{ssh_user}@{ssh_host}",
+                                }
+                            )
                             await event_bus.publish(
-                                "session_create", "local-ssh",
+                                "session_create",
+                                "local-ssh",
                                 f"本地终端拦截 SSH 连接 {session.session_id} -> {ssh_user}@{ssh_host}:{ssh_port}",
-                                session_id=session.session_id, host=ssh_host, port=ssh_port,
+                                session_id=session.session_id,
+                                host=ssh_host,
+                                port=ssh_port,
                             )
                         except Exception as e:
-                            await session._broadcast_output(
-                                f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n"
-                            )
+                            await session._broadcast_output(f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n")
                         return  # 拦截成功（或失败已提示），不写入本地 shell
                 # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入。
                 # SSH 已退出/断开时（自动切换本机终端或自动重连进行中）先等状态收敛：
@@ -1554,8 +1556,81 @@ async def websocket_external(websocket: WebSocket, session_id: str):
 # ============ 启动 ============
 
 
+def _acquire_single_instance() -> bool:
+    """单实例检查：已有一个实例在运行时返回 False（Windows 命名 Mutex）
+
+    注意：必须用 use_last_error=True + ctypes.get_last_error()。
+    ctypes.windll.kernel32.GetLastError() 的返回值会被 ctypes 自身的
+    内部调用覆盖，导致单实例检查误判（多个实例同时通过检查）。
+    """
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW(None, False, "Local\\SSHWebTool_SingleInstance")
+    return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+
+
+def _exit_quietly(code: int = 0) -> None:
+    """启动阶段的提前退出。
+
+    history_db.init_db() 已打开 aiosqlite 单例连接，其内部工作线程是
+    非守护线程（aiosqlite/core.py Thread 无 daemon=True），main() 直接
+    return 会留下一个无窗口僵尸进程（用户看到"启动了但没反应"），
+    必须先关闭数据库再硬退出。
+    """
+    try:
+        asyncio.run(history_db.close_db())
+    except Exception:
+        pass
+    # os._exit 不刷新缓冲：管道/终端下提前 print 的提示会丢失，先手动 flush
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
+def _check_webview2_runtime() -> bool:
+    """检查 WebView2 Runtime 是否已安装。
+
+    pywebview 在 Windows 上优先使用 EdgeChromium（WebView2）内核，
+    但运行时缺失时会静默回退到 MSHTML（IE 内核）——现代前端页面将完全无法渲染。
+    这里提前检测，缺失时给出明确提示而不是让用户面对白屏。
+
+    注意：机器级安装的 WebView2 注册在 HKLM 的 32 位视图（WOW6432Node）下，
+    64 位 Python 默认视图看不到，必须显式用 KEY_WOW64_32KEY 读取。
+    """
+    import winreg
+
+    # WebView2 Runtime 稳定版的注册表 GUID（与 pywebview 内部检测一致）
+    guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                with winreg.OpenKey(
+                    root, rf"Software\Microsoft\EdgeUpdate\Clients\{guid}", 0, winreg.KEY_READ | view
+                ) as key:
+                    pv = winreg.QueryValueEx(key, "pv")[0]
+                    if pv and pv != "0.0.0.0":
+                        return True
+            except OSError:
+                continue
+
+    # 兜底：注册表异常时直接找安装目录下的 msedgewebview2.exe（覆盖非常规安装方式）
+    import glob
+    import os
+
+    for env in ("ProgramFiles(x86)", "ProgramFiles", "LocalAppData"):
+        base = os.environ.get(env)
+        if base and glob.glob(os.path.join(base, "Microsoft", "EdgeWebView", "Application", "*", "msedgewebview2.exe")):
+            return True
+    return False
+
+
 def main():
-    """启动 SSH Web Tool 服务"""
+    """启动 SSH Web Tool 服务（pywebview 桌面窗口版）"""
     # PyInstaller 打包后多进程支持
     if hasattr(sys, "frozen"):
         import multiprocessing
@@ -1564,7 +1639,6 @@ def main():
 
     import logging
     import threading
-    import webbrowser
 
     import uvicorn
 
@@ -1572,13 +1646,11 @@ def main():
         CONFIG_FILE_NAME,
         ensure_config_file,
         ensure_data_dir,
-        find_config_file,
         get_app_dir,
         load_config,
         migrate_legacy_data,
         resolve_server_config,
     )
-    from ssh_web_tool.tray import acquire_single_instance, start_tray
 
     # 统一数据目录：~/.ai4one/wstool；首次运行迁移旧位置（EXE 目录/项目根）的数据
     ensure_data_dir()
@@ -1593,18 +1665,31 @@ def main():
     except Exception as e:
         print(f"[history] 初始化历史数据库失败: {e}")
 
-    # 单实例：已有一个实例在运行则打开其 Web 页面并退出
-    if not acquire_single_instance():
-        port_file = get_app_dir() / ".running_port"
-        port = port_file.read_text().strip() if port_file.is_file() else "8765"
-        try:
-            webbrowser.open(f"http://127.0.0.1:{port}")
-        except Exception:
-            pass
-        print("SSH Web Tool 已在运行，已打开其 Web 界面，本实例退出")
-        return
+    # 单实例：已有实例在运行则退出（windowed EXE 无控制台，print 不可见，需弹窗提示）
+    if not _acquire_single_instance():
+        msg = "SSH Web Tool 已在运行，请勿重复启动。\n\n（如需重新启动，请先退出已运行的实例）"
+        print(msg)
+        if hasattr(sys, "frozen"):
+            import ctypes
 
-    # 加载配置：首次运行自动生成 config.json（优先复制 config.example.json 模板）
+            ctypes.windll.user32.MessageBoxW(0, msg, "SSH Web Tool", 0x40)  # MB_ICONINFORMATION
+        _exit_quietly(0)
+
+    # WebView2 Runtime 缺失时 pywebview 会静默回退 IE 内核，页面无法渲染；提前拦截并指引安装
+    if sys.platform == "win32" and not _check_webview2_runtime():
+        msg = (
+            "未检测到 Microsoft WebView2 Runtime，桌面窗口无法启动。\n\n"
+            "请安装后重试：\n"
+            "https://developer.microsoft.com/microsoft-edge/webview2/\n\n"
+            "（Win10/11 通常已内置，多数情况只需下载 Evergreen Bootstrapper 一键安装）"
+        )
+        print(msg)
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(0, msg, "SSH Web Tool", 0x30)  # MB_ICONWARNING
+        _exit_quietly(1)
+
+    # 加载配置
     ensure_config_file()
     cfg = load_config()
     try:
@@ -1619,7 +1704,7 @@ def main():
     host, port = server["host"], server["port"]
     base_url = f"http://{host}:{port}"
 
-    # 记录实际使用的端口（供单实例"打开已运行页面"与外部脚本读取）
+    # 记录实际使用的端口
     try:
         (get_app_dir() / ".running_port").write_text(str(port), encoding="utf-8")
     except OSError:
@@ -1644,16 +1729,14 @@ def main():
     print("=" * 50)
     print(f"SSH Web Tool v{APP_VERSION} 启动中...")
     print(f"配置文件: {CONFIG_FILE_NAME}")
-    print(f"网页 UI:  {base_url}")
+    print(f"本地服务: {base_url}")
     print(f"API 文档: {base_url}/docs")
     print("数据文件:", storage.data_file)
     print("日志目录:", SSHSession.LOG_DIR)
     print("请求日志:", server_log)
     print("=" * 50)
-    print("提示：程序常驻右下角系统托盘，右键托盘图标可打开界面/配置/日志")
-    print()
 
-    # 清理超过 30 天的旧会话日志（会话日志不按天轮转，靠启动清理控制体积）
+    # 清理超过 30 天的旧会话日志
     try:
         n = SSHSession.cleanup_old_logs(days=30)
         if n:
@@ -1663,32 +1746,70 @@ def main():
 
     # 启动时后台静默检查更新（有新版才弹提示，不自动更新）
     try:
-        import threading as _th
-
         from ssh_web_tool.updater import check_for_update_quiet
 
-        _th.Thread(target=check_for_update_quiet, daemon=True).start()
+        threading.Thread(target=check_for_update_quiet, daemon=True).start()
     except Exception as e:
         print(f"[updater] 启动更新检查失败: {e}")
 
-    # 系统托盘（EXE 打包后 --noconsole 无窗口，托盘是唯一入口）
-    try:
-        config_path = find_config_file() or (get_app_dir() / CONFIG_FILE_NAME)
-        start_tray(base_url, get_app_dir(), config_path, server_log)
-    except Exception as e:
-        print(f"[tray] 托盘启动失败（不影响服务）: {e}")
+    # 在后台线程启动 uvicorn（FastAPI 服务）
+    server_thread = threading.Thread(
+        target=uvicorn.run,
+        args=(app,),
+        kwargs={"host": host, "port": port, "log_level": "info", "workers": 1, "log_config": None},
+        daemon=True,
+    )
+    server_thread.start()
 
-    # 延迟打开浏览器（等服务启动后）
-    def open_browser():
-        time.sleep(1.5)
-        webbrowser.open(base_url)
+    # 等待服务就绪
+    import urllib.request
 
-    if cfg.get("open_browser", True):
-        threading.Thread(target=open_browser, daemon=True).start()
+    for _ in range(30):
+        try:
+            urllib.request.urlopen(f"{base_url}/", timeout=0.5)
+            break
+        except Exception:
+            time.sleep(0.2)
 
-    # log_config=None：使用我们自己的 logging 配置（文件 + 控制台），
-    # 避免 uvicorn 默认配置在 --noconsole（stderr=None）下报错
-    uvicorn.run(app, host=host, port=port, log_level="info", workers=1, log_config=None)
+    # 启动 pywebview 窗口
+    import webview
+
+    # 允许网页触发下载（SFTP 下载走 <a download>，pywebview 默认禁止下载）
+    # 开启后 WebView2 会弹原生"另存为"对话框
+    webview.settings["ALLOW_DOWNLOADS"] = True
+
+    def on_closing():
+        """窗口关闭确认"""
+        import ctypes
+
+        result = ctypes.windll.user32.MessageBoxW(
+            0,
+            "确定要退出 SSH Web Tool 吗？\n所有 SSH 连接将被断开。",
+            "确认退出",
+            0x04 | 0x30 | 0x00,  # MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1
+        )
+        if result == 6:  # IDYES
+            # 关闭历史数据库
+            try:
+                asyncio.run(history_db.close_db())
+            except Exception:
+                pass
+            os._exit(0)
+        return False  # 阻止默认关闭行为（只在确认后 os._exit）
+
+    window = webview.create_window(
+        title=f"SSH Web Tool v{APP_VERSION}",
+        url=base_url,
+        width=1280,
+        height=800,
+        min_size=(800, 500),
+        text_select=False,  # CSS 层面精细控制：标题/标签禁止选中，终端/输入框允许选中
+    )
+    # pywebview 事件挂在 window.events 上；closing 处理器返回 False 可取消关闭
+    window.events.closing += on_closing
+    # 打包后关闭 debug（减少内存/CPU）；开发时保留 debug 以便 F12 开发者工具
+    is_debug = not hasattr(sys, "frozen")
+    webview.start(debug=is_debug)
 
 
 if __name__ == "__main__":
