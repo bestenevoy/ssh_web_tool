@@ -19,6 +19,7 @@ export function SftpPanel({ sessionId }: Props) {
   const [currentPath, setCurrentPath] = useState('/')
   const [items, setItems] = useState<SftpItem[]>([])
   const [loading, setLoading] = useState(false)
+  const [viewer, setViewer] = useState<{ name: string; content: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dropZoneRef = useRef<HTMLDivElement>(null)
 
@@ -95,15 +96,22 @@ export function SftpPanel({ sessionId }: Props) {
     const path = currentPath.replace(/\/$/, '') + '/' + name
     try {
       const data = await api.sftpRead(sessionId, path)
-      const win = window.open('', '_blank')
-      if (win) {
-        win.document.write(`<pre style="font-family:monospace;padding:20px;white-space:pre-wrap;word-break:break-all;background:#0a0e1a;color:#c8d0e0;">${escapeHtml(data.content)}</pre>`)
-        win.document.title = name
-      }
+      // 应用内弹窗预览：pywebview 桌面窗口下 window.open 新窗口请求会被转交系统浏览器，无法再用新标签页
+      setViewer({ name, content: data.content })
     } catch (e) {
       alert('读取失败: ' + (e as Error).message)
     }
   }
+
+  // 预览弹窗打开时支持 ESC 关闭
+  useEffect(() => {
+    if (!viewer) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setViewer(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [viewer])
 
   const downloadFile = (name: string) => {
     if (!sessionId) return
@@ -139,6 +147,17 @@ export function SftpPanel({ sessionId }: Props) {
 
   return (
     <div>
+      {viewer && (
+        <div className="sftp-viewer-overlay" onClick={() => setViewer(null)}>
+          <div className="sftp-viewer" onClick={(e) => e.stopPropagation()}>
+            <div className="sftp-viewer-header">
+              <span className="sftp-viewer-title">📄 {viewer.name}</span>
+              <button className="sftp-viewer-close" onClick={() => setViewer(null)} title="关闭 (ESC)">✕</button>
+            </div>
+            <pre className="sftp-viewer-content">{viewer.content}</pre>
+          </div>
+        </div>
+      )}
       <div className="sftp-path">📂 {currentPath}</div>
       <div className="sftp-toolbar">
         <button className="btn btn-secondary btn-sm" onClick={goUp}>⬆ 上级</button>
@@ -178,8 +197,4 @@ export function SftpPanel({ sessionId }: Props) {
       </div>
     </div>
   )
-}
-
-function escapeHtml(s: string): string {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }

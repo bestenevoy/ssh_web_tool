@@ -69,6 +69,9 @@ export function useTerminals(settings: TerminalSettings) {
   // 保存最新的 terminals 引用，用于回调中（解决闭包捕获旧状态导致 input_buffer 不记录的问题）
   const terminalsRef = useRef(terminals)
   terminalsRef.current = terminals
+  // 保存最新的 activeId 引用，避免 restoreTerminals 依赖 activeId 导致定时器频繁重建
+  const activeIdRef = useRef<string | null>(null)
+  activeIdRef.current = activeId
 
   // 直接发送输入到后端，不做任何延迟/合并
   const sendInput = useCallback((session_id: string, data: string) => {
@@ -548,27 +551,30 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           next.set(t.session_id, instance)
           return next
         })
-        if (!activeId) setActiveId(t.session_id)
+        if (!activeIdRef.current) setActiveId(t.session_id)
         return t.session_id
       }))
     } catch (e) {
       console.error('恢复终端失败', e)
     }
-  }, [activeId, fitTerminal, sendResize, handleTerminalInput, sendInput, ensureFit])
+  }, [fitTerminal, sendResize, handleTerminalInput, sendInput, ensureFit])
 
   // 定期同步活跃终端列表，并自动恢复新创建的终端（CLI/Python 包创建的）
+  // 优化：App.tsx 已有主机列表低频轮询（15s），这里负责发现新终端并恢复；
+  //       连接/断开等操作已在事件回调中即时同步，低频兜底即可
   useEffect(() => {
     syncActiveSessions()
     restoreTerminals()
     const timer = setInterval(() => {
       syncActiveSessions()
       restoreTerminals()
-    }, 5000)
+    }, 10000)
     return () => clearInterval(timer)
   }, [syncActiveSessions, restoreTerminals])
 
-  // 批量终端状态轮询：所有终端合并为一次 HTTP 请求（每 3 秒）
+  // 批量终端状态轮询：所有终端合并为一次 HTTP 请求（每 5 秒）
   // 优化：原每个终端独立 setInterval 3 秒轮询，5 个终端 = 每秒 ~1.7 次 HTTP 请求
+  //       批量合并后仅 1 次请求/5s；shell 类型变化不频繁，5s 轮询足够
   useEffect(() => {
     const timer = setInterval(() => {
       const ids = Array.from(terminalsRef.current.keys())
@@ -591,7 +597,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           return changed ? next : prev
         })
       }).catch(() => {})
-    }, 3000)
+    }, 5000)
     return () => clearInterval(timer)
   }, [])
 
@@ -625,10 +631,6 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
   const closeTerminal = useCallback(async (session_id: string, keepActive: boolean = false) => {
     const inst = terminals.get(session_id)
     if (!inst) return
-    // 清理输入合并缓冲与定时器
-    inputSendBufferRef.current.delete(session_id)
-    const t = inputFlushTimerRef.current.get(session_id)
-    if (t) { clearTimeout(t); inputFlushTimerRef.current.delete(session_id) }
     if (inst.ws) inst.ws.close()
     // state_timer 已改为批量轮询，不再需要单独清理
     try { await api.closeSession(session_id) } catch {}

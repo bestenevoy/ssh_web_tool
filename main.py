@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -87,14 +88,14 @@ class EventBus:
 
     def __init__(self):
         self._subscribers: set[WebSocket] = set()
-        self._history: list[dict] = []
+        self._history: deque[dict] = deque(maxlen=500)
         self._max_history = 500
 
     async def subscribe(self, ws: WebSocket):
         """订阅事件"""
         self._subscribers.add(ws)
-        # 发送历史事件
-        for event in self._history[-100:]:
+        # 发送历史事件（deque 不支持切片，取最后 100 条）
+        for event in list(self._history)[-100:]:
             try:
                 await ws.send_json(event)
             except Exception:
@@ -113,8 +114,6 @@ class EventBus:
             detail: 事件描述
             **kwargs: 附加数据
         """
-        import time
-
         event = {
             "type": "event",
             "event_type": event_type,
@@ -124,9 +123,7 @@ class EventBus:
             "time_str": time.strftime("%H:%M:%S"),
             **kwargs,
         }
-        self._history.append(event)
-        if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history :]
+        self._history.append(event)  # deque(maxlen=500) 自动淘汰旧事件，无需手动截断
         # 并行广播给所有订阅者（原串行 await 会因慢客户端阻塞其他客户端）
         if not self._subscribers:
             return
@@ -649,13 +646,13 @@ def _parse_ssh_command(data: str) -> tuple[str, int, str, str] | None:
     if at_idx <= 0:
         return None
     user_pass = rest[:at_idx]
-    host_port = rest[at_idx + 1:]
+    host_port = rest[at_idx + 1 :]
     # user:password 分割（第一个冒号）
     colon_idx = user_pass.find(":")
     if colon_idx <= 0:
         return None
     username = user_pass[:colon_idx]
-    password = user_pass[colon_idx + 1:]
+    password = user_pass[colon_idx + 1 :]
     if not username or not password or not host_port:
         return None
     # 解析 host:port
@@ -1243,11 +1240,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 switch = session.take_switch_notice()
                 if switch:
                     label = "PowerShell" if switch in ("powershell", "pwsh") else "cmd"
-                    await websocket.send_json({
-                        "type": "switched_to_local",
-                        "shell": switch,
-                        "terminal_name": f"本机 {label}",
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "switched_to_local",
+                            "shell": switch,
+                            "terminal_name": f"本机 {label}",
+                        }
+                    )
                 data = await listener.get()
                 await websocket.send_json({"type": "output", "data": data})
         except Exception:
@@ -1368,22 +1367,25 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                         )
                         try:
                             await session.switch_to_ssh(ssh_host, ssh_port, ssh_user, ssh_pass)
-                            await websocket.send_json({
-                                "type": "ssh_connected",
-                                "host": ssh_host,
-                                "port": ssh_port,
-                                "username": ssh_user,
-                                "terminal_name": f"{ssh_user}@{ssh_host}",
-                            })
+                            await websocket.send_json(
+                                {
+                                    "type": "ssh_connected",
+                                    "host": ssh_host,
+                                    "port": ssh_port,
+                                    "username": ssh_user,
+                                    "terminal_name": f"{ssh_user}@{ssh_host}",
+                                }
+                            )
                             await event_bus.publish(
-                                "session_create", "local-ssh",
+                                "session_create",
+                                "local-ssh",
                                 f"本地终端拦截 SSH 连接 {session.session_id} -> {ssh_user}@{ssh_host}:{ssh_port}",
-                                session_id=session.session_id, host=ssh_host, port=ssh_port,
+                                session_id=session.session_id,
+                                host=ssh_host,
+                                port=ssh_port,
                             )
                         except Exception as e:
-                            await session._broadcast_output(
-                                f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n"
-                            )
+                            await session._broadcast_output(f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n")
                         return  # 拦截成功（或失败已提示），不写入本地 shell
                 # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入。
                 # SSH 已退出/断开时（自动切换本机终端或自动重连进行中）先等状态收敛：
@@ -1555,11 +1557,76 @@ async def websocket_external(websocket: WebSocket, session_id: str):
 
 
 def _acquire_single_instance() -> bool:
-    """单实例检查：已有一个实例在运行时返回 False（Windows 命名 Mutex）"""
+    """单实例检查：已有一个实例在运行时返回 False（Windows 命名 Mutex）
+
+    注意：必须用 use_last_error=True + ctypes.get_last_error()。
+    ctypes.windll.kernel32.GetLastError() 的返回值会被 ctypes 自身的
+    内部调用覆盖，导致单实例检查误判（多个实例同时通过检查）。
+    """
     import ctypes
 
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\SSHWebTool_SingleInstance")
-    return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW(None, False, "Local\\SSHWebTool_SingleInstance")
+    return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+
+
+def _exit_quietly(code: int = 0) -> None:
+    """启动阶段的提前退出。
+
+    history_db.init_db() 已打开 aiosqlite 单例连接，其内部工作线程是
+    非守护线程（aiosqlite/core.py Thread 无 daemon=True），main() 直接
+    return 会留下一个无窗口僵尸进程（用户看到"启动了但没反应"），
+    必须先关闭数据库再硬退出。
+    """
+    try:
+        asyncio.run(history_db.close_db())
+    except Exception:
+        pass
+    # os._exit 不刷新缓冲：管道/终端下提前 print 的提示会丢失，先手动 flush
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
+def _check_webview2_runtime() -> bool:
+    """检查 WebView2 Runtime 是否已安装。
+
+    pywebview 在 Windows 上优先使用 EdgeChromium（WebView2）内核，
+    但运行时缺失时会静默回退到 MSHTML（IE 内核）——现代前端页面将完全无法渲染。
+    这里提前检测，缺失时给出明确提示而不是让用户面对白屏。
+
+    注意：机器级安装的 WebView2 注册在 HKLM 的 32 位视图（WOW6432Node）下，
+    64 位 Python 默认视图看不到，必须显式用 KEY_WOW64_32KEY 读取。
+    """
+    import winreg
+
+    # WebView2 Runtime 稳定版的注册表 GUID（与 pywebview 内部检测一致）
+    guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                with winreg.OpenKey(
+                    root, rf"Software\Microsoft\EdgeUpdate\Clients\{guid}", 0, winreg.KEY_READ | view
+                ) as key:
+                    pv = winreg.QueryValueEx(key, "pv")[0]
+                    if pv and pv != "0.0.0.0":
+                        return True
+            except OSError:
+                continue
+
+    # 兜底：注册表异常时直接找安装目录下的 msedgewebview2.exe（覆盖非常规安装方式）
+    import glob
+    import os
+
+    for env in ("ProgramFiles(x86)", "ProgramFiles", "LocalAppData"):
+        base = os.environ.get(env)
+        if base and glob.glob(os.path.join(base, "Microsoft", "EdgeWebView", "Application", "*", "msedgewebview2.exe")):
+            return True
+    return False
 
 
 def main():
@@ -1579,7 +1646,6 @@ def main():
         CONFIG_FILE_NAME,
         ensure_config_file,
         ensure_data_dir,
-        find_config_file,
         get_app_dir,
         load_config,
         migrate_legacy_data,
@@ -1599,10 +1665,29 @@ def main():
     except Exception as e:
         print(f"[history] 初始化历史数据库失败: {e}")
 
-    # 单实例：已有实例在运行则退出
+    # 单实例：已有实例在运行则退出（windowed EXE 无控制台，print 不可见，需弹窗提示）
     if not _acquire_single_instance():
-        print("SSH Web Tool 已在运行，本实例退出")
-        return
+        msg = "SSH Web Tool 已在运行，请勿重复启动。\n\n（如需重新启动，请先退出已运行的实例）"
+        print(msg)
+        if hasattr(sys, "frozen"):
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, msg, "SSH Web Tool", 0x40)  # MB_ICONINFORMATION
+        _exit_quietly(0)
+
+    # WebView2 Runtime 缺失时 pywebview 会静默回退 IE 内核，页面无法渲染；提前拦截并指引安装
+    if sys.platform == "win32" and not _check_webview2_runtime():
+        msg = (
+            "未检测到 Microsoft WebView2 Runtime，桌面窗口无法启动。\n\n"
+            "请安装后重试：\n"
+            "https://developer.microsoft.com/microsoft-edge/webview2/\n\n"
+            "（Win10/11 通常已内置，多数情况只需下载 Evergreen Bootstrapper 一键安装）"
+        )
+        print(msg)
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(0, msg, "SSH Web Tool", 0x30)  # MB_ICONWARNING
+        _exit_quietly(1)
 
     # 加载配置
     ensure_config_file()
@@ -1689,6 +1774,10 @@ def main():
     # 启动 pywebview 窗口
     import webview
 
+    # 允许网页触发下载（SFTP 下载走 <a download>，pywebview 默认禁止下载）
+    # 开启后 WebView2 会弹原生"另存为"对话框
+    webview.settings["ALLOW_DOWNLOADS"] = True
+
     def on_closing():
         """窗口关闭确认"""
         import ctypes
@@ -1714,10 +1803,13 @@ def main():
         width=1280,
         height=800,
         min_size=(800, 500),
-        text_select=True,
+        text_select=False,  # CSS 层面精细控制：标题/标签禁止选中，终端/输入框允许选中
     )
-    window.closing += on_closing
-    webview.start()
+    # pywebview 事件挂在 window.events 上；closing 处理器返回 False 可取消关闭
+    window.events.closing += on_closing
+    # 打包后关闭 debug（减少内存/CPU）；开发时保留 debug 以便 F12 开发者工具
+    is_debug = not hasattr(sys, "frozen")
+    webview.start(debug=is_debug)
 
 
 if __name__ == "__main__":

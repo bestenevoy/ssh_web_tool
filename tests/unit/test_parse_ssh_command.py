@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """解析本地终端 ssh user:password@host 命令的单元测试"""
+
 from main import _parse_ssh_command
 
 
