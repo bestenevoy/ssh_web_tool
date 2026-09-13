@@ -23,6 +23,68 @@ import asyncssh
 _patch_guard = threading.local()
 
 
+class _DirectPtyWrapper:
+    """直接包装底层 PTY 对象，提供与 PtyProcess 兼容的接口
+
+    绕过 PtyProcess 的 socket 转发层（_read_in_thread），直接使用 PTY 对象的
+    read/write/isalive/set_size 方法。read 由 _start_local_reader 中的轮询线程
+    直接调用 pty.read(blocking=False)，不经过此 wrapper。
+    """
+
+    def __init__(self, pty_obj: Any):
+        self.pty = pty_obj
+        self.pid = pty_obj.pid
+
+    def write(self, data: str) -> int:
+        """写入数据到 PTY"""
+        return self.pty.write(data)
+
+    def isalive(self) -> bool:
+        """检查进程是否存活"""
+        try:
+            return bool(self.pty.isalive())
+        except Exception:
+            return False
+
+    def setwinsize(self, rows: int, cols: int) -> None:
+        """调整终端尺寸（PTY.set_size 参数顺序为 cols, rows）"""
+        try:
+            self.pty.set_size(cols, rows)
+        except Exception:
+            pass
+
+    def terminate(self, force: bool = False) -> None:
+        """终止进程（与 PtyProcess.terminate 逻辑一致）"""
+        if not self.isalive():
+            return
+        import signal
+
+        try:
+            os.kill(self.pid, signal.SIGINT)
+        except Exception:
+            pass
+        try:
+            self.pty.cancel_io()
+        except Exception:
+            pass
+        time.sleep(0.1)
+        if not self.isalive():
+            return
+        if force:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+    def get_exitstatus(self) -> int | None:
+        """获取退出状态"""
+        try:
+            return self.pty.get_exitstatus()
+        except Exception:
+            return None
+
+
 def get_data_dir() -> str:
     """获取数据文件目录（统一在 ~/.ai4one/wstool）"""
     from .config import get_app_dir
@@ -79,8 +141,8 @@ class SSHSession:
         # 避免把每次刷新的中间回显都写进日志（只记录最终显示内容）
         self._log_buf = ""
         self._log_flush_task: asyncio.Task | None = None
-        # 本地 shell（winpty ConPTY，本机 cmd/powershell；SSH 断开后可自动切换）
-        self._local_proc: Any = None  # winpty.PtyProcess（动态导入，类型标注为 Any）
+        # 本地 shell（WinPTY 后端，本机 cmd/powershell；SSH 断开后可自动切换）
+        self._local_proc: Any = None  # winpty.PtyProcess（backend=1 WinPTY，动态导入，类型标注为 Any）
         # 外部镜像会话属性（paramiko/asyncssh monkey-patch 注册时动态设置）
         self._external: bool = False
         self._paramiko_client: Any = None
@@ -642,7 +704,7 @@ class SSHSession:
     async def start_output_reader(self):
         """启动后台协程持续读取 stdout 并广播（幂等，重复调用不会重复启动）
 
-        本地 shell（ConPTY）走 _start_local_reader（to_thread 读取，不阻塞事件循环）
+        本地 shell（WinPTY）走 _start_local_reader（to_thread 读取，不阻塞事件循环）
         """
         if self._local_proc is not None:
             self._start_local_reader()
@@ -681,7 +743,7 @@ class SSHSession:
             self._reader_task.cancel()
             self._reader_task = None
 
-    # ============ 本地 shell（winpty ConPTY：本机 cmd / powershell） ============
+    # ============ 本地 shell（WinPTY 后端：本机 cmd / powershell） ============
 
     def is_local(self) -> bool:
         """当前是否运行在本地 shell（非 SSH）"""
@@ -692,10 +754,13 @@ class SSHSession:
         """正在自动切换到本机 shell（输入路径据此等待状态收敛，避免写入已关闭的 SSH 通道）"""
         return self._switching_local
 
-    async def start_local_shell(self, shell: str = "cmd", cols: int = 120, rows: int = 40):
-        """启动本机交互式 shell（ConPTY）。SSH 断开自动切换或用户主动创建本地终端时调用
+    async def start_local_shell(self, shell: str = "cmd", cols: int = 120, rows: int = 40, start_reader: bool = True):
+        """启动本机交互式 shell（WinPTY）。SSH 断开自动切换或用户主动创建本地终端时调用
 
         - shell: 'cmd' / 'powershell' / 'pwsh'
+        - start_reader: 是否立即启动输出读取器。HTTP API 创建本机终端时传 False，
+          由后续 WebSocket 连接的 start_output_reader 统一启动，确保 listener 先注册，
+          避免初始提示符输出在无 listener 时被丢弃导致前端永远等不到首包。
         - 复用现有广播/日志/监听机制，前端协议与 SSH 会话完全一致
         """
         if shell == "powershell":
@@ -705,7 +770,7 @@ class SSHSession:
         else:
             argv = ["cmd.exe"]
         try:
-            import winpty
+            import winpty  # noqa: F401 — 仅检测可用性，实际使用 winpty._winpty.PTY
         except ImportError as e:
             # 打包后 winpty.dll 加载失败常见原因：目标机器缺 VC++ Redistributable
             raise RuntimeError(
@@ -715,7 +780,30 @@ class SSHSession:
                 f"原始错误: {e}"
             )
         # 延迟 import：非 Windows/未安装时不影响主程序（本地终端功能按需可用）
-        proc = winpty.PtyProcess.spawn(argv, dimensions=(rows, cols), backend=1)
+        # pywinpty 枚举：Backend.ConPTY=0, Backend.WinPTY=1
+        # 使用 backend=1（WinPTY 传统控制台代理）：在 Windows 11 26200 上输入回显即时、
+        # 启动提示符秒出。backend=0（ConPTY）在本系统上输出通知不可靠：
+        # 逐字符输入回显延迟（需下次输入才冲刷）、提示符出现需 3.5s，故不使用 ConPTY。
+        #
+        # 直接使用底层 PTY 对象（绕过 PtyProcess 的 socket 转发层）：
+        # PtyProcess 内部启动 _read_in_thread 线程通过 socket 转发 PTY 输出，
+        # 该线程会消费 PTY 数据，导致我们的直接读取竞争丢数据；
+        # 且 socket 转发有不可控的缓冲延迟（数秒）。
+        # 直接使用 PTY 对象的 read(blocking=False) + write() + isalive() + set_size()，
+        # 完全绕过 socket 层，输出延迟 < 50ms。
+        from winpty._winpty import PTY
+
+        pty_obj = PTY(cols, rows, backend=1)
+        # 构建环境变量字符串（name=value\0name=value\0...\0）
+        env_str = "\0".join(f"{k}={v}" for k, v in os.environ.items()) + "\0"
+        # PTY.spawn 需要完整路径（不像 PtyProcess.spawn 会搜索 PATH）
+        import shutil
+
+        appname = shutil.which(argv[0]) or argv[0]
+        cmdline = " ".join(argv[1:]) if len(argv) > 1 else None
+        pty_obj.spawn(appname, cmdline=cmdline, cwd=os.getcwd(), env=env_str)
+        # 包装为类 PtyProcess 接口的对象（write/isalive/setwinsize/terminate/get_exitstatus）
+        proc = _DirectPtyWrapper(pty_obj)
         self._local_proc = proc
         self._local_shell = shell
         self._last_cols = cols
@@ -724,39 +812,124 @@ class SSHSession:
         self._has_shell = True
         self.last_active = time.time()
         # 与 SSH shell 共用输出广播/日志/监听（输出循环由 stop_local_reader 管理）
-        self._start_local_reader()
+        # start_reader=False 时由调用方后续通过 start_output_reader 统一启动
+        if start_reader:
+            self._start_local_reader()
         return proc
 
     def _start_local_reader(self):
-        """本地 shell 输出读取协程（to_thread 避免阻塞事件循环）"""
+        """本地 shell 输出读取协程
+
+        直接使用底层 PTY 对象的非阻塞读取（blocking=False），绕过 PtyProcess 的
+        socket 转发层（_read_in_thread → socket → recv），该层在 asyncio.to_thread
+        中有不可控的缓冲延迟（read() 阻塞数秒才返回）。
+        通过独立线程轮询 PTY.read(blocking=False)，有数据时通过 loop.call_soon_threadsafe
+        投递到 asyncio.Queue，协程端异步消费并广播。
+        """
         if self._local_reader_task and not self._local_reader_task.done():
             return
 
+        pty_obj = getattr(self._local_proc, "pty", None)
+        loop = asyncio.get_running_loop()
+
+        if pty_obj is None:
+            # 回退路径：直接用 PtyProcess.read（socket 转发，有延迟但兼容旧版 pywinpty）
+            async def _reader():
+                try:
+                    while True:
+                        try:
+                            data = await asyncio.to_thread(self._local_proc.read, 4096)
+                        except EOFError:
+                            break
+                        if not data:
+                            break
+                        self.last_active = time.time()
+                        await self._broadcast_output(data)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    import traceback
+
+                    print(f"[local-shell] reader 异常: {traceback.format_exc()}")
+
+            self._local_reader_task = asyncio.create_task(_reader())
+            return
+
+        # 主路径：独立线程轮询 PTY.read(blocking=False)，实时推送输出
+        import threading
+
+        read_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+        _stop_flag = threading.Event()
+        self._local_poll_stop = _stop_flag  # 保存引用以便 stop_local_reader 能停止线程
+
+        def _poll_pty():
+            """轮询 PTY 非阻塞读取，有数据时投递到 asyncio Queue"""
+            import os as _os
+
+            _dbg = _os.environ.get("WST_LOCAL_DEBUG")
+            while not _stop_flag.is_set():
+                try:
+                    data = pty_obj.read(blocking=False)
+                    if data:
+                        if _dbg:
+                            print(f"  [poll] got {len(data)} bytes", flush=True)
+                        loop.call_soon_threadsafe(_safe_put, read_queue, data)
+                    else:
+                        _stop_flag.wait(0.005)  # 5ms 轮询间隔
+                except Exception as e:
+                    if _dbg:
+                        print(f"  [poll] error: {e}", flush=True)
+                    # PTY 关闭/错误：投递 None 通知协程退出
+                    try:
+                        loop.call_soon_threadsafe(_safe_put, read_queue, None)
+                    except Exception:
+                        pass
+                    break
+
+        def _safe_put(queue: asyncio.Queue, item: str | None):
+            """安全放入队列（满时丢弃旧数据避免阻塞事件循环）"""
+            try:
+                if queue.qsize() >= 256:
+                    queue.get_nowait()  # 丢弃最旧的数据
+                queue.put_nowait(item)
+            except Exception:
+                pass
+
         async def _reader():
+            thread = threading.Thread(target=_poll_pty, daemon=True)
+            thread.start()
             try:
                 while True:
-                    data = await asyncio.to_thread(self._local_proc.read, 4096)
+                    data = await read_queue.get()
+                    if data is None:
+                        break  # PTY 关闭
                     if not data:
-                        break
+                        continue
                     self.last_active = time.time()
                     await self._broadcast_output(data)
             except asyncio.CancelledError:
-                pass
+                _stop_flag.set()
             except Exception:
                 import traceback
 
                 print(f"[local-shell] reader 异常: {traceback.format_exc()}")
+            finally:
+                _stop_flag.set()
 
         self._local_reader_task = asyncio.create_task(_reader())
 
     def stop_local_reader(self):
         """停止本地 shell 输出读取器"""
+        # 停止轮询线程
+        poll_stop = getattr(self, "_local_poll_stop", None)
+        if poll_stop is not None:
+            poll_stop.set()
         if self._local_reader_task:
             self._local_reader_task.cancel()
             self._local_reader_task = None
 
     async def write_local(self, data: str):
-        """向前台本地 shell 写入输入（转码为 str；ConPTY 期望 str）"""
+        """向前台本地 shell 写入输入（转码为 str；WinPTY 期望 str）"""
         if self._local_proc is not None:
             try:
                 self._local_proc.write(data)
@@ -1288,8 +1461,8 @@ class SSHSession:
             self._sftp = None
 
     def is_alive(self) -> bool:
-        """检测连接是否真的活着（不只是标志位）；本地 shell 检查 ConPTY 进程"""
-        # 本地 shell（winpty ConPTY）
+        """检测连接是否真的活着（不只是标志位）；本地 shell 检查 WinPTY 进程"""
+        # 本地 shell（WinPTY）
         if self._local_proc is not None:
             try:
                 return bool(self._local_proc.isalive())
@@ -1337,7 +1510,7 @@ class SSHSession:
             return False
 
     def is_shell_alive(self) -> bool:
-        """检测 shell 进程/channel 是否真的活着（不只是标志位）；本地 shell 检查 ConPTY"""
+        """检测 shell 进程/channel 是否真的活着（不只是标志位）；本地 shell 检查 WinPTY"""
         if self._local_proc is not None:
             try:
                 return bool(self._local_proc.isalive())

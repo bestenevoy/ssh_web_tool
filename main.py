@@ -363,7 +363,7 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
 
 @app.post("/api/local/session")
 async def api_create_local_session(req: dict | None = None):
-    """创建本机终端（cmd / powershell，winpty ConPTY 交互式 shell，不经过 SSH）
+    """创建本机终端（cmd / powershell，WinPTY 交互式 shell，不经过 SSH）
 
     前端"本机终端"入口调用；会话协议与 SSH 终端完全一致（output/input/resize）。
     """
@@ -380,7 +380,7 @@ async def api_create_local_session(req: dict | None = None):
     session = session_manager.get_session(session_id)
     assert session is not None
     try:
-        await session.start_local_shell(shell=shell, cols=120, rows=40)
+        await session.start_local_shell(shell=shell, cols=120, rows=40, start_reader=False)
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"启动本地 shell 失败: {e!s}")
@@ -1222,11 +1222,12 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         await websocket.close()
         return
 
-    # 先注册输出监听器再启动 shell：banner/MOTD 等首包输出不丢失
-    # （此前在 start_interactive_shell 之后注册，SSH 连接横幅在 listener 就绪前
-    #  已被广播丢弃，前端只剩提示符——用户反馈"连接后的主机信息没有显示"）
-    await session.start_output_reader()
+    # 先注册输出监听器再启动 reader：banner/MOTD/提示符等首包输出不丢失
+    # 本地终端场景尤其关键：WinPTY read() 阻塞等待，初始提示符只输出一次，
+    # 若 listener 未注册就启动 reader，提示符被广播到空 listener 列表后丢失，
+    # 前端永远等不到首包（local_starting 无法清除）。
     listener = session.add_output_listener()
+    await session.start_output_reader()
 
     async def read_output():
         try:
@@ -1289,7 +1290,29 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     # 不发送"已恢复已有终端会话"提示（用户反馈无意义；恢复内容由前端历史输出直接体现）
     pending_msg = None  # 初始化：如果第一个消息不是 resize，保存下来在消息循环中处理
     if session.is_local() and session.is_shell_alive():
-        pass  # 本机 shell 已就绪，直接复用
+        # 本机 shell 已就绪：等待前端 resize 消息，用正确尺寸调整 PTY
+        # 原因：PTY 在 API 调用时以默认 120x40 创建，但前端 xterm 实际尺寸可能不同，
+        # 尺寸不一致会导致 cmd 的绝对光标定位序列（\x1b[NG）在 xterm 中错位
+        # 若尺寸有变化，额外发送 Ctrl+L 让 cmd 用新尺寸重绘提示符（光标位置正确）
+        try:
+            async with asyncio.timeout(0.5):  # type: ignore[attr-defined]
+                raw = await websocket.receive_text()
+                try:
+                    first_msg = json.loads(raw)
+                    if first_msg.get("type") == "resize":
+                        new_cols = first_msg.get("cols", 120)
+                        new_rows = first_msg.get("rows", 40)
+                        size_changed = new_cols != session._last_cols or new_rows != session._last_rows
+                        session.resize_local(new_cols, new_rows)
+                        if size_changed:
+                            # 尺寸有变化：发送 Ctrl+L 让 cmd 用新尺寸重绘提示符
+                            await session.write_local("\x0c")
+                    else:
+                        pending_msg = raw
+                except json.JSONDecodeError:
+                    pending_msg = raw
+        except asyncio.TimeoutError:
+            pass
     elif session._has_shell and session.process is not None and session.is_shell_alive():
         pass
     elif session.is_local():
@@ -1387,7 +1410,7 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                         except Exception as e:
                             await session._broadcast_output(f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n")
                         return  # 拦截成功（或失败已提示），不写入本地 shell
-                # 本地 shell（ConPTY）直接写入；SSH shell 直接尝试写入。
+                # 本地 shell（WinPTY）直接写入；SSH shell 直接尝试写入。
                 # SSH 已退出/断开时（自动切换本机终端或自动重连进行中）先等状态收敛：
                 # 期间 process 可能是已关闭的通道，直接写会报 "Channel not open for sending"
                 try:

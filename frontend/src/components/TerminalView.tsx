@@ -28,7 +28,14 @@ export function TerminalView({ terminals, activeId, registerContainer }: Props) 
           key={t.session_id}
           ref={setRef(t.session_id)}
           className={`terminal-instance${t.session_id === activeId ? ' active' : ''}`}
-        />
+        >
+          {t.local_starting && (
+            <div className="terminal-starting">
+              <div className="terminal-starting-spinner" />
+              <div className="terminal-starting-text">正在启动本机终端…</div>
+            </div>
+          )}
+        </div>
       ))}
       {terminals.size === 0 && (
         <div className="empty-state">

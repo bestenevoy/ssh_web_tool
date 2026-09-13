@@ -44,6 +44,8 @@ export function setupTerminalCopy(term: Terminal, onAltR?: () => void) {
     if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
       if (term.hasSelection()) {
         copySelection(term)
+        // 清除选区：下次 Ctrl+C 能正常发送 SIGINT（避免选区残留导致 Ctrl+C 始终只复制不中断）
+        term.clearSelection()
         return false  // 阻止 xterm 把 Ctrl+C 发送到终端
       }
     }

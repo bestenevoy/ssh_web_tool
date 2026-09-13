@@ -199,6 +199,20 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 }
 .terminal-instance.active { display: block; }
 .terminal-instance .xterm { height: 100%; }
+.terminal-starting {
+  position: absolute; inset: 0; z-index: 10;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  background: var(--bg-primary, #0a0e1a); color: var(--text-secondary, #8a93a6);
+  font-size: 13px; user-select: none; pointer-events: none;
+}
+.terminal-starting-spinner {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 3px solid rgba(233, 69, 96, 0.2); border-top-color: #e94560;
+  animation: terminal-starting-spin 0.9s linear infinite;
+}
+@keyframes terminal-starting-spin { to { transform: rotate(360deg); } }
+.terminal-starting-text { letter-spacing: 0.5px; }
+
 
 .empty-state {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);

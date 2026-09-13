@@ -25,6 +25,7 @@ export interface TerminalInstance {
   input_cursor: number  // 输入行光标位置（行编辑用，精确跟踪命令内容）
   disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
   ssh_exited: boolean  // SSH exit 退出后自动切换到本地终端，可点重连回到原 SSH 主机
+  local_starting: boolean  // 本机终端创建后等待首批输出（开启启动提示）；收到第一条 output 后变 false
 }
 
 // 获取 shell 类型标签
@@ -268,7 +269,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       let tname: string
       let hostLike: { id: string; host: string; name: string; type: string }
       if (kind === 'local') {
-        // 本机终端（cmd/powershell，winpty ConPTY，不经过 SSH）
+        // 本机终端（cmd/powershell，WinPTY，不经过 SSH）
         const r = await api.createLocalSession(localShell)
         session_id = r.session_id
         tname = r.terminal_name || terminal_name || (localShell === 'powershell' ? '本机 PowerShell' : '本机 cmd')
@@ -351,7 +352,19 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data)
-          if (msg.type === 'output') term.write(msg.data)
+          if (msg.type === 'output') {
+            term.write(msg.data)
+            // 首批输出已到：清除“正在启动”提示
+            setTerminals((prev) => {
+              const cur = prev.get(session_id)
+              if (cur && cur.local_starting) {
+                const next = new Map(prev)
+                next.set(session_id, { ...cur, local_starting: false })
+                return next
+              }
+              return prev
+            })
+          }
           else if (msg.type === 'ssh_connected') {
             // 本地终端拦截 SSH 后切换为远端终端：更新标签信息
             setTerminals((prev) => {
@@ -411,6 +424,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         input_cursor: 0,
         disconnected: false,
         ssh_exited: false,
+        local_starting: kind === 'local',
       }
 
       setTerminals((prev) => {
@@ -481,7 +495,19 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         ws.onmessage = (event) => {
           try {
             const msg = JSON.parse(event.data)
-            if (msg.type === 'output') term.write(msg.data)
+            if (msg.type === 'output') {
+              term.write(msg.data)
+              // 首批输出已到：清除“正在启动”提示
+              setTerminals((prev) => {
+                const cur = prev.get(t.session_id)
+                if (cur && cur.local_starting) {
+                  const next = new Map(prev)
+                  next.set(t.session_id, { ...cur, local_starting: false })
+                  return next
+                }
+                return prev
+              })
+            }
             else if (msg.type === 'ssh_connected') {
               // 本地终端拦截 SSH 后切换为远端终端：更新标签信息
               setTerminals((prev) => {
@@ -544,6 +570,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           input_cursor: 0,
           disconnected: false,
         ssh_exited: false,
+        local_starting: false,
         }
 
         setTerminals((prev) => {
@@ -747,7 +774,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     connecting,
     activeSessions,
     createTerminal,
-    // 打开本机终端（cmd / powershell，winpty ConPTY，不经过 SSH）
+    // 打开本机终端（cmd / powershell，WinPTY，不经过 SSH）
     openLocalTerminal: (shell: 'cmd' | 'powershell') =>
       createTerminal({} as Host, undefined, 'local', shell),
     restoreTerminals,
