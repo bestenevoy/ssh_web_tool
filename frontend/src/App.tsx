@@ -27,6 +27,7 @@ function App() {
   const [hostTypes, setHostTypes] = useState<HostType[]>([])
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
   const [fallbackShell, setFallbackShell] = useState('cmd')
+  const [configFile, setConfigFile] = useState('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
   const [panelTab, setPanelTab] = useState<PanelTab>('quick')
@@ -100,7 +101,10 @@ function App() {
   useEffect(() => {
     loadHosts()
       api.getConfig()
-        .then((c) => { if (c?.fallback_local_shell) setFallbackShell(c.fallback_local_shell) })
+        .then((c) => {
+          if (c?.fallback_local_shell) setFallbackShell(c.fallback_local_shell)
+          if (c?.config_file) setConfigFile(c.config_file)
+        })
         .catch(() => {})
     loadQuickCommands()
     terminals.restoreTerminals()
@@ -555,6 +559,7 @@ function App() {
             groups={groups}
             activeHostId={activeHostId}
             fallbackShell={fallbackShell}
+            configFile={configFile}
             onSetFallbackShell={handleSetFallbackShell}
             onHostClick={handleHostClick}
             onOpenLocalTerminal={(shell: 'cmd' | 'powershell') => {

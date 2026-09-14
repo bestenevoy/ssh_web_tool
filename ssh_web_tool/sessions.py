@@ -1672,15 +1672,20 @@ class SSHSession:
             return False
         try:
             # 检查连接对象是否还活着
-            if hasattr(self.conn, "_transport") and self.conn._transport:
-                if self.conn._transport.is_closing():
+            # 关键：asyncssh 连接断开后会把 _transport 置为 None（连接对象本身仍在）。
+            # 旧代码 hasattr 为 True 但值为 None 时跳过 if 分支，elif 又因 asyncssh
+            # 无 is_closing 方法而失效，断线会话被误判存活 → 监控永不切换、
+            # 输入永远报"SSH 通道已关闭"。_transport 为 None 即连接已死。
+            if hasattr(self.conn, "_transport"):
+                transport = self.conn._transport
+                if transport is None or transport.is_closing():
                     return False
-            # 备用方法：检查 conn 是否有 is_closing 方法
+            # 备用方法：检查 conn 是否有 is_closing 方法（非 asyncssh 连接类型）
             elif hasattr(self.conn, "is_closing") and self.conn.is_closing():  # type: ignore[attr-defined]
                 return False
             # 补充：检查 shell channel 是否仍可用（transport 可能短暂保持但 channel 已关）
             if self._has_shell and self.process is not None:
-                ch = getattr(self.process, "_channel", None)
+                ch = getattr(self.process, "_chan", None)  # asyncssh 真实属性是 _chan
                 if ch is not None:
                     try:
                         if ch.is_closing():
@@ -1702,13 +1707,14 @@ class SSHSession:
             return False
         try:
             # 0. channel 层检查：channel 已关闭则 shell 不可用
-            ch = getattr(self.process, "_channel", None)
+            #    注意：asyncssh 进程的真实通道属性是 _chan（旧代码用 _channel 永远取不到，
+            #    断线后 _chan 标记 closing 或置空，误判 shell 存活）；通道对象不存在即已死
+            ch = getattr(self.process, "_chan", None)
             if ch is not None:
-                try:
-                    if ch.is_closing():
-                        return False
-                except Exception:
-                    pass
+                if ch.is_closing():
+                    return False
+            else:
+                return False
             # 1. 优先检查内部进程对象是否存在
             if hasattr(self.process, "_process") and self.process._process is not None:  # type: ignore[attr-defined]
                 # 检查内部进程是否已退出

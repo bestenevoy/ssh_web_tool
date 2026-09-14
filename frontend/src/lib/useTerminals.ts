@@ -327,6 +327,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         theme: getTerminalTheme(s),
         fontFamily: s.fontFamily,
         fontSize: s.fontSize,
+        // 中文（微软雅黑）字形顶部超出 Consolas 度量的单元格，lineHeight=1 时顶部被裁切，
+        // 给行高留出余量（1.2）确保 CJK 字形完整显示
+        lineHeight: 1.2,
         // 保留足够滚动历史：clear/连接时不丢之前内容（只能滚动回看）
         scrollback: 5000,
       })
@@ -514,6 +517,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           theme: getTerminalTheme(s),
           fontFamily: s.fontFamily,
           fontSize: s.fontSize,
+          lineHeight: 1.2,
         })
         const fitAddon = new FitAddon()
         term.loadAddon(fitAddon)

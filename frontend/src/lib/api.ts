@@ -40,7 +40,7 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
 // 主机管理
 export const api = {
   // 全局配置
-  getConfig: () => request<{ fallback_local_shell: string; local_shell_choices: string[] }>('/api/config'),
+  getConfig: () => request<{ fallback_local_shell: string; local_shell_choices: string[]; config_file: string }>('/api/config'),
   // 设置 SSH 断开后自动进入的本机终端（cmd / powershell / pwsh）
   setFallbackShell: (shell: string) =>
     request<{ status: string; fallback_local_shell: string }>('/api/config/fallback-shell', {

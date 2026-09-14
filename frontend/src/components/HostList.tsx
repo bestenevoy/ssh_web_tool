@@ -8,6 +8,7 @@ interface Props {
   groups: string[]
   activeHostId: string | null
   fallbackShell: string
+  configFile: string
   onSetFallbackShell: (shell: string) => void
   onHostClick: (host: Host) => void
   onOpenLocalTerminal: (shell: 'cmd' | 'powershell') => void
@@ -26,7 +27,7 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
 }
 
-export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, fallbackShell, onSetFallbackShell, onHostClick, onOpenLocalTerminal, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, fallbackShell, configFile, onSetFallbackShell, onHostClick, onOpenLocalTerminal, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -187,6 +188,7 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
           <option value="powershell">PowerShell</option>
         </select>
       </div>
+      <div className="config-path-hint" title="编辑此文件后重启生效">配置文件：{configFile || '（加载中）'}</div>
       {orderedGroups.map((group) => {
         const groupHosts = grouped[group] || []
         if (groupHosts.length === 0) return null

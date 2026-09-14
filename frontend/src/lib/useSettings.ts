@@ -12,20 +12,20 @@ const STORAGE_KEY = 'ssh-web-tool-settings'
 
 const DEFAULT_SETTINGS: TerminalSettings = {
   theme: 'dark',
-  fontFamily: 'Consolas, Monaco, monospace',
+  fontFamily: 'Consolas, "Microsoft YaHei", monospace',
   fontSize: 13,
 }
 
 // 可选字体列表
 export const FONT_OPTIONS = [
-  { label: 'Consolas', value: 'Consolas, Monaco, monospace' },
-  { label: 'Monaco', value: 'Monaco, Consolas, monospace' },
-  { label: 'Menlo', value: 'Menlo, Consolas, monospace' },
-  { label: 'Courier New', value: '"Courier New", Courier, monospace' },
-  { label: 'Source Code Pro', value: '"Source Code Pro", Consolas, monospace' },
-  { label: 'Fira Code', value: '"Fira Code", Consolas, monospace' },
-  { label: 'JetBrains Mono', value: '"JetBrains Mono", Consolas, monospace' },
-  { label: 'Cascadia Code', value: '"Cascadia Code", Consolas, monospace' },
+  { label: 'Consolas', value: 'Consolas, Monaco, "Microsoft YaHei", monospace' },
+  { label: 'Monaco', value: 'Monaco, Consolas, "Microsoft YaHei", monospace' },
+  { label: 'Menlo', value: 'Menlo, Consolas, "Microsoft YaHei", monospace' },
+  { label: 'Courier New', value: '"Courier New", Courier, "Microsoft YaHei", monospace' },
+  { label: 'Source Code Pro', value: '"Source Code Pro", Consolas, "Microsoft YaHei", monospace' },
+  { label: 'Fira Code', value: '"Fira Code", Consolas, "Microsoft YaHei", monospace' },
+  { label: 'JetBrains Mono', value: '"JetBrains Mono", Consolas, "Microsoft YaHei", monospace' },
+  { label: 'Cascadia Code', value: '"Cascadia Code", Consolas, "Microsoft YaHei", monospace' },
 ]
 
 function loadSettings(): TerminalSettings {

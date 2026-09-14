@@ -115,12 +115,12 @@ def get_fallback_local_shell(cfg: dict | None = None) -> str:
 
 
 def save_config(cfg: dict) -> bool:
-    """把配置写回配置文件（~/.ai4one/wstool/config.json，保留注释不可行——纯 JSON 覆盖写）
+    """把配置写回当前生效的配置文件（find_config_file 定位到的那个，保证"改哪读哪"）
 
-    仅当配置目录下已有 config.json 时写入；无配置文件则创建。
+    未找到任何现有配置文件时写入统一数据目录 ~/.ai4one/wstool/config.json。
     """
     try:
-        path = get_app_dir() / CONFIG_FILE_NAME
+        path = find_config_file() or (get_app_dir() / CONFIG_FILE_NAME)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
@@ -130,9 +130,26 @@ def save_config(cfg: dict) -> bool:
 
 
 def find_config_file() -> Path | None:
-    """查找配置文件（统一在数据目录 ~/.ai4one/wstool 中）"""
-    p = get_app_dir() / CONFIG_FILE_NAME
-    return p if p.is_file() else None
+    """查找配置文件（高优先级在前，与模块文档声明的顺序一致）：
+
+    1. EXE 所在目录（PyInstaller 打包后，方便用户放在 EXE 旁边修改）
+    2. 当前工作目录
+    3. 项目根目录 / 脚本目录
+    4. 统一数据目录 ~/.ai4one/wstool（应用自身保存/迁移的目标位置，兜底）
+
+    旧实现只读数据目录，用户按文档放在 EXE 旁边的 config.json 会被忽略，
+    表现为"修改配置后重启仍是原来的设置"。
+    """
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).parent / CONFIG_FILE_NAME)
+    candidates.append(Path.cwd() / CONFIG_FILE_NAME)
+    candidates.append(Path(__file__).resolve().parent.parent / CONFIG_FILE_NAME)
+    candidates.append(get_app_dir() / CONFIG_FILE_NAME)
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
 
 
 def ensure_config_file() -> Path:

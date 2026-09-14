@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from ssh_web_tool import history_db
 from ssh_web_tool.config import (
     LOCAL_SHELL_CHOICES,
+    find_config_file,
     get_app_dir,
     get_fallback_local_shell,
     load_config,
@@ -258,6 +259,7 @@ async def api_get_config():
     return {
         "fallback_local_shell": get_fallback_local_shell(cfg),
         "local_shell_choices": list(LOCAL_SHELL_CHOICES),
+        "config_file": str(find_config_file() or (get_app_dir() / "config.json")),
     }
 
 
@@ -1564,8 +1566,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             raise RuntimeError("终端 shell 尚未就绪，请稍候再输入")
                         stdin = session.process.stdin
                         if getattr(stdin, "is_closing", None) and stdin.is_closing():
-                            # 通道已关闭（切换/重连尚未完成）：不写死通道，给友好提示
-                            raise RuntimeError("SSH 通道已关闭，正在自动切换/重连，请稍候再输入")
+                            # 通道已关闭（连接断开，监控周期未到）：不写死通道，给友好提示；
+                            # 同时立即触发切回本机终端（_auto_switch_to_local 幂等，
+                            # 已在切换/重连/本机时自行跳过），用户下一次输入即可正常进行
+                            session._switch_task = asyncio.create_task(
+                                session._auto_switch_to_local("SSH 连接断开")
+                            )
+                            raise RuntimeError("SSH 通道已关闭，正在切换本机终端，请稍候再输入")
                         stdin.write(data)
                         session.last_active = time.time()
                 except Exception as e:
