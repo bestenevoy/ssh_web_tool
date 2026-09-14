@@ -308,14 +308,16 @@ async def api_create_session(req: CreateSessionRequest):
     session = session_manager.get_session(session_id)
     assert session is not None
     try:
-        await session.connect(
-            password=req.password,
-            private_key=req.private_key,
-            passphrase=req.passphrase,
-        )
-        # 自动启动交互式 shell，使用默认尺寸 120x40
-        # 这样通过 API 创建的会话也会显示在 Web UI 中
-        await session.start_interactive_shell(cols=120, rows=40)
+        # 外层总超时兜底：目标不可达/认证卡住时不至于让前端请求无限挂起
+        async with asyncio.timeout(30):  # type: ignore[attr-defined]
+            await session.connect(
+                password=req.password,
+                private_key=req.private_key,
+                passphrase=req.passphrase,
+            )
+            # 自动启动交互式 shell，使用默认尺寸 120x40
+            # 这样通过 API 创建的会话也会显示在 Web UI 中
+            await session.start_interactive_shell(cols=120, rows=40)
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
@@ -374,13 +376,15 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
     session = session_manager.get_session(session_id)
     assert session is not None
     try:
-        await session.connect(
-            password=host.get("password") or None,
-            private_key=host.get("private_key") or None,
-            passphrase=host.get("passphrase") or None,
-        )
-        # 自动启动交互式 shell，使用默认尺寸 120x40
-        await session.start_interactive_shell(cols=120, rows=40)
+        # 外层总超时兜底：目标不可达/认证卡住时不至于让前端请求无限挂起
+        async with asyncio.timeout(30):  # type: ignore[attr-defined]
+            await session.connect(
+                password=host.get("password") or None,
+                private_key=host.get("private_key") or None,
+                passphrase=host.get("passphrase") or None,
+            )
+            # 自动启动交互式 shell，使用默认尺寸 120x40
+            await session.start_interactive_shell(cols=120, rows=40)
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")

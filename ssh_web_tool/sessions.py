@@ -333,8 +333,8 @@ class SSHSession:
             "port": self.port,
             "username": self.username,
             "known_hosts": None,  # 跳过主机密钥校验（本地工具简化处理）
-            "keepalive_interval": 30,  # 每 30 秒发送 keepalive 包，防止空闲超时断开
-            "keepalive_count_max": 3,  # 3 次 keepalive 无响应则认为连接断开
+            "keepalive_interval": 10,  # 每 10 秒发送 keepalive 包，防止空闲超时断开
+            "keepalive_count_max": 2,  # 2 次 keepalive 无响应（约 20s）即判定连接断开，快速发现静默断线
             "connect_timeout": self.CONNECT_TIMEOUT,  # TCP 建连超时，防不可达主机卡死
         }
         if password:
@@ -352,7 +352,7 @@ class SSHSession:
         self._connected = True
         self._reconnect_count = 0  # 重连成功后重置计数
         self.last_active = time.time()
-        print(f"[SSHSystem] 连接成功: {self.username}@{self.host}:{self.port} (keepalive=30s)")
+        print(f"[SSHSystem] 连接成功: {self.username}@{self.host}:{self.port} (keepalive=10s)")
 
     async def start_interactive_shell(self, cols: int = 120, rows: int = 40, term_type: str = "xterm-256color"):
         """启动交互式 pty shell（供网页终端使用）
@@ -1883,7 +1883,7 @@ class SessionManager:
 
         - 本机 shell 会话：退出即自动重启，保持终端可用
         - SSH 会话 shell 已退出（用户 exit/logout，传输层仍在）→ 自动切换本机 shell
-        - SSH 传输层断开（网络异常等）→ 自动重连，重连失败后切换到本机终端
+        - SSH 传输层断开（网络异常/服务器重启等）→ 不自动重连，直接切换到本机终端
         """
 
         async def _try_reconnect(session: SSHSession):
@@ -1930,7 +1930,10 @@ class SessionManager:
                                 print(f"[Monitor] SSH shell 已退出，自动切换本机 shell: {session.session_id}")
                                 await session._auto_switch_to_local()
                             else:
-                                await _try_reconnect(session)
+                                # SSH 连接断开（网络异常/服务器重启/静默断线）：不再自动重连，
+                                # 直接切回本机终端并提示；用户点击「重连」按钮手动恢复
+                                print(f"[Monitor] SSH 连接断开，切换本机 shell: {session.session_id}")
+                                await session._auto_switch_to_local("SSH 连接断开")
                     except Exception as e:
                         print(f"[Monitor] 监控异常 {session.session_id}: {e}")
         except asyncio.CancelledError:

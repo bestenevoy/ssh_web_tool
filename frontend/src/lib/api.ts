@@ -3,11 +3,33 @@ import type { Host, HostType, Session, ActiveTerminal, QuickCommand, SftpItem, C
 
 const BASE = ''
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const resp = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
+async function request<T>(path: string, options?: RequestInit, timeoutMs?: number): Promise<T> {
+  // 连接类请求（SSH 建连/重连）超时兜底：后端最迟 30s 返回，前端 35s 中止，
+  // 避免"正在连接…"无限挂起（主机不可达/认证卡住时）
+  let resp: Response
+  if (timeoutMs && timeoutMs > 0) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      resp = await fetch(BASE + path, {
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        ...options,
+      })
+    } catch (e) {
+      if ((e as { name?: string })?.name === 'AbortError') {
+        throw new Error(`连接超时（${Math.round(timeoutMs / 1000)}s 未响应），请确认主机可达后重试`)
+      }
+      throw new Error('网络错误：无法连接后端服务')
+    } finally {
+      clearTimeout(timer)
+    }
+  } else {
+    resp = await fetch(BASE + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    })
+  }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }))
     throw new Error(err.detail || `HTTP ${resp.status}`)
@@ -52,13 +74,13 @@ export const api = {
     request<{ session_id: string; status: string; terminal_name: string; host: Host }>('/api/sessions/from-host', {
       method: 'POST',
       body: JSON.stringify({ host_id, terminal_name }),
-    }),
+    }, 35000),
   // 原始连接信息创建会话（本地终端拦截 SSH 后的"重连"入口，无已保存主机）
   connectRaw: (conn: { host: string; port: number; username: string; password: string }, terminal_name?: string) =>
     request<{ session_id: string; status: string; terminal_name: string }>('/api/sessions/raw', {
       method: 'POST',
       body: JSON.stringify({ ...conn, terminal_name }),
-    }),
+    }, 35000),
   // 本机终端（cmd / powershell，winpty ConPTY，不经过 SSH）
   createLocalSession: (shell: string) =>
     request<{ session_id: string; status: string; terminal_name: string; host: string; shell: string }>('/api/local/session', {
