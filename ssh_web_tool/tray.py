@@ -26,6 +26,10 @@ user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 shell32 = ctypes.windll.shell32
 kernel32 = ctypes.windll.kernel32
+# GetCurrentProcess 返回伪句柄 (HANDLE)-1：默认 c_int restype 会在 64 位下
+# 截断成 0xFFFFFFFF，导致 TerminateProcess 收到错误句柄静默失败（退出无反应）
+kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 
 # ---------- 关键 Win32 函数显式签名（消除 ctypes 默认转换的不确定性） ----------
 user32.AppendMenuW.argtypes = [wt.HANDLE, wt.UINT, ctypes.c_uint, wt.LPCWSTR]
@@ -316,6 +320,10 @@ class TrayIcon:
             asyncio.run(history_db.close_db())
         except Exception:
             pass
+        # 硬杀进程：os._exit 走 C exit() 会等待全部 DLL 卸载（实测 ~2s），
+        # TerminateProcess 跳过卸载立即退出（数据库已在上一步显式关闭）
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), 0)
+        # 兜底：终止若异步未立即生效则强制退出
         os._exit(0)
 
     # ---------- 窗口过程 ----------

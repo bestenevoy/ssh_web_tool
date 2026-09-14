@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from collections import deque
 from pathlib import Path
 
@@ -150,6 +151,16 @@ class CreateSessionRequest(BaseModel):
     password: str | None = None
     private_key: str | None = None
     passphrase: str | None = None
+
+
+class CreateRawSessionRequest(BaseModel):
+    """原始连接信息创建会话（本地终端拦截 SSH 后的"重连"入口，无已保存主机）"""
+
+    host: str
+    port: int = 22
+    username: str
+    password: str | None = None
+    terminal_name: str | None = ""
 
 
 class CreateSessionFromHostRequest(BaseModel):
@@ -317,6 +328,38 @@ async def api_create_session(req: CreateSessionRequest):
         port=req.port,
     )
     return {"session_id": session_id, "status": "connected", "has_shell": True}
+
+
+@app.post("/api/sessions/raw")
+async def api_create_raw_session(req: CreateRawSessionRequest):
+    """从原始连接信息创建 SSH 会话并启动 shell
+
+    本地终端拦截 ssh user:pass@host 命令后的"重连"入口：这类会话没有关联已保存
+    主机，前端用会话内保存的连接信息（ssh_connected 消息带回）重新建立终端。
+    """
+    session_id = session_manager.create_session(
+        req.host, req.port, req.username, terminal_name=req.terminal_name or ""
+    )
+    session = session_manager.get_session(session_id)
+    assert session is not None
+    try:
+        # 外层总超时兜底：重连目标不可达时不至于让前端请求无限挂起
+        async with asyncio.timeout(30):  # type: ignore[attr-defined]
+            await session.connect(password=req.password or None)
+            await session.start_interactive_shell(cols=120, rows=40)
+    except Exception as e:
+        await session_manager.remove_session(session_id)
+        raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
+    await event_bus.publish(
+        "session_create",
+        "raw",
+        f"原始连接创建 SSH 会话 {session_id} -> {req.host}:{req.port} ({session.terminal_name})",
+        session_id=session_id,
+        host=req.host,
+        port=req.port,
+        terminal_name=session.terminal_name,
+    )
+    return {"session_id": session_id, "status": "connected", "terminal_name": session.terminal_name}
 
 
 @app.post("/api/sessions/from-host")
@@ -636,6 +679,9 @@ def _parse_ssh_command(data: str) -> tuple[str, int, str, str] | None:
     line = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", line)
     line = re.sub(r"\x1b\][\s\S]*?(\x07|\x1b\\)", "", line)
     line = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", line)
+    # NFKC 兼容归一化：中文输入法全角标点/字母数字（：＠．１９２ 等）转半角，
+    # 否则全角字符的 host 会让 socket 的 idna 编码报 "label empty" 等晦涩错误
+    line = unicodedata.normalize("NFKC", line)
     # 匹配 ssh 前缀（允许前面有空白）
     m = re.match(r"^ssh\s+(.+)$", line)
     if not m:
@@ -663,7 +709,85 @@ def _parse_ssh_command(data: str) -> tuple[str, int, str, str] | None:
         h, p = host_port.rsplit(":", 1)
         if p.isdigit():
             host_port, port = h, int(p)
+    # host 严格校验：只接受合法 IPv4 / 域名（逗号、连续点号、空格等直接判不匹配，
+    # 交给本地 shell 原生 ssh 处理，避免 idna 编码抛异常显示晦涩报错）
+    if not _is_valid_host(host_port):
+        return None
     return host_port, port, username, password
+
+
+def _is_valid_host(host: str) -> bool:
+    """校验 host 是否为合法 IPv4 地址或域名（不含 IPv6）"""
+    if not host or len(host) > 253:
+        return False
+    parts = host.split(".")
+    # IPv4：四段且每段 0-255；四段全数字但越界（如 256.1.1.1）直接非法，
+    # 不得落入域名分支（域名 TLD 标签不允许纯数字）
+    if all(p.isdigit() for p in parts):
+        return len(parts) == 4 and all(0 <= int(p) <= 255 for p in parts)
+    # 域名：标签 1-63 字符，字母数字开头/结尾，中间可含连字符；
+    # 允许单标签主机名（localhost / 局域网机器名），纯数字单标签已在上面拦截
+    label_re = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
+    return all(label_re.match(p) for p in parts)
+
+
+async def _run_ssh_switch(
+    websocket: WebSocket,
+    session: SSHSession,
+    ssh_host: str,
+    ssh_port: int,
+    ssh_user: str,
+    ssh_pass: str,
+) -> None:
+    """后台执行"本地终端拦截 SSH"的切换（WebSocket 消息循环创建，不阻塞接收）
+
+    - 成功：发送 ssh_connected（含连接信息；前端据此保存重连凭据，重连不再依赖已保存主机）
+    - 失败：提示错误并恢复本地 shell（switch_to_ssh 已恢复读取）
+    - 取消（用户 Ctrl+C）：提示已取消，本地 shell 保持可用
+    """
+    try:
+        # 总超时兜底：连接阶段最多 30s（connect 内部还有 TCP connect_timeout）
+        async with asyncio.timeout(30):  # type: ignore[attr-defined]
+            await session.switch_to_ssh(ssh_host, ssh_port, ssh_user, ssh_pass)
+        await websocket.send_json(
+            {
+                "type": "ssh_connected",
+                "host": ssh_host,
+                "port": ssh_port,
+                "username": ssh_user,
+                "password": ssh_pass,  # 本地工具：用户刚在终端输入过，带回供"重连"使用
+                "terminal_name": f"{ssh_user}@{ssh_host}",
+            }
+        )
+        await event_bus.publish(
+            "session_create",
+            "local-ssh",
+            f"本地终端拦截 SSH 连接 {session.session_id} -> {ssh_user}@{ssh_host}:{ssh_port}",
+            session_id=session.session_id,
+            host=ssh_host,
+            port=ssh_port,
+        )
+        # 切换成功：更新会话终端名（重连/恢复页面时标签显示 root@host，而非"本机 cmd"）
+        session.terminal_name = f"{ssh_user}@{ssh_host}"
+    except asyncio.CancelledError:
+        # 用户 Ctrl+C 取消连接：switch_to_ssh 已恢复本地 shell 读取
+        try:
+            await session._broadcast_output("\r\n\x1b[33m[已取消连接]\x1b[0m\r\n")
+        except Exception:
+            pass
+    except Exception as e:
+        # 连接失败：本地 shell 仍可用。发 ESC 清掉 shell 里残留的半行命令
+        # （cmd 丢弃整行、PSReadLine RevertLine 清空输入），给用户干净的提示符重试
+        try:
+            await session.write_local("\x1b")
+        except Exception:
+            pass
+        try:
+            await session._broadcast_output(f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n")
+        except Exception:
+            pass
+    finally:
+        session._ssh_switch_task = None
 
 
 @app.get("/api/hosts")
@@ -721,6 +845,16 @@ async def api_list_active_terminals():
         host_info = None
         if s.host_id:
             host_info = storage.get_host(s.host_id)
+        # 本地终端拦截 SSH 命令建立的会话（host_id 为空、无已保存主机）：把原始连接
+        # 信息随活跃列表下发，前端恢复终端时保存为 ssh_conn，重连不再报"找不到该主机信息"
+        ssh_conn = None
+        if not s.host_id and getattr(s, "_password", None):
+            ssh_conn = {
+                "host": s.host,
+                "port": s.port,
+                "username": s.username,
+                "password": s._password,
+            }
         result.append(
             {
                 "session_id": s.session_id,
@@ -731,6 +865,7 @@ async def api_list_active_terminals():
                 "terminal_name": s.terminal_name,
                 "host_name": (host_info.get("name") or s.host) if host_info else s.host,
                 "host_type": host_info["type"] if host_info else "other",
+                "ssh_conn": ssh_conn,
                 "created_at": s.created_at,
                 "last_active": s.last_active,
             }
@@ -1379,37 +1514,34 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         if msg_type == "input":
             data = msg.get("data", "")
             if data:
-                # 本地终端 SSH 拦截：用户输入 ssh user:password@host 时，
-                # 拦截命令（不写入本地 shell），直接建立 SSH 连接切换到远端终端
-                if session.is_local() and "\r" in data:
-                    parsed = _parse_ssh_command(data)
-                    if parsed:
-                        ssh_host, ssh_port, ssh_user, ssh_pass = parsed
-                        await session._broadcast_output(
-                            f"\r\n\x1b[36m[正在连接 {ssh_user}@{ssh_host}:{ssh_port} ...]\x1b[0m\r\n"
-                        )
-                        try:
-                            await session.switch_to_ssh(ssh_host, ssh_port, ssh_user, ssh_pass)
-                            await websocket.send_json(
-                                {
-                                    "type": "ssh_connected",
-                                    "host": ssh_host,
-                                    "port": ssh_port,
-                                    "username": ssh_user,
-                                    "terminal_name": f"{ssh_user}@{ssh_host}",
-                                }
+                # 本地终端 SSH 拦截：xterm 逐字符发送输入，服务端先拼行，
+                # 回车成行后若匹配 ssh user:pass@host[:port] 则拦截（不写入本地
+                # shell 的回车），直接建立 SSH 连接切换到远端终端
+                if session.is_local():
+                    line = session.feed_local_input(data)
+                    if line is not None:
+                        parsed = _parse_ssh_command(line)
+                        if parsed:
+                            ssh_host, ssh_port, ssh_user, ssh_pass = parsed
+                            await session._broadcast_output(
+                                f"\r\n\x1b[36m[正在连接 {ssh_user}@{ssh_host}:{ssh_port} ...]\x1b[0m\r\n"
                             )
-                            await event_bus.publish(
-                                "session_create",
-                                "local-ssh",
-                                f"本地终端拦截 SSH 连接 {session.session_id} -> {ssh_user}@{ssh_host}:{ssh_port}",
-                                session_id=session.session_id,
-                                host=ssh_host,
-                                port=ssh_port,
+                            # 后台任务执行连接：不阻塞 WebSocket 消息循环。此前同步等待时
+                            # 连接最长卡 30s，期间界面无响应、无法 Ctrl+C 取消，观感"卡死"。
+                            # 现在连接期间可随时 Ctrl+C 取消、继续输入/操作其他界面。
+                            old = session._ssh_switch_task
+                            if old is not None and not old.done():
+                                old.cancel()
+                            session._ssh_switch_task = asyncio.create_task(
+                                _run_ssh_switch(websocket, session, ssh_host, ssh_port, ssh_user, ssh_pass)
                             )
-                        except Exception as e:
-                            await session._broadcast_output(f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n")
-                        return  # 拦截成功（或失败已提示），不写入本地 shell
+                            return  # 回车已消费（连接结果由后台任务推送），不写入本地 shell
+                    # Ctrl+C：取消正在进行的 SSH 连接（"正在连接..."时按 Ctrl+C 中止）
+                    if data == "\x03":
+                        task = session._ssh_switch_task
+                        if task is not None and not task.done():
+                            task.cancel()
+                            return
                 # 本地 shell（WinPTY）直接写入；SSH shell 直接尝试写入。
                 # SSH 已退出/断开时（自动切换本机终端或自动重连进行中）先等状态收敛：
                 # 期间 process 可能是已关闭的通道，直接写会报 "Channel not open for sending"
@@ -1801,6 +1933,57 @@ def main():
     # 开启后 WebView2 会弹原生"另存为"对话框
     webview.settings["ALLOW_DOWNLOADS"] = True
 
+    # 原生剪贴板桥（pywebview js_api）：前端调用 window.pywebview.api.copy_text(text)
+    # WebView2 下 navigator.clipboard.writeText 常被安全策略/焦点要求拒绝而静默失败，
+    # 终端复制走这里最可靠。用 Win32 SetClipboardData 直接写系统剪贴板，无第三方依赖。
+
+    class ClipboardApi:
+        def copy_text(self, text: str) -> bool:
+            """把文本写入 Windows 系统剪贴板（CF_UNICODETEXT）"""
+            try:
+                import ctypes
+
+                u32 = ctypes.windll.user32
+                k32 = ctypes.windll.kernel32
+                CF_UNICODETEXT = 13
+                GMEM_MOVEABLE = 0x0002
+                # 显式 64 位签名：GlobalAlloc/GlobalLock 返回句柄 (HANDLE)，
+                # ctypes 默认 restype=c_int 会截断 64 位指针导致 Operation 失败/崩溃
+                vt = ctypes.c_void_p
+                k32.GlobalAlloc.restype = vt
+                k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+                k32.GlobalLock.restype = vt
+                k32.GlobalLock.argtypes = [vt]
+                k32.GlobalUnlock.argtypes = [vt]
+                k32.GlobalFree.argtypes = [vt]
+                u32.SetClipboardData.argtypes = [ctypes.c_uint, vt]
+                u32.SetClipboardData.restype = vt
+                data = text.encode("utf-16-le") + b"\x00\x00"  # 含结尾 NUL
+                h_mem = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+                if not h_mem:
+                    return False
+                ok = False
+                try:
+                    ptr = k32.GlobalLock(h_mem)
+                    if ptr:
+                        ctypes.memmove(ptr, data, len(data))
+                        k32.GlobalUnlock(h_mem)
+                        if u32.OpenClipboard(None):
+                            try:
+                                u32.EmptyClipboard()
+                                set_ok = u32.SetClipboardData(CF_UNICODETEXT, h_mem)
+                                ok = bool(set_ok)
+                                if ok:
+                                    h_mem = None  # 系统已接管，交由系统释放
+                            finally:
+                                u32.CloseClipboard()
+                finally:
+                    if h_mem:  # 未成功（系统未接管）才手动释放，避免 double-free
+                        k32.GlobalFree(h_mem)
+                return ok
+            except Exception:
+                return False
+
     def on_closing():
         """窗口关闭确认"""
         import ctypes
@@ -1817,8 +2000,18 @@ def main():
                 asyncio.run(history_db.close_db())
             except Exception:
                 pass
+            # 硬杀进程：os._exit 走 C exit() 仍会等待全部 DLL 卸载（WebView2 等），
+            # 实测点"是"后窗口要卡 ~2s 才消失；TerminateProcess 跳过卸载立即退出。
+            # 必须显式声明 64 位类型：GetCurrentProcess 返回伪句柄 (HANDLE)-1，
+            # ctypes 默认 restype=c_int 会截断成 0xFFFFFFFF，TerminateProcess
+            # 收到错误句柄静默失败（ERROR_INVALID_HANDLE），表现为点退出无反应
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            kernel32.TerminateProcess(kernel32.GetCurrentProcess(), 0)
+            # 极端情况下终止异步生效，os._exit 兜底（正常不会走到）
             os._exit(0)
-        return False  # 阻止默认关闭行为（只在确认后 os._exit）
+        return False  # 阻止默认关闭行为（只在确认后退出）
 
     window = webview.create_window(
         title=f"SSH Web Tool v{APP_VERSION}",
@@ -1827,11 +2020,13 @@ def main():
         height=800,
         min_size=(800, 500),
         text_select=False,  # CSS 层面精细控制：标题/标签禁止选中，终端/输入框允许选中
+        js_api=ClipboardApi(),
     )
     # pywebview 事件挂在 window.events 上；closing 处理器返回 False 可取消关闭
     window.events.closing += on_closing
-    # 打包后关闭 debug（减少内存/CPU）；开发时保留 debug 以便 F12 开发者工具
-    is_debug = not hasattr(sys, "frozen")
+    # debug 由配置文件决定：config.json 中设置 "debug": true 即开启（打包版也可用 F12 开发者工具），
+    # false / 缺省则关闭，减少内存与 CPU 占用
+    is_debug = bool(cfg.get("debug", False))
     webview.start(debug=is_debug)
 
 

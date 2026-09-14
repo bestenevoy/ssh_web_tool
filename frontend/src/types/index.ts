@@ -66,6 +66,8 @@ export interface ActiveTerminal {
   terminal_name: string
   host_name: string
   host_type: string
+  // 本地终端拦截 SSH 命令建立的会话（无已保存主机）：原始连接信息，重连凭据
+  ssh_conn?: { host: string; port: number; username: string; password: string } | null
   created_at: number
   last_active: number
 }

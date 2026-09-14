@@ -182,19 +182,24 @@ function App() {
     }
     const inst = terminals.terminals.get(session_id)
     if (!inst) return
-    const host = hosts.find((h) => h.id === inst.host_id)
-    if (!host) { alert('找不到该主机信息'); return }
-    setStatus(`正在重新连接 ${host.host}...`)
+    // 重连不清空：从日志文件读取旧会话完整历史（断开时后端会话已删，须走 /api/logs 按文件读）
+    // 传入新终端直接写入，保证重连后 banner/命令输出仍可回放
+    let oldHistory = ''
     try {
-      // 先建新会话（保留原标签名），再关闭旧标签；keepActive=true 避免 activeId 跳回第一个 Tab
-      // 重连不清空：从日志文件读取旧会话完整历史（断开时后端会话已删，须走 /api/logs 按文件读）
-      // 传入新终端直接写入，保证重连后 banner/命令输出仍可回放
-      let oldHistory = ''
-      try {
-        const res = await api.getLogsByFile(inst.session_id)
-        oldHistory = res?.content || ''
-      } catch { /* 旧会话无历史（如本地 shell）则跳过 */ }
-      await terminals.createTerminal(host, inst.terminal_name, 'ssh', 'cmd', oldHistory)
+      const res = await api.getLogsByFile(inst.session_id)
+      oldHistory = res?.content || ''
+    } catch { /* 旧会话无历史（如本地 shell）则跳过 */ }
+    try {
+      if (inst.ssh_conn?.host) {
+        // 本地终端拦截 ssh 命令建立的会话：没有已保存主机，用会话内保存的连接信息重连
+        setStatus(`正在重新连接 ${inst.ssh_conn.username}@${inst.ssh_conn.host}...`)
+        await terminals.createTerminal(null, inst.terminal_name, 'ssh', 'cmd', oldHistory, inst.ssh_conn)
+      } else {
+        const host = hosts.find((h) => h.id === inst.host_id)
+        if (!host) { alert('找不到该主机信息'); return }
+        setStatus(`正在重新连接 ${host.host}...`)
+        await terminals.createTerminal(host, inst.terminal_name, 'ssh', 'cmd', oldHistory)
+      }
       await terminals.closeTerminal(session_id, true)
       loadHosts()
       setTimeout(() => loadHosts(), 800)

@@ -6,8 +6,18 @@ import type { Host } from '../types'
 import { api } from './api'
 import type { TerminalSettings } from './useSettings'
 import { reflowForCols } from './reflow'
-import { setupTerminalCopy } from './terminalCopy'
+import { setupTerminalCopy, setupCopyOnSelect } from './terminalCopy'
+import { createOutputFeeder, type OutputFeeder } from './outputFeeder'
 import { markDisconnected } from './terminalDisconnect'
+
+// 终端会话内保存的 SSH 连接信息（本地终端拦截 ssh 命令后建立，无已保存主机，
+// 供"重连"按钮直接用原始凭据重建会话——否则重连会报"找不到该主机信息"）
+export interface SshConnInfo {
+  host: string
+  port: number
+  username: string
+  password: string
+}
 
 export interface TerminalInstance {
   session_id: string
@@ -26,7 +36,13 @@ export interface TerminalInstance {
   disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
   ssh_exited: boolean  // SSH exit 退出后自动切换到本地终端，可点重连回到原 SSH 主机
   local_starting: boolean  // 本机终端创建后等待首批输出（开启启动提示）；收到第一条 output 后变 false
+  feeder: OutputFeeder | null  // 洪水输出供给器：一次一块 + 内存上限，防大文件输出撑爆 xterm 缓冲
+  ssh_conn: SshConnInfo | null  // 本地拦截 SSH 会话的连接信息（重连凭据）；已保存主机会话为 null
 }
+
+// 洪水输出内存上限：xterm write 缓冲无上限（超 50MB 抛错），这里限 2MB 积压，
+// 超限丢最旧整块（用户正打算 Ctrl+C 的洪水内容，丢一行可接受）
+const MAX_PENDING_BYTES = 2 * 1024 * 1024
 
 // 获取 shell 类型标签
 function getShellTypeLabel(state: any): string {
@@ -216,6 +232,18 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     if (data === '\x03' || data === '\x04') {
       inst.input_buffer = ''
       inst.input_cursor = 0
+      // rssh Kernel-tty SIGINT 语义：Ctrl+C 打断洪水输出（cat 大文件/grep -r）时
+      // 立即丢弃尚未渲染的积压。否则后端已中断命令，但积压块仍会持续灌入 xterm
+      // 解析绘制，界面看起来像"卡死/没反应"（这是用户最常把 Ctrl+C 误判为失效的场景）
+      if (inst.feeder && inst.feeder.pendingBytes() > 0) {
+        inst.feeder.dropPending()
+        // 本地 shell（cmd/powershell）：Ctrl+C 后 ^C 回显+新提示符几十毫秒就到，
+        // 静默丢弃会把提示符吃掉，界面反而看起来"没反应"。SSH 远端洪水残液在途
+        // 时间更长（网络 + 事件队列），用短窗口吞掉残液、放行之后的新提示符
+        if (inst.type !== 'local') {
+          inst.feeder.armQuiescentDrop(80)
+        }
+      }
       return
     }
     // ESC 序列（方向键/Home/End/Delete 等）：整段解析，绝不写入缓冲区
@@ -255,7 +283,14 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     }
   }, [])
 
-  const createTerminal = useCallback(async (host: Host, terminal_name?: string, kind: 'ssh' | 'local' = 'ssh', localShell = 'cmd', history_content?: string) => {
+  const createTerminal = useCallback(async (
+    host: Host | null,
+    terminal_name?: string,
+    kind: 'ssh' | 'local' = 'ssh',
+    localShell = 'cmd',
+    history_content?: string,
+    rawConn?: SshConnInfo,  // 本地拦截 SSH 会话重连：用原始凭据建会话（无已保存主机）
+  ) => {
     // 连接防抖：已有连接正在建立时拒绝新的连接请求
     if (connectingRef.current) {
       const err = new Error('已有连接正在建立中，请稍候再试')
@@ -274,11 +309,16 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         session_id = r.session_id
         tname = r.terminal_name || terminal_name || (localShell === 'powershell' ? '本机 PowerShell' : '本机 cmd')
         hostLike = { id: 'local', host: 'localhost', name: tname, type: 'local' }
-      } else {
-        const result = await api.connectHost(host.id, terminal_name)
+      } else if (rawConn) {
+        const result = await api.connectRaw(rawConn, terminal_name)
         session_id = result.session_id
         tname = result.terminal_name || terminal_name || '终端1'
-        hostLike = { id: host.id, host: host.host, name: host.name || host.host, type: host.type }
+        hostLike = { id: '', host: rawConn.host, name: `${rawConn.username}@${rawConn.host}`, type: 'ssh' }
+      } else {
+        const result = await api.connectHost(host!.id, terminal_name)
+        session_id = result.session_id
+        tname = result.terminal_name || terminal_name || '终端1'
+        hostLike = { id: host!.id, host: host!.host, name: host!.name || host!.host, type: host!.type }
       }
       const s = settingsRef.current
 
@@ -353,7 +393,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         try {
           const msg = JSON.parse(event.data)
           if (msg.type === 'output') {
-            term.write(msg.data)
+            // 洪水输出走供给器：一次一块 + 内存上限，防 xterm 解析不过来卡 UI
+            instance.feeder?.push(msg.data)
             // 首批输出已到：清除“正在启动”提示
             setTerminals((prev) => {
               const cur = prev.get(session_id)
@@ -366,7 +407,9 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
             })
           }
           else if (msg.type === 'ssh_connected') {
-            // 本地终端拦截 SSH 后切换为远端终端：更新标签信息
+            // 本地终端拦截 SSH 后切换为远端终端：更新标签信息。
+            // 同时保存连接信息（host/port/username/password）：此类会话没有已保存
+            // 主机（host_id 为空），重连按钮需用这份凭据重建会话，否则报"无主机信息"
             setTerminals((prev) => {
               const next = new Map(prev)
               const inst = next.get(session_id)
@@ -374,9 +417,16 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
                 next.set(session_id, {
                   ...inst,
                   host_name: msg.terminal_name || `${msg.username}@${msg.host}`,
+                  terminal_name: msg.terminal_name || inst.terminal_name,
                   type: 'ssh',
                   shell_type: 'shell',
                   host_id: '',
+                  ssh_conn: {
+                    host: msg.host,
+                    port: msg.port,
+                    username: msg.username,
+                    password: msg.password || '',
+                  },
                 })
               }
               return next
@@ -425,6 +475,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         disconnected: false,
         ssh_exited: false,
         local_starting: kind === 'local',
+        feeder: createOutputFeeder({
+          write: (data, cb) => term.write(data, cb),
+          maxPendingBytes: MAX_PENDING_BYTES,
+        }),
+        ssh_conn: rawConn ? { ...rawConn } : null,
       }
 
       setTerminals((prev) => {
@@ -496,7 +551,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           try {
             const msg = JSON.parse(event.data)
             if (msg.type === 'output') {
-              term.write(msg.data)
+              // 洪水输出走供给器（与 createTerminal 一致）
+              instance.feeder?.push(msg.data)
               // 首批输出已到：清除“正在启动”提示
               setTerminals((prev) => {
                 const cur = prev.get(t.session_id)
@@ -509,7 +565,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
               })
             }
             else if (msg.type === 'ssh_connected') {
-              // 本地终端拦截 SSH 后切换为远端终端：更新标签信息
+              // 本地终端拦截 SSH 后切换为远端终端：更新标签信息，并保存连接信息供重连
               setTerminals((prev) => {
                 const next = new Map(prev)
                 const inst = next.get(t.session_id)
@@ -517,9 +573,16 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
                   next.set(t.session_id, {
                     ...inst,
                     host_name: msg.terminal_name || `${msg.username}@${msg.host}`,
+                    terminal_name: msg.terminal_name || inst.terminal_name,
                     type: 'ssh',
                     shell_type: 'shell',
                     host_id: '',
+                    ssh_conn: {
+                      host: msg.host,
+                      port: msg.port,
+                      username: msg.username,
+                      password: msg.password || '',
+                    },
                   })
                 }
                 return next
@@ -569,8 +632,13 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           input_buffer: '',
           input_cursor: 0,
           disconnected: false,
-        ssh_exited: false,
-        local_starting: false,
+          ssh_exited: false,
+          local_starting: false,
+          feeder: createOutputFeeder({
+            write: (data, cb) => term.write(data, cb),
+            maxPendingBytes: MAX_PENDING_BYTES,
+          }),
+          ssh_conn: t.ssh_conn ?? null,  // 拦截 SSH 会话：从活跃列表恢复重连凭据；已保存主机会话为 null
         }
 
         setTerminals((prev) => {
@@ -659,6 +727,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     const inst = terminals.get(session_id)
     if (!inst) return
     if (inst.ws) inst.ws.close()
+    inst.feeder?.dispose()
     // state_timer 已改为批量轮询，不再需要单独清理
     try { await api.closeSession(session_id) } catch {}
     setTerminals((prev) => {
@@ -679,6 +748,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     if (!inst || inst.disconnected) return
     try { await api.closeSession(session_id) } catch {}
     if (inst.ws) { try { inst.ws.close() } catch {} }
+    inst.feeder?.dispose()
     // state_timer 已改为批量轮询，不再需要单独清理
     setTerminals((prev) => {
       const next = new Map(prev)
@@ -719,6 +789,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       if (inst && !inst.container) {
         inst.term.open(el)
         inst.container = el
+        // 选中即复制：鼠标拖选松开即写入系统剪贴板（绑定到容器 mouseup）
+        setupCopyOnSelect(inst.term, el)
         // 终端真正打开后，使用 resyncTerminal 确保 xterm.js 状态正确
         // 关键：先 fit 计算正确的 cols/rows，再 reset 清除可能错误的状态，再发送 resize 和 Ctrl+L
         fitTerminal(inst)

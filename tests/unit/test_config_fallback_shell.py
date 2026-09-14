@@ -62,3 +62,36 @@ def test_example_json_is_valid_and_has_shell(tmp_app_dir):
     p = Path(__file__).resolve().parent.parent.parent / "config.example.json"
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["fallback_local_shell"] == "cmd"
+
+
+def test_default_debug_is_false(tmp_app_dir):
+    """debug 默认关闭（隔离目录无配置文件 → 全默认）"""
+    cfg = cfg_mod.load_config()
+    assert cfg["debug"] is False
+
+
+def test_debug_merged_from_user_config(tmp_app_dir):
+    """config.json 设置 debug: true 后 load_config 能读到"""
+    cfg = cfg_mod.load_config()
+    cfg["debug"] = True
+    assert cfg_mod.save_config(cfg) is True
+    again = cfg_mod.load_config()
+    assert again["debug"] is True
+    # 顶层白名单：debug 与 open_browser 一样走 _TOP_LEVEL_KEYS 合并
+    assert "debug" in cfg_mod._TOP_LEVEL_KEYS
+
+
+def test_debug_false_roundtrip(tmp_app_dir):
+    """显式 debug: false 保存后仍为 False（不丢键）"""
+    cfg = cfg_mod.load_config()
+    cfg["debug"] = False
+    cfg_mod.save_config(cfg)
+    again = cfg_mod.load_config()
+    assert again["debug"] is False
+
+
+def test_example_json_has_debug(tmp_app_dir):
+    """config.example.json 包含 debug 配置项"""
+    p = Path(__file__).resolve().parent.parent.parent / "config.example.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["debug"] is False

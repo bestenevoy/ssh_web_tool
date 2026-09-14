@@ -22,6 +22,9 @@ import asyncssh
 # 重复注册为镜像会话。
 _patch_guard = threading.local()
 
+# 输入流中的 ANSI 转义序列（CSI / OSC），拼行前剥离（方向键、PSReadLine 行编辑序列等）
+_ANSI_SEQ_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b.")
+
 
 class _DirectPtyWrapper:
     """直接包装底层 PTY 对象，提供与 PtyProcess 兼容的接口
@@ -149,6 +152,9 @@ class SSHSession:
         self._asyncssh_conn: Any = None
         self._local_shell = ""
         self._local_reader_task: asyncio.Task | None = None
+        # 本地终端输入行缓冲：xterm 前端逐字符发送输入（回车是单独一条 "\r" 消息），
+        # 服务端把可打印字符累积成整行，回车时交由 SSH 命令拦截解析（feed_local_input）
+        self._local_input_line = ""
         # 待处理的终端尺寸（resize 消息在 PTY 创建前到达时保存）
         self._pending_size: tuple[int, int] | None = None
         # resize 事件：PTY 创建后等待第一个 resize 消息，确保 shell 第一帧输出使用正确尺寸
@@ -165,6 +171,9 @@ class SSHSession:
         self._max_reconnect = 5  # 最大自动重连次数
         self._switching_local = False  # 正在自动切换本机 shell（防止与自动重连并发冲突）
         self._switch_task: asyncio.Task | None = None  # 持有切换任务引用（loop 只保留弱引用）
+        # 本地终端拦截 SSH 命令后建立的后台连接任务（不阻塞 WebSocket 消息循环；
+        # 连接期间用户可 Ctrl+C 取消，见 main.py 的 _run_ssh_switch）
+        self._ssh_switch_task: asyncio.Task | None = None
         # 命令回显解析（从终端输出流提取"提示符后的实际命令"，含 Tab 补全/历史翻查结果）
         self._echo_buf = ""  # 输出行缓冲（可能被数据块截断，留到下一块补齐）
         self._echo_last_cmd = ""  # 最近一次解析记录的命令（去重防重复记录）
@@ -307,6 +316,11 @@ class SSHSession:
     def has_shell(self) -> bool:
         return self._has_shell and (self.process is not None or self._local_proc is not None)
 
+    # TCP 建连超时：目标主机不可达时（SYN 无响应/防火墙丢弃）asyncssh 默认会
+    # 重试很久，导致 WebSocket 消息循环被 await 阻塞、整窗卡死无法操作。
+    # connect_timeout 限制 TCP 建连；认证阶段另有 main.py 外层总超时兜底
+    CONNECT_TIMEOUT = 10.0
+
     async def connect(self, password: str | None = None, private_key: str | None = None, passphrase: str | None = None):
         """建立 SSH 连接（带 keepalive 防止空闲超时断开）"""
         # 保存认证信息，用于自动重连
@@ -321,6 +335,7 @@ class SSHSession:
             "known_hosts": None,  # 跳过主机密钥校验（本地工具简化处理）
             "keepalive_interval": 30,  # 每 30 秒发送 keepalive 包，防止空闲超时断开
             "keepalive_count_max": 3,  # 3 次 keepalive 无响应则认为连接断开
+            "connect_timeout": self.CONNECT_TIMEOUT,  # TCP 建连超时，防不可达主机卡死
         }
         if password:
             kwargs["password"] = password
@@ -932,10 +947,59 @@ class SSHSession:
         """向前台本地 shell 写入输入（转码为 str；WinPTY 期望 str）"""
         if self._local_proc is not None:
             try:
+                # WinPTY 代理把 \x03 映射为 Ctrl+C 取消行的同时，会给 PSReadLine 的
+                # 输入缓冲残留一个字面量 'c'（实测空提示符下 \x03 后输入 echo 会
+                # 变成 cecho）。补一个退格吃掉残留字符；cmd 无此问题（^C 后整行丢弃）
+                if "\x03" in data and self._local_shell in ("powershell", "pwsh"):
+                    data = data.replace("\x03", "\x03\b")
+                # cmd.exe 不识别 Ctrl+L（\x0c 换页符），会原样回显 ^L；
+                # 转译为 cls 清屏命令（前端重同步/后端 resize 重绘都会发 \x0c）
+                if "\x0c" in data and self._local_shell == "cmd":
+                    data = data.replace("\x0c", "cls\r")
                 self._local_proc.write(data)
                 self.last_active = time.time()
             except Exception:
                 pass
+
+    def feed_local_input(self, data: str) -> str | None:
+        """累积本地终端键盘输入，回车时返回整行（供 SSH 命令拦截解析）
+
+        xterm 前端逐字符发送 input 消息，回车是单独的 "\\r"，
+        服务端必须自行拼行才能在回车时拿到完整命令。
+
+        - 可打印字符（含中文）追加到行缓冲
+        - 退格（\\b / \\x7f）删一个字符，Ctrl+C / Ctrl+U 清空当前行
+        - 回车（\\r / \\n）返回拼好的整行并清空缓冲；空行返回 None
+        - 方向键历史等 ANSI 序列已由调用方剥离；历史翻查的命令行内容服务端
+          无法感知（缓冲只反映逐键输入），这类行解析不到属于预期行为
+
+        返回整行（未 strip，由解析函数处理）或 None（尚未成行）
+        """
+        # 剥离 ANSI 转义序列（方向键/PSReadLine 重绘序列会随输入一起到达）
+        data = _ANSI_SEQ_RE.sub("", data)
+        for ch in data:
+            if ch in ("\r", "\n"):
+                line, self._local_input_line = self._local_input_line, ""
+                if line.strip():
+                    return line
+                continue
+            if ch in ("\x7f", "\b"):
+                self._local_input_line = self._local_input_line[:-1]
+                continue
+            if ch in ("\x03", "\x15"):  # Ctrl+C / Ctrl+U：清空当前行
+                self._local_input_line = ""
+                continue
+            if ord(ch) < 0x20 or ch == "\x7f":
+                continue  # 其余控制字符（Tab/ESC 单字节等）不参与拼行
+            self._local_input_line += ch
+        # 防御：异常情况下缓冲无界增长（如程序不回车狂刷输入）
+        if len(self._local_input_line) > 4096:
+            self._local_input_line = self._local_input_line[-4096:]
+        return None
+
+    def reset_local_input_line(self):
+        """清空本地输入行缓冲（切换/重启 shell 时调用，避免残留半个命令）"""
+        self._local_input_line = ""
 
     def resize_local(self, cols: int, rows: int):
         """调整本地 shell 窗口尺寸（setwinsize 参数顺序 (rows, cols)）"""
@@ -972,40 +1036,57 @@ class SSHSession:
             self.conn = None
         self._connected = False
         self._has_shell = False
+        self.reset_local_input_line()
         await self.start_local_shell(shell, cols, rows)
 
     async def switch_to_ssh(self, host: str, port: int, username: str, password: str, cols: int = 0, rows: int = 0):
         """从本地 shell 切换到 SSH 远端 shell（用户在本地终端输入 ssh user:pass@host 时触发）
 
-        关闭本地 ConPTY，更新会话连接信息，建立 SSH 连接并启动交互式 shell。
-        复用同一会话的广播/日志/监听结构（前端无感知切换，与 switch_to_local 反向）。
+        先建立 SSH 连接并启动远端 shell，成功后才关闭本地 shell（连接失败时本地终端
+        保持可用，用户可直接修正后重试）。复用同一会话的广播/日志/监听结构。
         """
         if cols <= 0:
             cols = self._last_cols
         if rows <= 0:
             rows = self._last_rows
-        # 关闭本地 shell
+        # 停止本地输出读取（本地 shell 进程先保留，连接失败时还能继续用）
         self.stop_local_reader()
+        # 更新会话连接信息（切换到远端主机）
+        self.host = host
+        self.port = port
+        self.username = username
+        try:
+            # 建立 SSH 连接（失败抛异常，本地 shell 保留）
+            await self.connect(password=password or None)
+            await self.start_interactive_shell(cols=cols, rows=rows)
+        except BaseException:
+            # 连接/shell 启动失败或被取消（Ctrl+C 中止连接）：恢复本地 shell 读取
+            if self._local_proc is not None and self._local_proc.isalive():
+                self._start_local_reader()
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+            self._connected = False
+            raise
+        # SSH 就绪：关闭本地 shell，更新状态
+        self.reset_local_input_line()
         if self._local_proc is not None:
             try:
                 self._local_proc.terminate(force=True)
             except Exception:
                 pass
             self._local_proc = None
-        self._connected = False
-        self._has_shell = False
-        # 更新会话连接信息（切换到远端主机）
-        self.host = host
-        self.port = port
-        self.username = username
+        self._connected = True
+        self._has_shell = True
         self._local_shell = ""
-        # 建立 SSH 连接
-        await self.connect(password=password or None)
-        await self.start_interactive_shell(cols=cols, rows=rows)
 
     async def restart_local_shell(self, cols: int = 0, rows: int = 0):
         """本机 shell 已退出时重启（沿用原 shell 类型与最近尺寸）"""
         self.stop_local_reader()
+        self.reset_local_input_line()
         if self._local_proc is not None:
             try:
                 self._local_proc.terminate(force=True)

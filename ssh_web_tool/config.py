@@ -95,13 +95,14 @@ DEFAULT_CONFIG: dict = {
     },
     "open_browser": True,  # 启动后延迟自动打开浏览器
     "fallback_local_shell": "cmd",  # SSH 断开自动切换本机终端时使用的 shell（cmd / powershell / pwsh）
+    "debug": False,  # 是否开启 pywebview 调试模式（F12 开发者工具）；开启会略增内存/CPU
 }
 
 # 合法本机 shell 取值
 LOCAL_SHELL_CHOICES = ("cmd", "powershell", "pwsh")
 
 # 顶层标量配置白名单：这些键会在 load_config 时从用户 config.json 合并进来
-_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell")
+_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell", "debug")
 
 
 def get_fallback_local_shell(cfg: dict | None = None) -> str:

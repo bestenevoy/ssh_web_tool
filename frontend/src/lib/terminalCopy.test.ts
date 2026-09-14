@@ -13,6 +13,7 @@ interface FakeTerm {
   textarea: EventTarget & { __wstoolPasteBound?: boolean }
   hasSelection: () => boolean
   getSelection: () => string
+  clearSelection: ReturnType<typeof vi.fn>
   paste: ReturnType<typeof vi.fn>
   attachCustomKeyEventHandler: (h: (e: KeyboardEvent) => boolean) => void
   _keyHandler?: (e: KeyboardEvent) => boolean
@@ -23,6 +24,7 @@ function makeFakeTerm(): FakeTerm {
     textarea: new EventTarget() as EventTarget & { __wstoolPasteBound?: boolean },
     hasSelection: () => true,
     getSelection: () => 'selected text',
+    clearSelection: vi.fn(),
     paste: vi.fn(),
     attachCustomKeyEventHandler(h) {
       term._keyHandler = h
@@ -84,6 +86,24 @@ describe('setupTerminalCopy 粘贴逻辑', () => {
     setupTerminalCopy(term as any, () => {})
     dispatchPaste(term.textarea, 'once')
     expect(term.paste).toHaveBeenCalledTimes(1)
+  })
+
+  it('粘贴多行文本时折叠换行为 \\r（避免 CRLF 双换行）', () => {
+    const term = makeFakeTerm()
+    setupTerminalCopy(term as any, () => {})
+    dispatchPaste(term.textarea, 'line1\r\nline2\nline3')
+    expect(term.paste).toHaveBeenCalledTimes(1)
+    expect(term.paste).toHaveBeenCalledWith('line1\rline2\rline3')
+  })
+
+  it('shell 开启 bracketed paste 时包裹 \\x1b[200~/\\x1b[201~', () => {
+    const term = makeFakeTerm() as any
+    // 模拟远端 shell 启用了 DECSET 2004（bash/zsh 默认）
+    term.modes = { bracketedPasteMode: true }
+    setupTerminalCopy(term, () => {})
+    dispatchPaste(term.textarea, 'echo hi\nls -la')
+    expect(term.paste).toHaveBeenCalledTimes(1)
+    expect(term.paste).toHaveBeenCalledWith('\x1b[200~echo hi\rls -la\x1b[201~')
   })
 
   it('Ctrl+C 有选区时复制并返回 false（不发送 SIGINT）', () => {

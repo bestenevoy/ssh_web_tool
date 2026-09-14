@@ -44,7 +44,8 @@ python main.py
     "port": 8765,
     "auto_find_free_port": true
   },
-  "open_browser": true
+  "open_browser": true,
+  "debug": false
 }
 ```
 
@@ -54,6 +55,7 @@ python main.py
 | `server.port` | 服务监听端口 |
 | `server.auto_find_free_port` | `true`（默认）：端口被占用时自动向上寻找空闲端口并切换；`false`：被占用时直接报错退出 |
 | `open_browser` | 启动后是否自动打开浏览器 |
+| `debug` | 是否开启 pywebview 调试模式（F12 开发者工具）：`true` 开启（打包版也可用），`false` / 缺省关闭（降低内存/CPU） |
 
 - 修改配置后**重启程序生效**；启动时会打印实际使用的端口。
 - 前端页面、API 均使用相对路径，端口变化后浏览器地址自动跟随，无需改前端。
