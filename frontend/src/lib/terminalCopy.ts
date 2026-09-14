@@ -26,7 +26,7 @@ declare global {
 }
 
 /** 写系统剪贴板，返回是否成功（同步尝试三级方案，均失败返回 false） */
-function writeClipboardText(text: string): Promise<boolean> {
+export function writeClipboardText(text: string): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     // 1) pywebview 原生剪贴板桥（桌面端最可靠）。typeof 守卫：vitest/node 环境无 window
     const win = typeof window !== 'undefined' ? window : undefined

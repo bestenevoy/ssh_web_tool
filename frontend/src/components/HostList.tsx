@@ -1,5 +1,6 @@
 import { useState, memo } from 'react'
 import type { Host, HostType } from '../types'
+import { writeClipboardText } from '../lib/terminalCopy'
 
 interface Props {
   hosts: Host[]
@@ -57,6 +58,23 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
     const port = h.mgmt_port || 8088
     const url = `https://${h.host}:${port}`
 
+    // 手动打开页面并复制管理密码（本地工具：密码明文下发；未配置管理密码时回退 SSH 密码）
+    const openManually = (reason: string) => {
+      window.open(url, '_blank')
+      const pwd = h.mgmt_password || h.password || ''
+      if (pwd) {
+        writeClipboardText(pwd).then((ok) => {
+          alert(
+            ok
+              ? `${reason}\n\n管理密码已复制到剪贴板，直接粘贴到登录框即可。\n如需自动登录，请编辑主机填写「Playwright 自动登录选择器配置」。`
+              : `${reason}\n\n（自动复制密码失败：剪贴板不可用，请手动查看本地 data.json）`
+          )
+        })
+      } else {
+        alert(`${reason}\n\n（该主机未设置管理密码；如需自动登录，请编辑主机填写「Playwright 自动登录选择器配置」）`)
+      }
+    }
+
     // 如果配置了自动登录选择器，尝试自动登录
     if (hasAutoLoginConfig(h)) {
       setAutoLoggingHosts((prev) => new Set(prev).add(h.id))
@@ -66,13 +84,11 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
         if (result.status === 'success' || result.status === 'warning') {
           alert(`自动登录：${result.message}`)
         } else {
-          // 自动登录失败，降级为手动打开（密码已脱敏，不会下发到前端）
-          alert(`自动登录失败：${result.message}\n\n将手动打开管理页面（密码已脱敏，请在本地 data.json 中查看）`)
-          window.open(url, '_blank')
+          // 自动登录失败，降级为手动打开并复制管理密码
+          openManually(`自动登录失败：${result.message}`)
         }
       } catch (e) {
-        alert(`自动登录请求失败：${e}\n\n将手动打开管理页面（密码已脱敏，请在本地 data.json 中查看）`)
-        window.open(url, '_blank')
+        openManually(`自动登录请求失败：${e}`)
       } finally {
         setAutoLoggingHosts((prev) => {
           const next = new Set(prev)
@@ -81,9 +97,8 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
         })
       }
     } else {
-      // 没有配置自动登录，手动打开（密码已脱敏，不复制到剪贴板）
-      window.open(url, '_blank')
-      alert('管理页面已打开（密码已脱敏，不会下发到前端，请在本地 data.json 中查看）。\n\n如需自动登录，请编辑主机，在「Playwright 自动登录选择器配置」中填写选择器。')
+      // 没有配置自动登录：手动打开并复制管理密码
+      openManually('管理页面已打开')
     }
   }
 

@@ -6,8 +6,8 @@
  * 修复后：keydown 只 return false，粘贴统一由 textarea capture 阶段拦截处理，
  * 单一路径，从机制上保证只粘贴一次。
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { setupTerminalCopy } from './terminalCopy'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { setupTerminalCopy, writeClipboardText } from './terminalCopy'
 
 interface FakeTerm {
   textarea: EventTarget & { __wstoolPasteBound?: boolean }
@@ -133,5 +133,31 @@ describe('setupTerminalCopy 粘贴逻辑', () => {
     setupTerminalCopy(term as any, () => {})
     const h = term._keyHandler!
     expect(h({ key: 'a' } as any)).toBe(true)
+  })
+})
+describe('writeClipboardText 三级兜底', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('优先走 pywebview 原生剪贴板桥', async () => {
+    const copyText = vi.fn().mockResolvedValue(true)
+    vi.stubGlobal('window', { pywebview: { api: { copy_text: copyText } } })
+    await expect(writeClipboardText('secret')).resolves.toBe(true)
+    expect(copyText).toHaveBeenCalledWith('secret')
+  })
+
+  it('无 pywebview 时回退 navigator.clipboard', async () => {
+    vi.stubGlobal('window', undefined)
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    await expect(writeClipboardText('text')).resolves.toBe(true)
+    expect(writeText).toHaveBeenCalledWith('text')
+  })
+
+  it('navigator.clipboard 拒绝时返回 false（不抛异常）', async () => {
+    vi.stubGlobal('window', undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    await expect(writeClipboardText('text')).resolves.toBe(false)
   })
 })

@@ -4,6 +4,7 @@ import './App.css'
 import type { Host, HostType, QuickCommand } from './types'
 import { api } from './lib/api'
 import { useTerminals } from './lib/useTerminals'
+import { writeClipboardText } from './lib/terminalCopy'
 import { useEvents } from './lib/useEvents'
 import { useSettings, FONT_OPTIONS } from './lib/useSettings'
 import { HostList } from './components/HostList'
@@ -241,17 +242,9 @@ function App() {
     const text = host.password
       ? `${cmd}\npassword: ${host.password}`
       : cmd
-    navigator.clipboard.writeText(text)
-      .then(() => alert('已复制连接信息'))
-      .catch(() => {
-        const ta = document.createElement('textarea')
-        ta.value = text
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        document.body.removeChild(ta)
-        alert('已复制连接信息')
-      })
+    // 统一走 writeClipboardText 三级兜底：pywebview 桥 → navigator.clipboard → execCommand
+    // （WebView2 下 navigator.clipboard.writeText 常被安全策略/焦点要求拒绝而静默失败）
+    writeClipboardText(text).then((ok) => alert(ok ? '已复制连接信息' : '复制失败：剪贴板不可用'))
   }, [])
 
   // 复制主机
