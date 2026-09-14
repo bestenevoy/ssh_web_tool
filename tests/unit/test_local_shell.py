@@ -95,3 +95,45 @@ async def test_switch_to_local_falls_back(tmp_path, monkeypatch):
     s._flush_log_now()
     await s.close()
     assert "switched" in buf, f"buf={buf[:300]!r}"
+
+
+@pytest.mark.asyncio
+async def test_local_exit_kills_shell(tmp_path, monkeypatch):
+    """本地终端输入 exit 后 shell 进程退出（监控据此关闭会话与标签）"""
+    monkeypatch.setattr(SSHSession, "LOG_DIR", str(tmp_path))
+    SSHSession._logger_cache.clear()
+    s = SSHSession("loc12345", "localhost", 0, "tester")
+    await s.start_local_shell("cmd", cols=90, rows=25)
+    await asyncio.sleep(1.0)
+    await s.write_local("exit\r")
+    for _ in range(20):
+        if not s.is_shell_alive():
+            break
+        await asyncio.sleep(0.2)
+    s._flush_log_now()
+    await s.close()
+    assert not s.is_shell_alive()
+
+
+@pytest.mark.asyncio
+async def test_local_ctrl_c_graceful_and_closed_notice(tmp_path, monkeypatch):
+    """Ctrl+C 回退路径不抛异常且 shell 仍可输入；关闭通知通道可设置/取出"""
+    monkeypatch.setattr(SSHSession, "LOG_DIR", str(tmp_path))
+    SSHSession._logger_cache.clear()
+    s = SSHSession("loc12345", "localhost", 0, "tester")
+    await s.start_local_shell("cmd", cols=90, rows=25)
+    await asyncio.sleep(1.0)
+    await s.write_local("echo unique-token-xyz\r")
+    await asyncio.sleep(1.0)
+    await s.write_local("\x03")  # AttachConsole 不可用时静默回退，不应抛异常
+    await s.write_local("echo after-ctrl-c\r")
+    await asyncio.sleep(1.5)
+    buf = "".join(s._output_buffer)
+    s._flush_log_now()
+    await s.close()
+    assert "unique-token-xyz" in buf, f"buf={buf[:300]!r}"
+    # 关闭通知通道
+    assert s.take_closed_notice() is None
+    s.set_closed_notice("本机终端已退出")
+    assert s.take_closed_notice() == "本机终端已退出"
+    assert s.take_closed_notice() is None

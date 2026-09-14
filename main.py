@@ -1387,6 +1387,12 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             "terminal_name": f"本机 {label}",
                         }
                     )
+                # 会话关闭通知（本机终端 exit 等）：推送 closed 后结束输出转发，
+                # 前端收到后关闭标签与连接
+                closed = session.take_closed_notice()
+                if closed:
+                    await websocket.send_json({"type": "closed", "data": closed})
+                    return
                 data = await listener.get()
                 await websocket.send_json({"type": "output", "data": data})
         except Exception:
@@ -1403,23 +1409,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     if session.is_local():
         pass
     elif not session.is_alive():
-        await websocket.send_json({"type": "info", "data": "检测到连接断开，正在自动重连..."})
+        # SSH 连接已断开（页面重开恢复时命中）：不再自动重连（需求：断开后手动重连），
+        # 直接切换到本机 shell，由用户点击「重连」按钮手动恢复
+        await websocket.send_json({"type": "info", "data": "检测到连接断开，已切换本机终端"})
         try:
-            reconnect_ok = await session.reconnect()
-            if not reconnect_ok:
-                # SSH 重连失败 → 自动切换到本机 shell（不销毁会话，终端保持可用）
-                # 使用用户配置的本地终端（fallback_local_shell：cmd / powershell）；
-                # 切换提示通过 _broadcast_output 进入终端输出与会话日志（以会话为主）
-                try:
-                    await session._auto_switch_to_local("SSH 连接断开，重连失败")
-                except Exception as e:
-                    await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {e!s}"})
-                    await websocket.close()
-                    return
-            else:
-                await websocket.send_json({"type": "info", "data": "自动重连成功"})
+            await session._auto_switch_to_local("SSH 连接断开")
         except Exception as e:
-            await websocket.send_json({"type": "error", "data": f"重连异常: {e!s}"})
+            await websocket.send_json({"type": "error", "data": f"切换本机 shell 失败: {e!s}"})
             await websocket.close()
             return
 

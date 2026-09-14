@@ -449,7 +449,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           }
           else if (msg.type === 'error') term.write(`\r\n\x1b[31m[错误] ${msg.data}\x1b[0m\r\n`)
           else if (msg.type === 'info') term.write(`\r\n\x1b[33m[${msg.data}]\x1b[0m\r\n`)
-          else if (msg.type === 'closed') term.write('\r\n\x1b[33m[连接已关闭]\x1b[0m\r\n')
+          else if (msg.type === 'closed') {
+            // 本机终端 exit 等：后端已移除会话，写入提示后延迟关闭标签与连接
+            term.write(`\r\n\x1b[33m[${msg.data || '连接已关闭'}]\x1b[0m\r\n`)
+            setTimeout(() => { closeTerminal(session_id).catch(() => {}) }, 800)
+          }
         } catch {
           term.write(event.data)
         }
@@ -605,7 +609,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
             }
             else if (msg.type === 'error') term.write(`\r\n\x1b[31m[错误] ${msg.data}\x1b[0m\r\n`)
             else if (msg.type === 'info') term.write(`\r\n\x1b[33m[${msg.data}]\x1b[0m\r\n`)
-            else if (msg.type === 'closed') term.write('\r\n\x1b[33m[连接已关闭]\x1b[0m\r\n')
+            else if (msg.type === 'closed') {
+              // 本机终端 exit 等：后端已移除会话，写入提示后延迟关闭标签与连接
+              term.write(`\r\n\x1b[33m[${msg.data || '连接已关闭'}]\x1b[0m\r\n`)
+              setTimeout(() => { closeTerminal(t.session_id).catch(() => {}) }, 800)
+            }
           } catch {
             term.write(event.data)
           }

@@ -88,6 +88,67 @@ class _DirectPtyWrapper:
             return None
 
 
+def _send_ctrl_c_to_console(child_pid: int) -> bool:
+    """向本地 shell 的控制台发送真实 Ctrl+C（winpty issue #116 的修复方式）
+
+    WinPTY agent 会把写入的 \x03 转成 GenerateConsoleCtrlEvent，但该事件
+    不会打断 cmd/PowerShell 的 ReadConsole（等待输入时无 ^C 回显、不清除
+    当前行、不出现新提示符）。正确做法是向控制台窗口发送 WM_KEYDOWN/WM_KEYUP
+    的 Ctrl+C 键事件（与 winpty 内部 sendKeyMessage 相同），可打断 ReadConsole
+    并触发 shell 输出 ^C + 新提示符。
+
+    - 本进程需临时 AttachConsole 到子进程的控制台以取得其窗口句柄；
+      失败（如无控制台权限的环境）返回 False，调用方回退写 \x03。
+    - 使用 SendMessageTimeoutW + SMTO_ABORTIFHUNG，避免控制台窗口无响应时挂死。
+    - 全程 try/except 包裹，任何失败都不抛异常（Ctrl+C 处理必须无副作用）。
+    """
+    try:
+        import ctypes
+    except Exception:
+        return False
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+    WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+    VK_CONTROL = 0x11
+    SMTO_ABORTIFHUNG = 0x2
+    if child_pid <= 0:
+        return False
+    had_console = bool(kernel32.GetConsoleWindow())
+    if had_console and not kernel32.FreeConsole():
+        return False
+    attached = False
+    try:
+        if not kernel32.AttachConsole(child_pid):
+            return False
+        attached = True
+        hwnd = kernel32.GetConsoleWindow()
+        if not hwnd:
+            return False
+
+        def _send(vk: int, down: bool) -> None:
+            scan = user32.MapVirtualKeyW(vk, 0)  # MAPVK_VK_TO_VSC
+            lparam = (scan << 16) | 1 | (0 if down else 0xC0000000)
+            msg = WM_KEYDOWN if down else WM_KEYUP
+            result = ctypes.c_ulong()
+            user32.SendMessageTimeoutW(
+                hwnd, msg, vk, lparam, SMTO_ABORTIFHUNG, 2000, ctypes.byref(result)
+            )
+
+        _send(VK_CONTROL, True)
+        _send(ord("C"), True)
+        _send(ord("C"), False)
+        _send(VK_CONTROL, False)
+        return True
+    except Exception:
+        return False
+    finally:
+        if attached:
+            kernel32.FreeConsole()
+        if had_console:
+            # 恢复自己的控制台（开发模式从终端启动时有控制台）
+            kernel32.AttachConsole(0xFFFFFFFF)  # ATTACH_PARENT_PROCESS
+
+
 def get_data_dir() -> str:
     """获取数据文件目录（统一在 ~/.ai4one/wstool）"""
     from .config import get_app_dir
@@ -188,6 +249,7 @@ class SSHSession:
         # WebSocket read_output 循环取出后发送 switched_to_local 消息给前端，
         # 前端据此更新终端类型和 UI 状态（如隐藏断开按钮）
         self._switch_notice: str | None = None
+        self._closed_notice: str | None = None  # 会话关闭通知（本机终端 exit 等）
 
     # ---------- 日志文件命名 ----------
 
@@ -308,7 +370,16 @@ class SSHSession:
         self._switch_notice = None
         return n
 
-    @property
+    def set_closed_notice(self, msg: str) -> None:
+        """设置会话关闭通知（WebSocket 输出循环读取后推送 closed 消息）"""
+        self._closed_notice = msg
+
+    def take_closed_notice(self) -> str | None:
+        """取出并清空会话关闭通知（read_output 循环调用，只取一次）"""
+        n = self._closed_notice
+        self._closed_notice = None
+        return n
+
     def is_connected(self) -> bool:
         return self._connected
 
@@ -947,17 +1018,23 @@ class SSHSession:
         """向前台本地 shell 写入输入（转码为 str；WinPTY 期望 str）"""
         if self._local_proc is not None:
             try:
-                # WinPTY 代理把 \x03 映射为 Ctrl+C 取消行的同时，会给 PSReadLine 的
-                # 输入缓冲残留一个字面量 'c'（实测空提示符下 \x03 后输入 echo 会
-                # 变成 cecho）。补一个退格吃掉残留字符；cmd 无此问题（^C 后整行丢弃）
+                # Ctrl+C：WinPTY 写入 \x03 只会转成 GenerateConsoleCtrlEvent，无法打断
+                # cmd/PSReadLine 的 ReadConsole（无 ^C 回显、不清除当前行、无新提示符）。
+                # 优先向控制台窗口发送真实 Ctrl+C 键事件（winpty issue #116 修复方式）；
+                # 失败（如无控制台权限）则回退写入 \x03（agent 仍会触发运行中程序的中断）
+                if "\x03" in data and _send_ctrl_c_to_console(getattr(self._local_proc, "pid", 0)):
+                    data = data.replace("\x03", "")
+                # 回退路径：\x03 写入时给 PSReadLine 的输入缓冲残留一个字面量 'c'，
+                # 补退格吃掉残留字符；cmd 无此问题
                 if "\x03" in data and self._local_shell in ("powershell", "pwsh"):
                     data = data.replace("\x03", "\x03\b")
                 # cmd.exe 不识别 Ctrl+L（\x0c 换页符），会原样回显 ^L；
                 # 转译为 cls 清屏命令（前端重同步/后端 resize 重绘都会发 \x0c）
                 if "\x0c" in data and self._local_shell == "cmd":
                     data = data.replace("\x0c", "cls\r")
-                self._local_proc.write(data)
-                self.last_active = time.time()
+                if data:
+                    self._local_proc.write(data)
+                    self.last_active = time.time()
             except Exception:
                 pass
 
@@ -1918,10 +1995,12 @@ class SessionManager:
                                 session.set_shell_notice("检测到终端 shell 状态异常，如需恢复请点击顶部重连")
                             continue
                         if session.is_local():
-                            # 本机 shell 已退出：自动重启（与页面重开时的恢复行为一致）
+                            # 本机 shell 已退出（用户输入 exit 等）：直接关闭会话并通知
+                            # 前端关闭标签（不自动重启，用户需求：exit 即关闭连接）
                             if not session.is_shell_alive():
-                                print(f"[Monitor] 本机 shell 已退出，自动重启: {session.session_id}")
-                                await session.restart_local_shell()
+                                print(f"[Monitor] 本机 shell 已退出，关闭会话: {session.session_id}")
+                                session.set_closed_notice("本机终端已退出")
+                                await self.remove_session(session.session_id)
                             continue
                         if not session.is_alive() or shell_dead:
                             if shell_dead and session.is_transport_alive():
