@@ -1393,7 +1393,12 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 if closed:
                     await websocket.send_json({"type": "closed", "data": closed})
                     return
-                data = await listener.get()
+                # 带超时等待输出：本机 shell exit 后可能不再有输出，若无超时，
+                # 循环会永久阻塞在 listener.get() 上，closed 通知永远送不出去
+                try:
+                    data = await asyncio.wait_for(listener.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
                 await websocket.send_json({"type": "output", "data": data})
         except Exception:
             pass

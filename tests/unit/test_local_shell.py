@@ -99,20 +99,24 @@ async def test_switch_to_local_falls_back(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_local_exit_kills_shell(tmp_path, monkeypatch):
-    """本地终端输入 exit 后 shell 进程退出（监控据此关闭会话与标签）"""
+    """本地终端输入 exit 后 shell 进程退出，reader 立即设置关闭通知"""
     monkeypatch.setattr(SSHSession, "LOG_DIR", str(tmp_path))
     SSHSession._logger_cache.clear()
     s = SSHSession("loc12345", "localhost", 0, "tester")
     await s.start_local_shell("cmd", cols=90, rows=25)
     await asyncio.sleep(1.0)
     await s.write_local("exit\r")
-    for _ in range(20):
+    notice = None
+    for _ in range(40):
         if not s.is_shell_alive():
-            break
+            notice = s.take_closed_notice()
+            if notice:
+                break
         await asyncio.sleep(0.2)
     s._flush_log_now()
     await s.close()
     assert not s.is_shell_alive()
+    assert notice == "本机终端已退出"
 
 
 @pytest.mark.asyncio

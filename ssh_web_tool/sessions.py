@@ -117,10 +117,16 @@ def _send_ctrl_c_to_console(child_pid: int) -> bool:
     if had_console and not kernel32.FreeConsole():
         return False
     attached = False
+    ignored_ctrl_c = False
     try:
         if not kernel32.AttachConsole(child_pid):
             return False
         attached = True
+        # 本进程已临时加入子控制台进程组：注入的 Ctrl+C 键事件会以
+        # CTRL_C_EVENT 控制事件广播给组内所有进程（含本进程），
+        # 若不加忽略处理器，python 收到 KeyboardInterrupt 会退出整个应用。
+        # 忽略只影响本进程，cmd/PowerShell 的 ReadConsole 中断不受影响。
+        ignored_ctrl_c = bool(kernel32.SetConsoleCtrlHandler(None, True))
         hwnd = kernel32.GetConsoleWindow()
         if not hwnd:
             return False
@@ -144,6 +150,9 @@ def _send_ctrl_c_to_console(child_pid: int) -> bool:
     finally:
         if attached:
             kernel32.FreeConsole()
+        if ignored_ctrl_c:
+            # 已脱离控制台进程组后再恢复 Ctrl+C 处理器（避免残余事件）
+            kernel32.SetConsoleCtrlHandler(None, False)
         if had_console:
             # 恢复自己的控制台（开发模式从终端启动时有控制台）
             kernel32.AttachConsole(0xFFFFFFFF)  # ATTACH_PARENT_PROCESS
@@ -953,6 +962,7 @@ class SSHSession:
             import os as _os
 
             _dbg = _os.environ.get("WST_LOCAL_DEBUG")
+            _idle_ticks = 0
             while not _stop_flag.is_set():
                 try:
                     data = pty_obj.read(blocking=False)
@@ -961,6 +971,16 @@ class SSHSession:
                             print(f"  [poll] got {len(data)} bytes", flush=True)
                         loop.call_soon_threadsafe(_safe_put, read_queue, data)
                     else:
+                        _idle_ticks += 1
+                        # 每 ~1s 主动探测进程存活：cmd 正常 exit 时 read 不一定抛异常
+                        # （winpty agent 可能不立即关闭管道），不探测会永远空转
+                        if _idle_ticks % 200 == 0:
+                            try:
+                                if not pty_obj.isalive():
+                                    loop.call_soon_threadsafe(_safe_put, read_queue, None)
+                                    break
+                            except Exception:
+                                pass
                         _stop_flag.wait(0.005)  # 5ms 轮询间隔
                 except Exception as e:
                     if _dbg:
@@ -988,6 +1008,10 @@ class SSHSession:
                 while True:
                     data = await read_queue.get()
                     if data is None:
+                        # PTY 已关闭（本机 shell 退出）：立即设置关闭通知，
+                        # 前端收到后关闭标签；会话移除由全局监控兜底
+                        if self.is_local() and not self.is_shell_alive():
+                            self.set_closed_notice("本机终端已退出")
                         break  # PTY 关闭
                     if not data:
                         continue
