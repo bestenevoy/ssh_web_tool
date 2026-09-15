@@ -98,17 +98,16 @@ def test_example_json_has_debug(tmp_app_dir):
     assert data["debug"] is False
 
 
-
 # ============ v0.1.48: find_config_file 查找顺序（EXE 目录 → cwd → 项目根 → 数据目录） ============
 
 
 def test_find_config_file_returns_none_when_absent(tmp_app_dir):
-    '四处都没有配置文件 → None（隔离目录）'
+    "四处都没有配置文件 → None（隔离目录）"
     assert cfg_mod.find_config_file() is None
 
 
 def test_find_config_file_data_dir_fallback(tmp_app_dir):
-    '只有数据目录有配置文件 → 返回数据目录'
+    "只有数据目录有配置文件 → 返回数据目录"
     (tmp_app_dir / "config.json").write_text('{"fallback_local_shell": "cmd"}', encoding="utf-8")
     found = cfg_mod.find_config_file()
     assert found is not None
@@ -116,7 +115,7 @@ def test_find_config_file_data_dir_fallback(tmp_app_dir):
 
 
 def test_exe_side_config_wins_over_data_dir(tmp_app_dir, monkeypatch, tmp_path):
-    'EXE 旁边有配置时优先于数据目录（文档声明的顺序）'
+    "EXE 旁边有配置时优先于数据目录（文档声明的顺序）"
     exe_dir = tmp_path / "exe"
     exe_dir.mkdir()
     (exe_dir / "config.json").write_text('{"fallback_local_shell": "powershell"}', encoding="utf-8")
@@ -129,7 +128,7 @@ def test_exe_side_config_wins_over_data_dir(tmp_app_dir, monkeypatch, tmp_path):
 
 
 def test_cwd_config_found(tmp_app_dir, monkeypatch, tmp_path):
-    '当前工作目录有配置 → 可被找到'
+    "当前工作目录有配置 → 可被找到"
     (tmp_path / "config.json").write_text('{"debug": true}', encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     found = cfg_mod.find_config_file()
@@ -138,7 +137,7 @@ def test_cwd_config_found(tmp_app_dir, monkeypatch, tmp_path):
 
 
 def test_save_config_writes_to_active_exe_side(tmp_app_dir, monkeypatch, tmp_path):
-    'save_config 写入当前生效的配置文件（EXE 旁），而不是数据目录'
+    "save_config 写入当前生效的配置文件（EXE 旁），而不是数据目录"
     exe_dir = tmp_path / "exe"
     exe_dir.mkdir()
     (exe_dir / "config.json").write_text('{"fallback_local_shell": "cmd"}', encoding="utf-8")

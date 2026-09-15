@@ -6,9 +6,10 @@ Tab 补全覆盖行、空命令、普通输出行不误记。
 
 import pytest
 
+from ssh_web_tool.echo_parser import EchoParser
 from ssh_web_tool.sessions import SSHSession
 
-extract = SSHSession._extract_echo_command
+extract = EchoParser.extract_echo_command
 
 
 # ---------- 已知提示符循环剥离 ----------
@@ -81,9 +82,9 @@ async def test_parse_echo_line_tab_completion_keeps_final():
     s = SSHSession("t", "10.0.0.1", 22, "root")
     s._has_shell = True
     s.process = object()  # type: ignore[assignment]  # _parse_echo_line 要求 process 非 None
-    s._echo_buf = ""
-    s._echo_last_cmd = ""
-    s._echo_last_time = 0
+    s._echo_parser.buffer = ""
+    s._echo_parser.last_cmd = ""
+    s._echo_parser.last_time = 0
     recorded = []
 
     async def fake_record(cmd):

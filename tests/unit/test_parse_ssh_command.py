@@ -1,6 +1,6 @@
 """解析本地终端 ssh user:password@host 命令的单元测试"""
 
-from main import _parse_ssh_command
+from ssh_web_tool.api.helpers import _parse_ssh_command
 from ssh_web_tool.sessions import SSHSession
 
 

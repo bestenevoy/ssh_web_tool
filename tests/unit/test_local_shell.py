@@ -33,10 +33,10 @@ async def test_start_local_cmd_echo_and_read(tmp_path, monkeypatch):
     assert s.is_local()
     assert s.is_alive()
     await asyncio.sleep(1.0)
-    buf1 = "".join(s._output_buffer)
+    buf1 = "".join(s._output_bus.raw_chunks())
     await s.write_local("echo local-ok\r")
     await asyncio.sleep(2.0)
-    buf2 = "".join(s._output_buffer)
+    buf2 = "".join(s._output_bus.raw_chunks())
     s._flush_log_now()
     await s.close()
     assert "local-ok" in buf2, f"buf1={buf1[:100]!r} buf2={buf2[:300]!r}"
@@ -54,7 +54,7 @@ async def test_local_resize(tmp_path, monkeypatch):
     await asyncio.sleep(1.0)
     await s.write_local("echo after-resize\r")
     await asyncio.sleep(2.0)
-    buf = "".join(s._output_buffer)
+    buf = "".join(s._output_bus.raw_chunks())
     s._flush_log_now()
     await s.close()
     assert "after-resize" in buf, f"buf={buf[:300]!r}"
@@ -74,7 +74,7 @@ async def test_restart_local_shell(tmp_path, monkeypatch):
     await asyncio.sleep(1.0)
     await s.write_local("echo restarted\r")
     await asyncio.sleep(2.0)
-    buf = "".join(s._output_buffer)
+    buf = "".join(s._output_bus.raw_chunks())
     s._flush_log_now()
     await s.close()
     assert "restarted" in buf, f"buf={buf[:300]!r}"
@@ -91,7 +91,7 @@ async def test_switch_to_local_falls_back(tmp_path, monkeypatch):
     await asyncio.sleep(1.0)
     await s.write_local("echo switched\r")
     await asyncio.sleep(2.0)
-    buf = "".join(s._output_buffer)
+    buf = "".join(s._output_bus.raw_chunks())
     s._flush_log_now()
     await s.close()
     assert "switched" in buf, f"buf={buf[:300]!r}"
@@ -132,7 +132,7 @@ async def test_local_ctrl_c_graceful_and_closed_notice(tmp_path, monkeypatch):
     await s.write_local("\x03")  # AttachConsole 不可用时静默回退，不应抛异常
     await s.write_local("echo after-ctrl-c\r")
     await asyncio.sleep(1.5)
-    buf = "".join(s._output_buffer)
+    buf = "".join(s._output_bus.raw_chunks())
     s._flush_log_now()
     await s.close()
     assert "unique-token-xyz" in buf, f"buf={buf[:300]!r}"

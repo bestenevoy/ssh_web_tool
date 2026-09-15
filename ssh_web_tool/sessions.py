@@ -16,6 +16,17 @@ import uuid
 from typing import Any, ClassVar
 
 import asyncssh
+from fastapi import WebSocket
+
+from . import prompt_detect
+from .echo_parser import EchoParser
+from .output_bus import OutputBus
+from .session_log import (
+    SessionLog,
+    build_log_file,
+    resolve_existing_log,
+)
+from .ws_protocol import SERVER_SSH_CONNECTED
 
 # 供 asyncssh.connect 劫持（patch_asyncssh）识别"工具内部连接"的标记：
 # 工具自身创建会话时置位，劫持层看到标记则直接放行，避免把工具自己的连接
@@ -136,9 +147,7 @@ def _send_ctrl_c_to_console(child_pid: int) -> bool:
             lparam = (scan << 16) | 1 | (0 if down else 0xC0000000)
             msg = WM_KEYDOWN if down else WM_KEYUP
             result = ctypes.c_ulong()
-            user32.SendMessageTimeoutW(
-                hwnd, msg, vk, lparam, SMTO_ABORTIFHUNG, 2000, ctypes.byref(result)
-            )
+            user32.SendMessageTimeoutW(hwnd, msg, vk, lparam, SMTO_ABORTIFHUNG, 2000, ctypes.byref(result))
 
         _send(VK_CONTROL, True)
         _send(ord("C"), True)
@@ -200,20 +209,20 @@ class SSHSession:
         self._has_shell = False  # 是否启动了交互式终端
         # 用于非交互命令执行的锁，防止并发冲突
         self._cmd_lock = asyncio.Lock()
-        # 输出广播机制：一个协程读 stdout，广播给所有监听器
-        self._output_listeners: list[asyncio.Queue] = []
-        self._output_buffer: list[str] = []  # 终端输出缓冲区（用于状态检测）
-        self._reader_task: asyncio.Task | None = None
+        # 组件装配（职责分解：广播 OutputBus / 回显解析 EchoParser / 日志 SessionLog
+        # 各自独立实现，本类只做编排，见对应组件模块）
+        self._output_bus = OutputBus(prompt_detect.clean_ansi)
+        self._echo_parser = EchoParser()
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
         # 恢复已有会话时沿用旧文件（同一终端 = 同一份记录）
-        self._log_file = self._resolve_existing_log() or self._build_log_file()
-        self._logger = self._get_or_create_logger(session_id, self._log_file)
-        # 日志聚合缓冲：输出先累积，静默期/超阈值后清洗一次性写入，
-        # 避免把每次刷新的中间回显都写进日志（只记录最终显示内容）
-        self._log_buf = ""
-        self._log_flush_task: asyncio.Task | None = None
+        log_file = resolve_existing_log(self.session_id, self.LOG_DIR) or build_log_file(
+            self.session_id, self.host, self.created_at, self.LOG_DIR
+        )
+        self._logger = self._get_or_create_logger(session_id, log_file)
+        self._session_log = SessionLog(session_id, log_file, self._logger, self.LOG_FLUSH_DELAY, self.LOG_FLUSH_MAX)
+        self._reader_task: asyncio.Task | None = None
         # 本地 shell（WinPTY 后端，本机 cmd/powershell；SSH 断开后可自动切换）
         self._local_proc: Any = None  # winpty.PtyProcess（backend=1 WinPTY，动态导入，类型标注为 Any）
         # 外部镜像会话属性（paramiko/asyncssh monkey-patch 注册时动态设置）
@@ -244,13 +253,6 @@ class SSHSession:
         # 本地终端拦截 SSH 命令后建立的后台连接任务（不阻塞 WebSocket 消息循环；
         # 连接期间用户可 Ctrl+C 取消，见 main.py 的 _run_ssh_switch）
         self._ssh_switch_task: asyncio.Task | None = None
-        # 命令回显解析（从终端输出流提取"提示符后的实际命令"，含 Tab 补全/历史翻查结果）
-        self._echo_buf = ""  # 输出行缓冲（可能被数据块截断，留到下一块补齐）
-        self._echo_last_cmd = ""  # 最近一次解析记录的命令（去重防重复记录）
-        self._echo_last_time = 0.0  # 最近一次记录时间
-        # 状态检测缓存：增量清洗后的缓冲区（避免每次 get_terminal_state 全量正则）
-        self._clean_buffer = ""  # 已清洗 ANSI 的输出缓冲区（与 _output_buffer 同步）
-        self._clean_buffer_dirty = False  # 标记是否有新输出需要重新计算状态
         # 会话级通知（如 shell 异常提示）：由全局监控协程写入，WebSocket read_output 循环取出推送。
         # 不直接走 _broadcast_output，避免提示文本混入 run_command 的注入捕获/echo 解析
         self._shell_notice: str | None = None
@@ -260,104 +262,32 @@ class SSHSession:
         self._switch_notice: str | None = None
         self._closed_notice: str | None = None  # 会话关闭通知（本机终端 exit 等）
 
-    # ---------- 日志文件命名 ----------
+    # ---------- 日志文件命名/生命周期（逻辑在 SessionLog 组件） ----------
 
-    _LOG_NAME_SAFE_RE = re.compile(r"[^\w.\-]")
-    _LOG_TIME_FMT = "%Y%m%d-%H%M%S"
-
-    @classmethod
-    def _sanitize_host(cls, host: str) -> str:
-        """主机名清洗为合法文件名（IPv6 冒号、路径分隔符等 → _）"""
-        s = cls._LOG_NAME_SAFE_RE.sub("_", host or "unknown")
-        return s[:48] or "unknown"
-
-    @classmethod
-    def _fmt_time(cls, ts: float | None) -> str:
-        import datetime
-
-        if not ts:
-            return "running"
-        return datetime.datetime.fromtimestamp(ts).strftime(cls._LOG_TIME_FMT)
+    @property
+    def _log_file(self) -> str:
+        """当前日志文件路径（单一数据源：SessionLog.log_file，finalize 后自动反映新路径）"""
+        return self._session_log.log_file
 
     def _resolve_existing_log(self) -> str | None:
-        """恢复场景：同 session_id 已存在日志文件则沿用（同一终端同一份记录）
-
-        匹配新命名 *_{sid}.log；兼容旧命名 {sid}.log（历史版本遗留）"""
-        try:
-            os.makedirs(self.LOG_DIR, exist_ok=True)
-            pat = re.compile(rf".*_{re.escape(self.session_id)}\.log$")
-            cands = [p for p in os.listdir(self.LOG_DIR) if pat.match(p)]
-            if not cands and os.path.exists(os.path.join(self.LOG_DIR, f"{self.session_id}.log")):
-                return os.path.join(self.LOG_DIR, f"{self.session_id}.log")
-            if cands:
-                full = [os.path.join(self.LOG_DIR, c) for c in cands]
-                return max(full, key=os.path.getmtime)
-        except Exception:
-            pass
-        return None
+        """恢复场景：同 session_id 已存在日志文件则沿用（同一终端同一份记录）"""
+        return resolve_existing_log(self.session_id, self.LOG_DIR)
 
     def _build_log_file(self) -> str:
         """新会话日志文件名：{host}_{start}_running_{session_id}.log"""
-        start = self._fmt_time(self.created_at)
-        return os.path.join(self.LOG_DIR, f"{self._sanitize_host(self.host)}_{start}_running_{self.session_id}.log")
-
-    def _close_log_handler(self):
-        """关闭并移除当前 logger 的 FileHandler（释放文件句柄，供 rename/清理）"""
-        logger = self._logger
-        if logger is None:
-            return
-        for h in logger.handlers[:]:
-            try:
-                h.close()
-            except Exception:
-                pass
-            logger.removeHandler(h)
+        return build_log_file(self.session_id, self.host, self.created_at, self.LOG_DIR)
 
     def finalize_log_file(self):
-        """会话关闭时补全结束时间：把 _running_ 替换为 {end}_
-
-        文件存在则重命名；不存在（会话无任何输出）也更新路径保持一致"""
-        try:
-            if not self._log_file or "_running_" not in self._log_file:
-                return
-            end = self._fmt_time(time.time())
-            new_path = self._log_file.replace("_running_", f"_{end}_", 1)
-            if new_path == self._log_file:
-                return
-            if os.path.exists(self._log_file):
-                # Windows 下 FileHandler 占用句柄会导致 rename 失败，先释放
-                self._close_log_handler()
-                try:
-                    os.rename(self._log_file, new_path)
-                except OSError:
-                    pass  # 重命名失败不阻塞关闭（句柄可能仍被占用）
-            self._log_file = new_path
-        except Exception:
-            pass  # 重命名失败不阻塞关闭（文件句柄可能仍被占用）
+        """会话关闭时补全结束时间：把 _running_ 替换为 {end}_（逻辑在 SessionLog.finalize）"""
+        self._session_log.finalize()
 
     @classmethod
     def cleanup_old_logs(cls, days: int = 30) -> int:
         """启动时清理超过 days 天的会话日志（会话日志不再按天轮转，靠启动清理控制体积）
 
-        返回删除的文件数
+        返回删除的文件数（逻辑在 SessionLog.cleanup_old_logs）
         """
-        removed = 0
-        try:
-            os.makedirs(cls.LOG_DIR, exist_ok=True)
-            cutoff = time.time() - days * 86400
-            for name in os.listdir(cls.LOG_DIR):
-                if not name.endswith(".log"):
-                    continue
-                p = os.path.join(cls.LOG_DIR, name)
-                try:
-                    if os.path.getmtime(p) < cutoff:
-                        os.remove(p)
-                        removed += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return removed
+        return SessionLog.cleanup_old_logs(days, cls.LOG_DIR)
 
     def set_shell_notice(self, msg: str) -> None:
         """设置会话级通知（全局监控协程调用）"""
@@ -389,6 +319,7 @@ class SSHSession:
         self._closed_notice = None
         return n
 
+    @property
     def is_connected(self) -> bool:
         return self._connected
 
@@ -457,103 +388,26 @@ class SSHSession:
         )
         self._has_shell = True
         self.last_active = time.time()
-        # 自动启动输出读取器（广播给所有监听器）
-        await self.start_output_reader()
+        # 自动启动 SSH 输出读取器（广播给所有监听器）
+        # 注意：必须直接启动 SSH 读取器而非走 start_output_reader——
+        # switch_to_ssh 流程中此刻 _local_proc 尚未清空（本地 shell 在本方法
+        # 返回后才终止），start_output_reader 会误判为本地 shell，
+        # 导致 SSH 输出永远无人读取（连接成功但终端无任何输出/回显）
+        self._start_ssh_reader()
         return self.process
 
-    # ============ 输出广播机制 ============
+    # ============ 输出广播机制（逻辑在 OutputBus 组件） ============
 
     def add_output_listener(self) -> asyncio.Queue:
         """注册输出监听器，返回一个 Queue，后续输出会写入这个队列
         有界队列（约 100 块 ≈ 400KB）：消费慢的监听器（前端 ws 慢）不会无限堆积内存"""
-        q: asyncio.Queue = asyncio.Queue(maxsize=100)
-        self._output_listeners.append(q)
-        return q
+        return self._output_bus.add_listener()
 
     def remove_output_listener(self, q: asyncio.Queue):
         """移除输出监听器"""
-        if q in self._output_listeners:
-            self._output_listeners.remove(q)
+        self._output_bus.remove_listener(q)
 
-    def _drop_oldest(self, q: asyncio.Queue, data: str):
-        """队列满时丢弃最旧的一条再放入最新数据（终端语义：保留最新内容）"""
-        try:
-            q.get_nowait()
-        except Exception:
-            pass
-        try:
-            q.put_nowait(data)
-        except Exception:
-            pass
-
-    # ============ 命令回显解析（后端统一记录实际执行的命令） ============
-
-    # 提示符正则：匹配 bash/zsh/sh (user@host:path$ / #)、python (>>>)、
-    # mysql/sqlite/redis/mongo/postgres 等交互式程序的提示符。
-    # 不匹配单独的 ">"（node 提示符，太通用容易误判普通输出行）。
-    _ECHO_PROMPT_RE = re.compile(
-        r"^(?:"
-        r"[\w.-]+@[\w.-]+:[^#$\n]*[#$]"  # shell: user@host:path$ 或 user@host:path#
-        r"|>>>"  # python
-        r"|\.\.\."  # python 续行（跳过）
-        r"|mysql>"  # mysql
-        r"|sqlite>"  # sqlite
-        r"|[\d.]+:\d+>"  # redis: 127.0.0.1:6379>
-        r"|[a-zA-Z_][\w.-]*>"  # 通用: xxx> (mongo, postgres 等)
-        r")\s*"
-    )
-
-    # 清 ANSI 但保留 \r\n（回显解析需要 \r 判断行内覆盖）
-    _ANSI_KEEP_CR_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
-    _OSC_KEEP_CR_RE = re.compile(r"\x1b\][\s\S]*?(\x07|\x1b\\)")
-
-    @classmethod
-    def _clean_ansi_keep_cr(cls, text: str) -> str:
-        """清理 ANSI 转义序列，但保留 \r\n（区别于 _clean_ansi 会去掉 \r）"""
-        text = cls._ANSI_KEEP_CR_RE.sub("", text)
-        text = cls._OSC_KEEP_CR_RE.sub("", text)
-        text = re.sub(r"\x1b[=><]", "", text)
-        return text
-
-    @classmethod
-    def _extract_echo_command(cls, line: str) -> str:
-        """从一行输出中提取提示符之后的命令文本；非提示符行返回空串
-        - 已知提示符**循环剥离**：阿里云等 shell 每次 readline 重绘都会清屏重写，
-          一行内可能出现多个连续提示符（root@host:~# root@host:~# cmd）
-        - 自定义 PS1 宽松兜底（仅当未识别出已知提示符时）：行首到第一个 $/# 之间
-          为提示符标识（如 root@host#、[user@host ~]$），其后是命令；
-          宽松匹配失败 = 普通输出行，不记录"""
-        s = line.strip()
-        if not s:
-            return ""
-        # python 续行提示符(...)：是上一命令的延续内容，不作为独立命令记录
-        if s.startswith("..."):
-            return ""
-        # 1. 精确已知提示符：循环剥离（readline 清屏重绘可能一行内多个提示符）
-        stripped = False
-        cmd = s
-        while True:
-            m = cls._ECHO_PROMPT_RE.match(cmd)
-            if not m:
-                break
-            stripped = True
-            rest = cmd[m.end() :]
-            if not rest.strip():
-                return ""  # 只剩提示符（空命令回车）
-            cmd = rest
-        # 2. 未识别出已知提示符时，才尝试自定义 PS1 宽松匹配；失败 = 普通输出行
-        if not stripped:
-            m2 = re.match(r"^[\[\]~\w@.\- :/\\]*?[#$]\s*", cmd)
-            if not m2:
-                return ""
-            rest2 = cmd[m2.end() :].strip()
-            if not rest2:
-                return ""  # 提示符后无内容（空命令回车）
-            cmd = rest2
-        cmd = cmd.strip()
-        if not cmd or len(cmd) > 500:
-            return ""
-        return cmd
+    # ============ 命令回显解析（逻辑在 EchoParser 组件，后端统一记录实际执行的命令） ============
 
     def _parse_echo_line(self, data: str):
         """
@@ -562,39 +416,16 @@ class SSHSession:
         原理：交互式 shell（pty echo / readline）会把用户实际输入的命令回显在
         提示符之后（root@host:~$ cd /var），Tab 补全、历史翻查（方向键/Ctrl+R）
         后的最终内容都会体现在这行里；前端只记录键盘输入，会丢失补全内容。
+
+        解析细节（行缓冲/提示符剥离/去重）在 EchoParser 组件，此处只做调度。
         """
         if not self._has_shell or self.process is None:
             return
-        try:
-            text = self._clean_ansi_keep_cr(data)
-            self._echo_buf += text
-            if len(self._echo_buf) > 4000:
-                self._echo_buf = ""  # 异常情况下防止无限增长
-                return
-            if "\n" not in self._echo_buf:
-                return
-            parts = self._echo_buf.split("\n")
-            self._echo_buf = parts[-1]  # 最后一段不完整，留到下一块
-            for raw in parts[:-1]:
-                line = raw.rstrip("\r")
-                if "\r" in line:
-                    # 行内多次 \r 覆盖（Tab 补全会重写整行）：只保留最后一次覆盖后的内容
-                    line = line.rsplit("\r", 1)[-1]
-                cmd = self._extract_echo_command(line)
-                if not cmd:
-                    continue
-                now = time.time()
-                # 去重：与 3 秒内刚记录过的相同命令（防止与前端/CLI 注入重复记录）
-                if cmd == self._echo_last_cmd and now - self._echo_last_time < 3:
-                    continue
-                self._echo_last_cmd = cmd
-                self._echo_last_time = now
-                try:
-                    self._echo_task = asyncio.create_task(self._record_echo(cmd))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        for cmd in self._echo_parser.feed(data):
+            try:
+                self._echo_task = asyncio.create_task(self._record_echo(cmd))
+            except Exception:
+                pass
 
     async def _record_echo(self, cmd: str):
         """异步记录回显命令（不阻塞输出广播循环）
@@ -611,209 +442,200 @@ class SSHSession:
         """广播输出给所有监听器，并维护缓冲区（用于状态检测）和日志持久化"""
         # 解析命令回显（实际执行的命令）并记录历史
         self._parse_echo_line(data)
-        # 维护缓冲区（保留最后 8000 字符）
-        self._output_buffer.append(data)
-        total = sum(len(s) for s in self._output_buffer)
-        if total > 8000:
-            combined = "".join(self._output_buffer)
-            self._output_buffer = [combined[-8000:]]
-            # 缓冲区压缩后同步更新清洗缓冲区
-            self._clean_buffer = self._clean_ansi(combined)[-8000:]
-        else:
-            # 增量清洗：只清洗新增数据块，避免每次全量正则
-            self._clean_buffer += self._clean_ansi(data)
-            if len(self._clean_buffer) > 8000:
-                self._clean_buffer = self._clean_buffer[-8000:]
-        self._clean_buffer_dirty = True
         # 日志持久化：聚合缓冲，静默期/超阈值后清洗一次性写入
         # （不逐块写：避免每次刷新回显都落盘，只记录最终显示内容）
         self._feed_log(data)
-        # 广播给所有监听器：put_nowait 不阻塞；队列满时丢最旧保最新，
-        # 避免慢监听器（前端 ws 阻塞）拖住整个广播链（日志/echo 解析/其他监听器）
-        for q in self._output_listeners:
+        # 广播 + 输出/清洗缓冲区维护（有界队列，慢监听器丢最旧保最新）
+        self._output_bus.broadcast(data)
+
+    # ============ 对外公开接口（API 层统一从这里访问，不再直接摸私有属性） ============
+
+    async def broadcast_output(self, data: str) -> None:
+        """广播输出到所有监听器（对外的公开接口，内部逻辑走 _broadcast_output）"""
+        await self._broadcast_output(data)
+
+    def get_conn_info(self) -> dict[str, str | int] | None:
+        """返回本会话可重连的连接信息。
+
+        仅对"本地拦截 SSH 命令建立的会话"（无已保存主机）返回原始凭据；
+        已保存主机的会话返回 None（重连走 host_id / 保存的主机配置）。
+        """
+        if self.host_id or not self._password:
+            return None
+        return {
+            "host": self.host,
+            "port": self.port,
+            "username": self.username,
+            "password": self._password,
+        }
+
+    def begin_ssh_switch(
+        self, websocket: WebSocket, ssh_host: str, ssh_port: int, ssh_user: str, ssh_pass: str
+    ) -> asyncio.Task:
+        """启动"本地拦截 SSH"的后台连接/切换任务（不阻塞 WebSocket 消息循环）。
+
+        连接期间用户 Ctrl+C 可取消（cancel_ssh_switch）；结果通过 WebSocket 推送
+        ssh_connected / 错误 / 已取消 消息。返回创建的 Task（内部持有引用防 GC）。
+        """
+        old = self._ssh_switch_task
+        if old is not None and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self._do_ssh_switch(websocket, ssh_host, ssh_port, ssh_user, ssh_pass))
+        self._ssh_switch_task = task
+        return task
+
+    def cancel_ssh_switch(self) -> bool:
+        """取消进行中的本地拦截 SSH 连接（用户 Ctrl+C 时调用）；返回是否确实取消了"""
+        task = self._ssh_switch_task
+        if task is not None and not task.done():
+            task.cancel()
+            return True
+        return False
+
+    def update_local_size(self, cols: int, rows: int) -> bool:
+        """调整本机 shell 的 PTY 尺寸；返回尺寸是否发生变化（ws 层据此发 Ctrl+L 重绘提示符）"""
+        changed = cols != self._last_cols or rows != self._last_rows
+        self.resize_local(cols, rows)
+        return changed
+
+    def shell_flag_stale(self) -> bool:
+        """shell 标志遗留但进程已空（恢复场景：_has_shell=True 且 process=None）。
+        调用后清除标志（走"全新启动"流程），返回是否命中该场景"""
+        if self._has_shell and self.process is None:
+            self._has_shell = False
+            return True
+        return False
+
+    async def auto_switch_to_local(self, reason: str = "SSH 连接断开") -> None:
+        """立即切换到本机终端（对外公开接口，内部走幂等的 _auto_switch_to_local）"""
+        await self._auto_switch_to_local(reason)
+
+    def schedule_auto_switch_local(self, reason: str = "SSH 连接断开") -> asyncio.Task:
+        """后台执行自动切换本机终端（输入时发现通道已关闭等场景），返回创建的 Task"""
+        task = asyncio.create_task(self._auto_switch_to_local(reason))
+        self._switch_task = task
+        return task
+
+    async def _do_ssh_switch(
+        self, websocket: WebSocket, ssh_host: str, ssh_port: int, ssh_user: str, ssh_pass: str
+    ) -> None:
+        """后台执行"本地终端拦截 SSH"的切换（begin_ssh_switch 创建此任务）
+
+        - 成功：发送 ssh_connected（含连接信息；前端据此保存重连凭据，重连不依赖已保存主机）
+        - 失败：提示错误并恢复本地 shell（switch_to_ssh 已恢复读取）
+        - 取消（用户 Ctrl+C）：提示已取消，本地 shell 保持可用
+        """
+        from .event_bus import event_bus
+
+        try:
+            # 总超时兜底：连接阶段最多 30s（connect 内部还有 TCP connect_timeout）
+            async with asyncio.timeout(30):  # type: ignore[attr-defined]
+                await self.switch_to_ssh(ssh_host, ssh_port, ssh_user, ssh_pass)
+            await websocket.send_json(
+                {
+                    "type": SERVER_SSH_CONNECTED,
+                    "host": ssh_host,
+                    "port": ssh_port,
+                    "username": ssh_user,
+                    "password": ssh_pass,  # 本地工具：用户刚在终端输入过，带回供"重连"使用
+                    "terminal_name": f"{ssh_user}@{ssh_host}",
+                }
+            )
+            await event_bus.publish(
+                "session_create",
+                "local-ssh",
+                f"本地终端拦截 SSH 连接 {self.session_id} -> {ssh_user}@{ssh_host}:{ssh_port}",
+                session_id=self.session_id,
+                host=ssh_host,
+                port=ssh_port,
+            )
+            # 切换成功：更新会话终端名（重连/恢复页面时标签显示 root@host，而非"本机 cmd"）
+            self.terminal_name = f"{ssh_user}@{ssh_host}"
+        except asyncio.CancelledError:
+            # 用户 Ctrl+C 取消连接：switch_to_ssh 已恢复本地 shell 读取
             try:
-                q.put_nowait(data)
-            except asyncio.QueueFull:
-                self._drop_oldest(q, data)
+                await self._broadcast_output("\r\n\x1b[33m[已取消连接]\x1b[0m\r\n")
+            except Exception:
+                pass
+        except Exception as e:
+            # 连接失败：本地 shell 仍可用。发 ESC 清掉 shell 里残留的半行命令
+            # （cmd 丢弃整行、PSReadLine RevertLine 清空输入），给用户干净的提示符重试
+            try:
+                await self.write_local("\x1b")
+            except Exception:
+                pass
+            try:
+                await self._broadcast_output(f"\r\n\x1b[31m[SSH 连接失败: {e}]\x1b[0m\r\n")
+            except Exception:
+                pass
+        finally:
+            self._ssh_switch_task = None
 
     @classmethod
     def _get_or_create_logger(cls, session_id: str, log_file: str | None = None) -> logging.Logger:
-        """获取或创建会话专属 logger（FileHandler 追加模式，会话关闭时关闭 handler）
+        """获取或创建会话专属 logger（逻辑在 SessionLog.get_or_create_logger）"""
+        return SessionLog.get_or_create_logger(session_id, log_file, cls.LOG_DIR, cls._logger_cache)
 
-        同一 session_id 同一文件（日志文件路径在 __init__ 已固定：恢复会话沿用旧文件）；
-        不做按天轮转（会话日志是一份连续记录，轮转会破坏"同一终端同一份记录"）。
-        """
-        if session_id in cls._logger_cache:
-            return cls._logger_cache[session_id]
-        os.makedirs(cls.LOG_DIR, exist_ok=True)
-        path = log_file or os.path.join(cls.LOG_DIR, f"{session_id}.log")
-        logger = logging.getLogger(f"ssh_session.{session_id}")
-        logger.setLevel(logging.INFO)
-        # 已有 handler 但指向旧路径（恢复/重建场景路径变化）：先移除重建，避免写错文件
-        if logger.handlers:
-            first = logger.handlers[0]
-            base = getattr(first, "baseFilename", None)
-            if not base or os.path.normcase(base) != os.path.normcase(path):
-                for h in logger.handlers[:]:
-                    try:
-                        h.close()
-                    except Exception:
-                        pass
-                    logger.removeHandler(h)
-        # 避免重复添加 handler（logger 会被全局注册）
-        if not logger.handlers:
-            handler = logging.FileHandler(path, mode="a", encoding="utf-8")
-            handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.setLevel(logging.INFO)
-            logger.addHandler(handler)
-            # 不向上传播到 root logger（避免重复输出到 server.log）
-            logger.propagate = False
-        cls._logger_cache[session_id] = logger
-        return logger
-
-    # 日志聚合写入：静默期（LOG_FLUSH_DELAY）或缓冲超阈值时一次性清洗写入
+    # 日志聚合写入（逻辑在 SessionLog 组件）：静默期（LOG_FLUSH_DELAY）或缓冲超阈值时一次性清洗写入
     LOG_FLUSH_DELAY = 0.6  # 秒：无新输出多久后 flush
     LOG_FLUSH_MAX = 65536  # 字符：缓冲超过该阈值立即 flush
 
-    def _schedule_log_flush(self):
-        """有新输出进入日志缓冲时调度一次延迟 flush（已调度则不重复）"""
-        if not self._log_buf:
-            return
-        if self._log_flush_task and not self._log_flush_task.done():
-            return
-        try:
-            self._log_flush_task = asyncio.create_task(self._log_flusher())
-        except RuntimeError:
-            # 无运行中的 event loop（同步上下文/测试）：直接同步 flush
-            self._flush_log_now()
-
-    async def _log_flusher(self):
-        try:
-            await asyncio.sleep(self.LOG_FLUSH_DELAY)
-        except asyncio.CancelledError:
-            pass
-        self._flush_log_now()
+    @property
+    def _log_buf(self) -> str:
+        """聚合缓冲当前内容（测试/内部读取用，写入逻辑在 SessionLog）"""
+        return self._session_log.buffer
 
     def _flush_log_now(self):
-        """把日志缓冲清洗后一次性写入（幂等；会话关闭前必须调用以落盘剩余内容）"""
-        if not self._log_buf:
-            return
-        text = self._log_buf
-        self._log_buf = ""
-        try:
-            # 只记录最终显示：清洗 ANSI + 行内 \r 覆盖合并（进度条等只留最后状态）
-            text = self._clean_ansi_keep_cr(text)
-            text = self._collapse_cr_lines(text)
-            if text.strip():
-                self._logger.info(text)
-        except Exception:
-            pass  # 日志写入失败不影响主流程
+        """把日志缓冲清洗后一次性写入（幂等；会话关闭前必须调用以落盘剩余内容，逻辑在 SessionLog）"""
+        self._session_log.flush_now()
 
     @staticmethod
     def _collapse_cr_lines(text: str) -> str:
-        """同一物理行内多次 \r 覆盖：只保留最后一次 \r 之后的内容
-        （wget/进度条等 \r 刷新场景，日志只记录最终显示状态）
-
-        注意：先把 CRLF 归一化为 LF，避免把 \r\n 换行误判为进度条覆盖
-        而丢掉整行内容。
-        """
-        lines = text.replace("\r\n", "\n").split("\n")
-        out = []
-        for line in lines:
-            if "\r" in line:
-                line = line.rsplit("\r", 1)[-1]
-            out.append(line)
-        return "\n".join(out)
+        """同一物理行内多次 \r 覆盖：只保留最后一次 \r 之后的内容（逻辑在 SessionLog）"""
+        return SessionLog.collapse_cr_lines(text)
 
     def _feed_log(self, data: str):
-        """输出进入日志聚合缓冲（替代逐块 _write_log，减少刷新回显碎片）"""
-        self._log_buf += data
-        if len(self._log_buf) >= self.LOG_FLUSH_MAX:
-            self._flush_log_now()
-        else:
-            self._schedule_log_flush()
+        """输出进入日志聚合缓冲（替代逐块 _write_log，减少刷新回显碎片，逻辑在 SessionLog）"""
+        self._session_log.feed(data)
 
     def get_history_logs(self, offset: int = 0, limit: int = 2000) -> str:
         """
         读取历史日志（分页加载）
         - offset: 从文件末尾倒数的字符偏移量（0 表示从最近开始）
         - limit: 最多返回多少字符
-        返回清理后的日志文本
+        返回清理后的日志文本（读取前自动落盘聚合缓冲，逻辑在 SessionLog.read_history）
         """
-        try:
-            # 先落盘聚合缓冲：banner/MOTD 等刚产生（未到 0.6s 静默期）的输出
-            # 若直接读文件会漏掉，导致"连接后的主机信息没有显示"
-            self._flush_log_now()
-            if not os.path.exists(self._log_file):
-                return ""
-            file_size = os.path.getsize(self._log_file)
-            # 计算读取起始位置（从文件末尾倒数）
-            start_pos = max(0, file_size - offset - limit)
-            read_size = min(limit, file_size - start_pos)
-            with open(self._log_file, encoding="utf-8", errors="replace") as f:
-                f.seek(start_pos)
-                content = f.read(read_size)
-            # 清理 ANSI 并格式化
-            return self._format_history_logs(content)
-        except Exception:
-            return ""
+        return self._session_log.read_history(offset, limit)
 
     @staticmethod
     def _format_history_logs(content: str) -> str:
-        """格式化历史日志：清理ANSI、处理回车、压缩多余空格和空行"""
-        # 1. 清理 ANSI 转义序列
-        text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", content)
-        text = re.sub(r"\x1b\][\s\S]*?(\x07|\x1b\\)", "", text)
-        text = re.sub(r"\x1b[=><]", "", text)
-
-        # 2. 处理回车 \r：同一行中 \r 后面的内容覆盖前面的，只保留最后一段
-        lines = text.split("\n")
-        formatted_lines = []
-        for line in lines:
-            if "\r" in line:
-                # 只保留最后一个 \r 后面的内容
-                line = line.rsplit("\r", 1)[-1]
-            # 去掉行尾空格
-            line = line.rstrip()
-            # 压缩行首多余空格（超过8个的压缩为4个，保留有意义的缩进）
-            stripped = line.lstrip()
-            leading_spaces = len(line) - len(stripped)
-            if leading_spaces > 8:
-                line = "    " + stripped
-            formatted_lines.append(line)
-
-        # 3. 合并连续空行（最多保留2个连续空行）
-        result = []
-        empty_count = 0
-        for line in formatted_lines:
-            if not line.strip():
-                empty_count += 1
-                if empty_count <= 2:
-                    result.append(line)
-            else:
-                empty_count = 0
-                result.append(line)
-
-        return "\n".join(result)
+        """格式化历史日志：清理ANSI、处理回车、压缩多余空格和空行（逻辑在 SessionLog）"""
+        return SessionLog.format_history_logs(content)
 
     async def start_output_reader(self):
-        """启动后台协程持续读取 stdout 并广播（幂等，重复调用不会重复启动）
+        """启动输出读取器（幂等，重复调用不会重复启动）
 
-        本地 shell（WinPTY）走 _start_local_reader（to_thread 读取，不阻塞事件循环）
+        按当前 shell 类型分派：本地 shell（WinPTY）走 _start_local_reader
+        （to_thread 读取，不阻塞事件循环）；SSH 走 _start_ssh_reader。
         """
         if self._local_proc is not None:
             self._start_local_reader()
             return
+        self._start_ssh_reader()
+
+    def _start_ssh_reader(self):
+        """启动 SSH stdout 读取协程（幂等）。EOF 且 shell 存活时自动切回本机终端"""
         if self._reader_task and not self._reader_task.done():
             return
         if not self.process:
             raise RuntimeError("没有交互式终端")
+        proc = self.process
 
         async def _reader():
             clean_eof = False
             try:
                 while True:
-                    data = await self.process.stdout.read(4096)
+                    data = await proc.stdout.read(4096)
                     if not data:
                         # EOF：远端 shell 已退出（用户输入 exit/logout 等）
                         clean_eof = True
@@ -1247,35 +1069,21 @@ class SSHSession:
 
     @staticmethod
     def _clean_ansi(text: str) -> str:
-        """清理 ANSI 转义序列（颜色、光标移动、OSC 等）"""
-        text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
-        # OSC 序列支持两种结尾：\x07 (BEL) 和 \x1b\\ (ST)
-        text = re.sub(r"\x1b\][\s\S]*?(\x07|\x1b\\)", "", text)
-        text = re.sub(r"\x1b[=><]", "", text)
-        text = re.sub(r"\r", "", text)
-        return text
+        """清理 ANSI 转义序列（颜色、光标移动、OSC 等；逻辑在 prompt_detect.clean_ansi）"""
+        return prompt_detect.clean_ansi(text)
 
-    # 通用提示符模式列表（按优先级排序，匹配到任意一个即认为命令完成）
-    PROMPT_PATTERNS: ClassVar[list[str]] = [
-        r"[\w.-]+@[\w.-]+:.+[#$]\s*$",  # shell: root@host:~# 或 user@host:~$
-        r"^>>>\s*$",  # Python: >>>
-        r"^\.\.\.\s*$",  # Python 续行: ...
-        r"^mysql>\s*$",  # MySQL: mysql>
-        r"^sqlite>\s*$",  # SQLite: sqlite>
-        r"^[\d.]+:\d+>\s*$",  # Redis: 127.0.0.1:6379>
-        r"^>\s*$",  # Node.js: >
-        r"^\w+>\s*$",  # 通用: xxx> (mongo, postgres 等)
-    ]
+    # 通用提示符模式列表（逻辑在 prompt_detect 组件）
+    PROMPT_PATTERNS: ClassVar[list[str]] = prompt_detect.PROMPT_PATTERNS
 
     @classmethod
     def _match_any_prompt(cls, text: str) -> bool:
-        """检查文本是否匹配任意一种已知提示符"""
-        return any(re.search(pattern, text, re.MULTILINE) for pattern in cls.PROMPT_PATTERNS)
+        """检查文本是否匹配任意一种已知提示符（逻辑在 prompt_detect.match_any_prompt）"""
+        return prompt_detect.match_any_prompt(text)
 
     @classmethod
     def _is_prompt_line(cls, line: str) -> bool:
-        """检查单行是否是提示符行"""
-        return any(re.match(pattern, line.strip()) for pattern in cls.PROMPT_PATTERNS)
+        """检查单行是否是提示符行（逻辑在 prompt_detect.is_prompt_line）"""
+        return prompt_detect.is_prompt_line(line)
 
     async def _inject_and_wait(self, command: str, idle_timeout: float = 0.5, total_timeout: int = 15) -> str:
         """
@@ -1412,11 +1220,11 @@ class SSHSession:
         获取终端当前状态（基于输出缓冲区最后几行分析）
         判断是否在 Python/MySQL/分页器/普通 shell 等交互模式
 
-        优化：使用 _broadcast_output 中增量维护的 _clean_buffer 缓存，
-        避免每次调用都对 8000 字符缓冲区做 3 次正则替换。
+        优化：使用 _broadcast_output 中增量维护的清洗缓冲区缓存，
+        避免每次调用都对 8000 字符缓冲区做 3 次正则替换（组件：OutputBus）。
         """
-        # 直接使用增量清洗后的缓冲区（在 _broadcast_output 中维护）
-        clean_text = self._clean_buffer
+        # 直接使用增量清洗后的缓冲区（在 OutputBus.broadcast 中维护）
+        clean_text = self._output_bus.cleaned_text()
 
         lines = clean_text.split("\n")
         # 去掉末尾空行（输出通常以 \n 结尾，split 后最后一个元素是空字符串）

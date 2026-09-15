@@ -1,48 +1,26 @@
 // 终端状态管理 hook
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { Terminal } from 'xterm'
-import { FitAddon } from '@xterm/addon-fit'
+import type { Terminal } from 'xterm'
+import type { FitAddon } from '@xterm/addon-fit'
 import type { Host } from '../types'
 import { api } from './api'
 import type { TerminalSettings } from './useSettings'
-import { reflowForCols } from './reflow'
-import { setupTerminalCopy, setupCopyOnSelect } from './terminalCopy'
-import { createOutputFeeder, type OutputFeeder } from './outputFeeder'
-import { markDisconnected } from './terminalDisconnect'
+import { setupCopyOnSelect } from './terminalCopy'
+import { editLineBuffer, isEnter } from './lineEditor'
+import { createTerminalInstance, getTerminalTheme } from './terminalInstance'
+import type { TerminalInstance, SshConnInfo } from './terminalInstance'
+import type { WsClientMessage } from '../types/ws'
 
-// 终端会话内保存的 SSH 连接信息（本地终端拦截 ssh 命令后建立，无已保存主机，
-// 供"重连"按钮直接用原始凭据重建会话——否则重连会报"找不到该主机信息"）
-export interface SshConnInfo {
-  host: string
-  port: number
-  username: string
-  password: string
+// 类型从 terminalInstance.ts 重导出（组件导入路径不变）
+export type { TerminalInstance, SshConnInfo } from './terminalInstance'
+
+// 上行消息统一构造出口：type 受 WsClientMessage 判别联合约束（types/ws.ts，与后端
+// ws_protocol.py 一一对应），消息类型/字段拼错在编译期报错，而不是悄悄漂移
+function sendClient(ws: WebSocket | null, msg: WsClientMessage): void {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg))
+  }
 }
-
-export interface TerminalInstance {
-  session_id: string
-  host_id: string
-  host_name: string
-  terminal_name: string
-  type: string
-  shell_type: string  // 当前 shell 类型：shell / python / mysql / other
-  term: Terminal
-  fitAddon: FitAddon
-  ws: WebSocket | null
-  container: HTMLDivElement | null
-  state_timer: ReturnType<typeof setInterval> | null
-  input_buffer: string  // 当前输入行缓冲区（用于记录命令历史）
-  input_cursor: number  // 输入行光标位置（行编辑用，精确跟踪命令内容）
-  disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
-  ssh_exited: boolean  // SSH exit 退出后自动切换到本地终端，可点重连回到原 SSH 主机
-  local_starting: boolean  // 本机终端创建后等待首批输出（开启启动提示）；收到第一条 output 后变 false
-  feeder: OutputFeeder | null  // 洪水输出供给器：一次一块 + 内存上限，防大文件输出撑爆 xterm 缓冲
-  ssh_conn: SshConnInfo | null  // 本地拦截 SSH 会话的连接信息（重连凭据）；已保存主机会话为 null
-}
-
-// 洪水输出内存上限：xterm write 缓冲无上限（超 50MB 抛错），这里限 2MB 积压，
-// 超限丢最旧整块（用户正打算 Ctrl+C 的洪水内容，丢一行可接受）
-const MAX_PENDING_BYTES = 2 * 1024 * 1024
 
 // 获取 shell 类型标签
 function getShellTypeLabel(state: any): string {
@@ -51,24 +29,6 @@ function getShellTypeLabel(state: any): string {
   if (state?.in_pager) return 'pager'
   if (state?.in_shell) return 'shell'
   return 'other'
-}
-
-// 获取终端主题配置
-function getTerminalTheme(settings: TerminalSettings) {
-  if (settings.theme === 'light') {
-    return {
-      background: '#fafafa',
-      foreground: '#1a1a2e',
-      cursor: '#e94560',
-      selectionBackground: 'rgba(233, 69, 96, 0.3)',
-    }
-  }
-  return {
-    background: '#0a0e1a',
-    foreground: '#c8d0e0',
-    cursor: '#e94560',
-    selectionBackground: 'rgba(233, 69, 96, 0.3)',
-  }
 }
 
 export function useTerminals(settings: TerminalSettings) {
@@ -89,13 +49,15 @@ export function useTerminals(settings: TerminalSettings) {
   // 保存最新的 activeId 引用，避免 restoreTerminals 依赖 activeId 导致定时器频繁重建
   const activeIdRef = useRef<string | null>(null)
   activeIdRef.current = activeId
+  // closeTerminal 经 ref 转发给终端工厂：closeTerminal 随 terminals 每次渲染重建，
+  // 工厂回调若直接捕获会拿到创建时（首次渲染、空 Map）的过期闭包，导致后端
+  // closed 消息到来时 terminals.get() 找不到实例而提前 return（标签无法自动关闭清理）
+  const closeTerminalRef = useRef<((session_id: string) => Promise<void>) | null>(null)
 
   // 直接发送输入到后端，不做任何延迟/合并
   const sendInput = useCallback((session_id: string, data: string) => {
     const inst = terminalsRef.current.get(session_id)
-    if (inst && inst.ws && inst.ws.readyState === WebSocket.OPEN) {
-      inst.ws.send(JSON.stringify({ type: 'input', data }))
-    }
+    sendClient(inst?.ws ?? null, { type: 'input', data })
   }, [])
 
 
@@ -130,8 +92,8 @@ export function useTerminals(settings: TerminalSettings) {
   }, [])
 
   const sendResize = useCallback((term: Terminal, ws: WebSocket | null) => {
-    if (ws && ws.readyState === WebSocket.OPEN && term) {
-      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
+    if (term) {
+      sendClient(ws, { type: 'resize', cols: term.cols, rows: term.rows })
     }
   }, [])
 
@@ -169,11 +131,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         // 1. 清除 xterm.js 缓冲区（丢弃可能使用错误尺寸渲染的内容）
         term.reset()
         // 2. 发送 Ctrl+L（换页符），告诉 shell 清屏并重绘提示符
-        ws.send(JSON.stringify({ type: 'input', data: '\x0c' }))
+        sendClient(ws, { type: 'input', data: '\x0c' })
       }
       // xterm.js 默认已启用自动换行（DECSET 7），不需要显式写入 ESC 序列
       // 发送 resize 消息，应用新尺寸
-      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
+      sendClient(ws, { type: 'resize', cols: term.cols, rows: term.rows })
       console.log('[Terminal] resync size:', term.cols, 'x', term.rows)
     }
   }, [])
@@ -203,38 +165,23 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
 
   // 处理终端输入：维护输入行缓冲区（精确行编辑，跟踪光标位置），回车时记录完整命令到后端
   // 注意：使用 terminalsRef.current 而不是 terminals，避免闭包捕获旧状态导致新终端的 input_buffer 不记录
+  // 行编辑逻辑已抽取为纯函数 editLineBuffer（lineEditor.ts，可单测）；此处仅保留副作用
   const handleTerminalInput = useCallback((session_id: string, data: string) => {
     const inst = terminalsRef.current.get(session_id)
     if (!inst) return
-    const buf = inst.input_buffer
-    const cur = inst.input_cursor
 
     // 回车：先由前端按键盘输入即时记录（兜底，保证任何 PS1 环境下都有历史），
     // 后端随后解析终端回显行（含 Tab 补全/历史翻查后的真实命令）：
     // record_echo_command 会清理 3 秒内的前缀残留（如 cd /va）并去重，以后端为准
-    if (data === '\r' || data === '\n' || data === '\r\n') {
-      if (buf.trim()) {
-        api.recordCommand(buf.trim()).catch(() => {})
+    if (isEnter(data)) {
+      if (inst.input_buffer.trim()) {
+        api.recordCommand(inst.input_buffer.trim()).catch(() => {})
       }
-      inst.input_buffer = ''
-      inst.input_cursor = 0
-      return
     }
-    // 退格：删除光标前一个字符
-    if (data === '\x7f' || data === '\b') {
-      if (cur > 0) {
-        inst.input_buffer = buf.slice(0, cur - 1) + buf.slice(cur)
-        inst.input_cursor = cur - 1
-      }
-      return
-    }
-    // Ctrl+C / Ctrl+D：清空缓冲区
+    // Ctrl+C：除清空行缓冲外，打断洪水输出（cat 大文件/grep -r）时立即丢弃
+    // 尚未渲染的积压。否则后端已中断命令，但积压块仍会持续灌入 xterm 解析绘制，
+    // 界面看起来像"卡死/没反应"（这是用户最常把 Ctrl+C 误判为失效的场景）
     if (data === '\x03' || data === '\x04') {
-      inst.input_buffer = ''
-      inst.input_cursor = 0
-      // rssh Kernel-tty SIGINT 语义：Ctrl+C 打断洪水输出（cat 大文件/grep -r）时
-      // 立即丢弃尚未渲染的积压。否则后端已中断命令，但积压块仍会持续灌入 xterm
-      // 解析绘制，界面看起来像"卡死/没反应"（这是用户最常把 Ctrl+C 误判为失效的场景）
       if (inst.feeder && inst.feeder.pendingBytes() > 0) {
         inst.feeder.dropPending()
         // 本地 shell（cmd/powershell）：Ctrl+C 后 ^C 回显+新提示符几十毫秒就到，
@@ -244,42 +191,12 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           inst.feeder.armQuiescentDrop(80)
         }
       }
-      return
     }
-    // ESC 序列（方向键/Home/End/Delete 等）：整段解析，绝不写入缓冲区
-    // （之前只过滤 \x1b 字符，导致 [D/[C 这类残留被当成可打印字符混入命令历史）
-    if (data.startsWith('\x1b')) {
-      switch (data) {
-        case '\x1b[D': inst.input_cursor = Math.max(0, cur - 1); return  // ← 光标左移
-        case '\x1b[C': inst.input_cursor = Math.min(buf.length, cur + 1); return  // → 光标右移
-        case '\x1b[H': inst.input_cursor = 0; return  // Home 行首
-        case '\x1b[F': inst.input_cursor = buf.length; return  // End 行尾
-        case '\x1b[3~':  // Delete：删除光标处字符
-          if (cur < buf.length) inst.input_buffer = buf.slice(0, cur) + buf.slice(cur + 1)
-          return
-        case '\x1b[1;5D':  // Ctrl+←：跳到上一个词
-          inst.input_cursor = Math.max(0, buf.lastIndexOf(' ', Math.max(0, cur - 1)))
-          return
-        case '\x1b[1;5C': {  // Ctrl+→：跳到下一个词
-          const np = buf.indexOf(' ', cur)
-          inst.input_cursor = np === -1 ? buf.length : np + 1
-          return
-        }
-        default:
-          return  // 其他序列（上/下箭头、功能键等）：忽略，不影响缓冲区
-      }
-    }
-    // Ctrl+A 行首 / Ctrl+E 行尾 / Ctrl+U 清行
-    if (data === '\x01') { inst.input_cursor = 0; return }
-    if (data === '\x05') { inst.input_cursor = buf.length; return }
-    if (data === '\x15') { inst.input_buffer = ''; inst.input_cursor = 0; return }
-    // 可打印字符：插入到光标位置（支持多字符粘贴和非 ASCII 字符）
-    if (data.length > 0 && data !== '\x00') {
-      const printable = data.split('').filter(c => c >= ' ' || c.charCodeAt(0) > 127).join('')
-      if (printable) {
-        inst.input_buffer = buf.slice(0, cur) + printable + buf.slice(cur)
-        inst.input_cursor = cur + printable.length
-      }
+
+    const next = editLineBuffer({ buffer: inst.input_buffer, cursor: inst.input_cursor }, data)
+    if (next.buffer !== inst.input_buffer || next.cursor !== inst.input_cursor) {
+      inst.input_buffer = next.buffer
+      inst.input_cursor = next.cursor
     }
   }, [])
 
@@ -322,172 +239,34 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       }
       const s = settingsRef.current
 
-      const term = new Terminal({
-        cursorBlink: true,
-        theme: getTerminalTheme(s),
-        fontFamily: s.fontFamily,
-        fontSize: s.fontSize,
-        // 中文（微软雅黑）字形顶部超出 Consolas 度量的单元格，lineHeight=1 时顶部被裁切，
-        // 给行高留出余量（1.2）确保 CJK 字形完整显示
-        lineHeight: 1.2,
-        // 保留足够滚动历史：clear/连接时不丢之前内容（只能滚动回看）
-        scrollback: 5000,
-      })
-      const fitAddon = new FitAddon()
-      term.loadAddon(fitAddon)
-
-      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const ws = new WebSocket(`${wsProto}//${location.host}/ws/ssh/${session_id}`)
-
-      term.onData((data) => {
-        // 逐字符更新命令历史缓冲（保持 ESC 序列完整）
-        handleTerminalInput(session_id, data)
-        sendInput(session_id, data)
-      })
-      setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
-
-      ws.onopen = () => {
-        // 不做 term.reset()：历史加载会显示主机登录 banner，reset 会把它清掉
-        term.focus()
-        console.log('[Terminal] ws.onopen, initial size:', term.cols, 'x', term.rows)
-        const doResize = () => {
-          const container = containersRef.current.get(session_id)
-          if (container) {
-            try { fitAddon.fit() } catch (e) { console.error('fit failed', e) }
-            console.log('[Terminal] after fit, size:', term.cols, 'x', term.rows)
-            // resyncTerminal 传 false：不清屏不重置（历史加载负责显示 banner/MOTD）
-            // 只启用自动换行 + 发送 resize，确保输入到行尾时光标正常换行
-            resyncTerminal(term, ws, false)
-          } else {
-            console.log('[Terminal] container not found, skip resize')
-          }
-        }
-        doResize()
-        // 延迟再次调用，确保容器已注册且 xterm.js 渲染完成
-        setTimeout(doResize, 50)
-        setTimeout(doResize, 200)
-        // 加载完整历史日志（含主机登录 banner/MOTD）：先确保 fit（宽高就绪）再写入，
-        // 避免历史内容按默认宽度折行导致显示错乱；不追加"加载完成"标记（无实际意义）
-        // limit 200000：完整回放同会话历史（同一终端 = 同一份记录）
-        // history_content：重连时由 App 预先读取旧会话历史传入（旧会话在读取后才关闭），
-        // 直接写入新终端，保证重连后之前的内容（banner/命令输出）仍然可看（用户要求：重连不清空）
-        if (history_content) {
-          // 立即写入旧历史（不等待 ensureFit）：新连接输出（banner）随后自然追加在
-          // 历史之后，顺序正确（历史在上、新输出在下）；xterm 后续 fit/resize 会自动
-          // reflow 折行，不会因当前 cols 未 fit 而 soft-wrap 碎片化
-          term.write(reflowForCols(history_content, term.cols))
-        } else {
-          api.getHistoryLogs(session_id, 999999, 200000).then(async (res) => {
-            if (res.content) {
-              await ensureFit(session_id, term, fitAddon, ws)
-              // 历史日志按 pty 当时宽度换行；窄窗口直接写入会 soft-wrap 碎片化，
-              // 写入前按当前 cols 重新折行（ANSI 0 宽度计）
-              term.write(reflowForCols(res.content, term.cols))
-            }
-          }).catch(() => {})
-        }
-      }
-
-      // 定期检测终端状态（用于 tab 显示 shell 类型）
-      // 已改为批量轮询（由外层 useEffect 统一处理，减少 HTTP 请求）
-      const state_timer = null
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data)
-          if (msg.type === 'output') {
-            // 洪水输出走供给器：一次一块 + 内存上限，防 xterm 解析不过来卡 UI
-            instance.feeder?.push(msg.data)
-            // 首批输出已到：清除“正在启动”提示
-            setTerminals((prev) => {
-              const cur = prev.get(session_id)
-              if (cur && cur.local_starting) {
-                const next = new Map(prev)
-                next.set(session_id, { ...cur, local_starting: false })
-                return next
-              }
-              return prev
-            })
-          }
-          else if (msg.type === 'ssh_connected') {
-            // 本地终端拦截 SSH 后切换为远端终端：更新标签信息。
-            // 同时保存连接信息（host/port/username/password）：此类会话没有已保存
-            // 主机（host_id 为空），重连按钮需用这份凭据重建会话，否则报"无主机信息"
-            setTerminals((prev) => {
-              const next = new Map(prev)
-              const inst = next.get(session_id)
-              if (inst) {
-                next.set(session_id, {
-                  ...inst,
-                  host_name: msg.terminal_name || `${msg.username}@${msg.host}`,
-                  terminal_name: msg.terminal_name || inst.terminal_name,
-                  type: 'ssh',
-                  shell_type: 'shell',
-                  host_id: '',
-                  ssh_conn: {
-                    host: msg.host,
-                    port: msg.port,
-                    username: msg.username,
-                    password: msg.password || '',
-                  },
-                })
-              }
-              return next
-            })
-          }
-          else if (msg.type === 'switched_to_local') {
-            // SSH 退出/断开后后端自动切换到本机终端：标记 ssh_exited，保留原 host_id 供重连
-            setTerminals((prev) => {
-              const next = new Map(prev)
-              const inst = next.get(session_id)
-              if (inst) {
-                next.set(session_id, {
-                  ...inst,
-                  ssh_exited: true,
-                  shell_type: 'local',
-                })
-              }
-              return next
-            })
-          }
-          else if (msg.type === 'error') term.write(`\r\n\x1b[31m[错误] ${msg.data}\x1b[0m\r\n`)
-          else if (msg.type === 'info') term.write(`\r\n\x1b[33m[${msg.data}]\x1b[0m\r\n`)
-          else if (msg.type === 'closed') {
-            // 本机终端 exit 等：后端已移除会话，写入提示后延迟关闭标签与连接
-            term.write(`\r\n\x1b[33m[${msg.data || '连接已关闭'}]\x1b[0m\r\n`)
-            setTimeout(() => { closeTerminal(session_id).catch(() => {}) }, 800)
-          }
-        } catch {
-          term.write(event.data)
-        }
-      }
-
-      // WebSocket 意外断开（网络中断/后端主动关闭）：标记断开，不自动重连
-      ws.onclose = () => markDisconnected(session_id, setTerminals)
-
-      const instance: TerminalInstance = {
+      // 统一工厂（P0-③）：xterm/WebSocket/消息路由/洪水供给器在此一次装配，
+      // createTerminal 与 restoreTerminals 共用同一套行为
+      const instance = createTerminalInstance({
         session_id,
         host_id: hostLike.id,
         host_name: hostLike.name || hostLike.host,
         terminal_name: tname,
         type: hostLike.type,
         shell_type: kind === 'local' ? 'local' : 'shell',
-        term,
-        fitAddon,
-        ws,
-        container: null,
-        state_timer,
-        input_buffer: '',
-        input_cursor: 0,
-        disconnected: false,
-        ssh_exited: false,
         local_starting: kind === 'local',
-        feeder: createOutputFeeder({
-          write: (data, cb) => term.write(data, cb),
-          maxPendingBytes: MAX_PENDING_BYTES,
-        }),
+        // history_content：重连时由 App 预先读取旧会话历史传入（旧会话在读取后才关闭），
+        // 直接写入新终端，保证重连后之前的内容（banner/命令输出）仍然可看（用户要求：重连不清空）
+        historyContent: history_content,
+        // limit 200000：完整回放同会话历史（同一终端 = 同一份记录）
+        historyLimit: 200000,
         ssh_conn: rawConn ? { ...rawConn } : null,
-      }
+        settings: s,
+        containersRef,
+        onData: (sid, data) => {
+          handleTerminalInput(sid, data)
+          sendInput(sid, data)
+        },
+        copyShortcut: () => shortcutHandlerRef.current?.(),
+        setTerminals,
+        requestClose: (sid) => closeTerminalRef.current!(sid),
+        resync: resyncTerminal,
+        ensureFit,
+      })
 
       setTerminals((prev) => {
         const next = new Map(prev)
@@ -511,147 +290,32 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       const s = settingsRef.current
       // 并行恢复所有终端（原 for...of 串行创建，3 个终端延迟累加）
       const toRestore = active.filter(t => !terminalsRef.current.has(t.session_id))
-      await Promise.all(toRestore.map(t => {
-        const term = new Terminal({
-          cursorBlink: true,
-          theme: getTerminalTheme(s),
-          fontFamily: s.fontFamily,
-          fontSize: s.fontSize,
-          lineHeight: 1.2,
-        })
-        const fitAddon = new FitAddon()
-        term.loadAddon(fitAddon)
-
-        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const ws = new WebSocket(`${wsProto}//${location.host}/ws/ssh/${t.session_id}`)
-
-        term.onData((data) => {
-          handleTerminalInput(t.session_id, data)
-          sendInput(t.session_id, data)
-        })
-        setupTerminalCopy(term, () => shortcutHandlerRef.current?.())
-
-        ws.onopen = () => {
-          term.focus()
-          console.log('[Terminal] restore ws.onopen, size:', term.cols, 'x', term.rows)
-          const doResize = () => {
-            const container = containersRef.current.get(t.session_id)
-            if (container) {
-              try { fitAddon.fit() } catch (e) { console.error('fit failed', e) }
-              console.log('[Terminal] restore after fit, size:', term.cols, 'x', term.rows)
-              // 恢复终端时 resyncTerminal 传 false：不清屏不重置，保留历史日志（含 banner）
-              resyncTerminal(term, ws, false)
-            }
-          }
-          doResize()
-          setTimeout(doResize, 50)
-          setTimeout(doResize, 200)
-          // 加载历史输出：先确保 fit 再写入（避免按默认宽度折行错乱），不追加"加载完成"标记
-          api.getHistoryLogs(t.session_id, 999999, 8000).then(async (res) => {
-            if (res.content) {
-              await ensureFit(t.session_id, term, fitAddon, ws)
-              term.write(reflowForCols(res.content, term.cols))
-            }
-          }).catch(() => {})
-        }
-
-        ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data)
-            if (msg.type === 'output') {
-              // 洪水输出走供给器（与 createTerminal 一致）
-              instance.feeder?.push(msg.data)
-              // 首批输出已到：清除“正在启动”提示
-              setTerminals((prev) => {
-                const cur = prev.get(t.session_id)
-                if (cur && cur.local_starting) {
-                  const next = new Map(prev)
-                  next.set(t.session_id, { ...cur, local_starting: false })
-                  return next
-                }
-                return prev
-              })
-            }
-            else if (msg.type === 'ssh_connected') {
-              // 本地终端拦截 SSH 后切换为远端终端：更新标签信息，并保存连接信息供重连
-              setTerminals((prev) => {
-                const next = new Map(prev)
-                const inst = next.get(t.session_id)
-                if (inst) {
-                  next.set(t.session_id, {
-                    ...inst,
-                    host_name: msg.terminal_name || `${msg.username}@${msg.host}`,
-                    terminal_name: msg.terminal_name || inst.terminal_name,
-                    type: 'ssh',
-                    shell_type: 'shell',
-                    host_id: '',
-                    ssh_conn: {
-                      host: msg.host,
-                      port: msg.port,
-                      username: msg.username,
-                      password: msg.password || '',
-                    },
-                  })
-                }
-                return next
-              })
-            }
-            else if (msg.type === 'switched_to_local') {
-              // SSH 退出/断开后后端自动切换到本机终端：标记 ssh_exited，保留原 host_id 供重连
-              setTerminals((prev) => {
-                const next = new Map(prev)
-                const inst = next.get(t.session_id)
-                if (inst) {
-                  next.set(t.session_id, {
-                    ...inst,
-                    ssh_exited: true,
-                    shell_type: 'local',
-                  })
-                }
-                return next
-              })
-            }
-            else if (msg.type === 'error') term.write(`\r\n\x1b[31m[错误] ${msg.data}\x1b[0m\r\n`)
-            else if (msg.type === 'info') term.write(`\r\n\x1b[33m[${msg.data}]\x1b[0m\r\n`)
-            else if (msg.type === 'closed') {
-              // 本机终端 exit 等：后端已移除会话，写入提示后延迟关闭标签与连接
-              term.write(`\r\n\x1b[33m[${msg.data || '连接已关闭'}]\x1b[0m\r\n`)
-              setTimeout(() => { closeTerminal(t.session_id).catch(() => {}) }, 800)
-            }
-          } catch {
-            term.write(event.data)
-          }
-        }
-
-        // 意外断开：标记断开，不自动重连
-        ws.onclose = () => markDisconnected(t.session_id, setTerminals)
-
-        // 终端状态检测已改为批量轮询（由外层 useEffect 统一处理）
-        const state_timer = null
-
-        const instance: TerminalInstance = {
+      await Promise.all(toRestore.map(async (t) => {
+        // 统一工厂（P0-③）：与 createTerminal 同一套装配（xterm/WS/消息路由/洪水供给器），
+        // restore 与新建行为一致；历史由 factory 在 ws.onopen 中按 historyLimit 回放
+        const instance = createTerminalInstance({
           session_id: t.session_id,
           host_id: t.host_id,
           host_name: t.host_name || t.host,
           terminal_name: t.terminal_name || '终端',
           type: t.host_type,
           shell_type: 'shell',
-          term,
-          fitAddon,
-          ws,
-          container: null,
-          state_timer,
-          input_buffer: '',
-          input_cursor: 0,
-          disconnected: false,
-          ssh_exited: false,
           local_starting: false,
-          feeder: createOutputFeeder({
-            write: (data, cb) => term.write(data, cb),
-            maxPendingBytes: MAX_PENDING_BYTES,
-          }),
+          // limit 200000：完整回放同会话历史（同一终端 = 同一份记录）
+          historyLimit: 200000,
           ssh_conn: t.ssh_conn ?? null,  // 拦截 SSH 会话：从活跃列表恢复重连凭据；已保存主机会话为 null
-        }
+          settings: s,
+          containersRef,
+          onData: (sid, data) => {
+            handleTerminalInput(sid, data)
+            sendInput(sid, data)
+          },
+          copyShortcut: () => shortcutHandlerRef.current?.(),
+          setTerminals,
+          requestClose: (sid) => closeTerminalRef.current!(sid),
+          resync: resyncTerminal,
+          ensureFit,
+        })
 
         setTerminals((prev) => {
           const next = new Map(prev)
@@ -753,6 +417,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       setActiveId(remaining.length > 0 ? remaining[0] : null)
     }
   }, [terminals, activeId])
+  closeTerminalRef.current = closeTerminal
 
   // 手动断开：关闭 WebSocket + 后端会话（后端删除后不会再被自动恢复），保留标签等待重连
   const disconnectTerminal = useCallback(async (session_id: string) => {
@@ -775,12 +440,12 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     const inst = terminals.get(activeId)
     if (inst && inst.ws && inst.ws.readyState === WebSocket.OPEN) {
       if (execute) {
-        inst.ws.send(JSON.stringify({ type: 'input', data: command + '\n' }))
+        sendClient(inst.ws, { type: 'input', data: command + '\n' })
         api.recordCommand(command).catch(() => {})
         inst.input_buffer = ''
       } else {
         // 只输入命令文本，不发送换行，用户可以编辑后手动执行
-        inst.ws.send(JSON.stringify({ type: 'input', data: command }))
+        sendClient(inst.ws, { type: 'input', data: command })
         inst.input_buffer = command
         inst.input_cursor = command.length
       }

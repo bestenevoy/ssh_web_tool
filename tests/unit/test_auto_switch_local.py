@@ -71,7 +71,7 @@ def test_auto_switch_uses_configured_shell_and_broadcasts(tmp_path, monkeypatch)
     assert started == [("powershell", s._last_cols, s._last_rows)]
     assert s._switching_local is False  # 完成后复位
     # 提示进入输出缓冲（终端可见）
-    assert any("已切换到本机 PowerShell" in chunk for chunk in s._output_buffer)
+    assert any("已切换到本机 PowerShell" in chunk for chunk in s._output_bus.raw_chunks())
     # 提示写入会话日志（同一会话一份记录）
     s._flush_log_now()
     assert "已切换到本机 PowerShell" in _read_log(s)

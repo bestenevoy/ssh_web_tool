@@ -1,35 +1,68 @@
 """
 外部 SSH 会话中心（跨进程观测）
 
-接收 ssh-monkeypatch（测试进程）通过 WebSocket 推送的 SSH 事件，
+接收 ssh-monkeypatch（测试进程）通过 /ws/stream 推送的 SSH 事件，
 按 session_id 区分各个 SSH 会话：
 - 维护会话元信息（主机/端口/用户/连接时间/最近活动/状态）
 - 环形缓冲历史事件（供新订阅者回放）
 - 实时转发给订阅该会话的浏览器 WebSocket（前端 Web 终端展示）
 
 与 sessions.py（本进程内交互式终端会话）完全独立。
+事件契约（connect/command/output/close）见 ssh_web_tool/ws_protocol.py 的 EXT_* 常量。
 """
 
 import time
 from collections import deque
+from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from fastapi import WebSocket
+
+from ssh_web_tool.ws_protocol import EXT_CLOSE, EXT_COMMAND, EXT_CONNECT, EXT_OUTPUT
 
 # 每会话历史事件上限
 MAX_HISTORY_PER_SESSION = 2000
 # 会话保留时长（秒）：close 后仍可回放一段时间
 SESSION_RETENTION = 3600
 
+# 单条外部事件（测试侧推送的 JSON，字段随事件类型而异）
+ExternalEvent = dict[str, Any]
+
+
+@dataclass
+class ExternalSessionMeta:
+    """外部 SSH 会话元信息（asdict 后即 /api/external-sessions 下发契约）"""
+
+    session_id: str
+    host: str = ""
+    port: int = 22
+    username: str = ""
+    kind: str = ""
+    connected_at: float = 0.0
+    last_active: float = 0.0
+    closed: bool = False
+    command_count: int = 0
+    output_bytes: int = 0
+
+
+@dataclass
+class ExternalSession:
+    """单条外部会话：元信息 + 历史事件环形缓冲 + 浏览器订阅者"""
+
+    meta: ExternalSessionMeta
+    history: deque[ExternalEvent] = field(default_factory=lambda: deque(maxlen=MAX_HISTORY_PER_SESSION))
+    subscribers: set[WebSocket] = field(default_factory=set)
+
 
 class ExternalSessionHub:
     """外部会话中心（单例）"""
 
     def __init__(self):
-        # session_id -> {"meta": dict, "history": deque, "subscribers": set[WebSocket], "last_active": float, "closed": bool}
-        self._sessions: dict[str, Any] = {}
+        self._sessions: dict[str, ExternalSession] = {}
 
     # ---------- 接收测试侧事件 ----------
 
-    async def handle_event(self, ev: dict) -> None:
+    async def handle_event(self, ev: dict[str, Any]) -> None:
         """处理 ssh-monkeypatch 推送的一条事件"""
         if not isinstance(ev, dict):
             return
@@ -37,124 +70,116 @@ class ExternalSessionHub:
         etype = ev.get("type")
         if not sid or not etype:
             return
-        sess: Any = self._sessions.get(sid)
+        sess = self._sessions.get(sid)
         if sess is None:
-            if etype != "connect":
+            if etype != EXT_CONNECT:
                 return  # 未登记会话的孤儿事件忽略
-            sess = {
-                "meta": {
-                    "session_id": sid,
-                    "host": ev.get("host", ""),
-                    "port": ev.get("port", 22),
-                    "username": ev.get("username", ""),
-                    "kind": ev.get("kind", ""),
-                    "connected_at": ev.get("ts", time.time()),
-                    "last_active": ev.get("ts", time.time()),
-                    "closed": False,
-                    "command_count": 0,
-                    "output_bytes": 0,
-                },
-                "history": deque(maxlen=MAX_HISTORY_PER_SESSION),
-                "subscribers": set(),
-                "closed": False,
-            }
+            ts = ev.get("ts", time.time())
+            sess = ExternalSession(
+                meta=ExternalSessionMeta(
+                    session_id=sid,
+                    host=ev.get("host", ""),
+                    port=ev.get("port", 22),
+                    username=ev.get("username", ""),
+                    kind=ev.get("kind", ""),
+                    connected_at=ts,
+                    last_active=ts,
+                )
+            )
             self._sessions[sid] = sess
 
-        meta: Any = sess["meta"]
+        meta = sess.meta
         now = time.time()
         # 更新元信息
-        if etype == "connect":
-            meta["host"] = ev.get("host", meta.get("host", ""))
-            meta["port"] = ev.get("port", meta.get("port", 22))
-            meta["username"] = ev.get("username", meta.get("username", ""))
-            meta["kind"] = ev.get("kind", meta.get("kind", ""))
-            meta["connected_at"] = ev.get("ts", meta.get("connected_at", now))
-            meta["closed"] = False
-        elif etype == "close":
-            meta["closed"] = True
-        elif etype == "command":
-            meta["command_count"] = meta.get("command_count", 0) + 1
-        elif etype == "output":
-            meta["output_bytes"] = meta.get("output_bytes", 0) + len(ev.get("data", ""))
-        meta["last_active"] = now
-        sess["last_active"] = now
+        if etype == EXT_CONNECT:
+            meta.host = ev.get("host", meta.host)
+            meta.port = ev.get("port", meta.port)
+            meta.username = ev.get("username", meta.username)
+            meta.kind = ev.get("kind", meta.kind)
+            meta.connected_at = ev.get("ts", meta.connected_at)
+            meta.closed = False
+        elif etype == EXT_CLOSE:
+            meta.closed = True
+        elif etype == EXT_COMMAND:
+            meta.command_count += 1
+        elif etype == EXT_OUTPUT:
+            meta.output_bytes += len(ev.get("data", ""))
+        meta.last_active = now
 
         # 历史缓冲
-        sess["history"].append(ev)
+        sess.history.append(ev)
 
         # 实时转发给订阅者
-        dead: set = set()
-        for ws in sess["subscribers"]:
+        dead: set[WebSocket] = set()
+        for ws in sess.subscribers:
             try:
                 await ws.send_json(ev)
             except Exception:
                 dead.add(ws)
         for ws in dead:
-            sess["subscribers"].discard(ws)
+            sess.subscribers.discard(ws)
 
         # 清理过期会话
         self._gc()
 
     # ---------- 浏览器订阅 ----------
 
-    async def subscribe(self, session_id: str, ws) -> bool:
+    async def subscribe(self, session_id: str, ws: WebSocket) -> bool:
         """浏览器订阅某会话：先回放历史，再实时转发。返回会话是否存在"""
-        sess: Any = self._sessions.get(session_id)
+        sess = self._sessions.get(session_id)
         if sess is None:
             return False
-        sess["subscribers"].add(ws)
+        sess.subscribers.add(ws)
         # 历史回放
-        for ev in sess["history"]:
+        for ev in sess.history:
             try:
                 await ws.send_json(ev)
             except Exception:
                 break
         return True
 
-    def unsubscribe(self, session_id: str, ws) -> None:
-        sess: Any = self._sessions.get(session_id)
+    def unsubscribe(self, session_id: str, ws: WebSocket) -> None:
+        sess = self._sessions.get(session_id)
         if sess:
-            sess["subscribers"].discard(ws)
+            sess.subscribers.discard(ws)
 
     # ---------- 查询 ----------
 
-    def list_sessions(self) -> list:
+    def list_sessions(self) -> list[dict[str, Any]]:
         """列出所有外部会话（按连接时间倒序）"""
         now = time.time()
-        result = []
-        for sid, sess in self._sessions.items():
-            meta = dict(sess["meta"])
-            meta["session_id"] = sid
-            meta["age"] = now - meta.get("connected_at", now)
-            meta["subscribers"] = len(sess["subscribers"])
+        result: list[dict[str, Any]] = []
+        for sess in self._sessions.values():
+            meta = asdict(sess.meta)
+            meta["age"] = now - meta["connected_at"]
+            meta["subscribers"] = len(sess.subscribers)
             result.append(meta)
         result.sort(key=lambda x: x.get("connected_at", 0), reverse=True)
         return result
 
-    def get_session(self, session_id: str) -> dict | None:
-        sess: Any = self._sessions.get(session_id)
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        sess = self._sessions.get(session_id)
         if sess is None:
             return None
-        meta = dict(sess["meta"])
-        meta["session_id"] = session_id
-        meta["subscribers"] = len(sess["subscribers"])
+        meta = asdict(sess.meta)
+        meta["subscribers"] = len(sess.subscribers)
         return meta
 
-    def get_history(self, session_id: str, limit: int = 500) -> list:
-        sess: Any = self._sessions.get(session_id)
+    def get_history(self, session_id: str, limit: int = 500) -> list[ExternalEvent]:
+        sess = self._sessions.get(session_id)
         if sess is None:
             return []
-        return list(sess["history"])[-limit:]
+        return list(sess.history)[-limit:]
 
     # ---------- 内部 ----------
 
-    def _gc(self):
+    def _gc(self) -> None:
         """清理超过保留期的已关闭会话"""
         now = time.time()
         stale = [
             sid
             for sid, sess in self._sessions.items()
-            if sess["meta"].get("closed") and (now - sess["last_active"]) > SESSION_RETENTION
+            if sess.meta.closed and (now - sess.meta.last_active) > SESSION_RETENTION
         ]
         for sid in stale:
             del self._sessions[sid]

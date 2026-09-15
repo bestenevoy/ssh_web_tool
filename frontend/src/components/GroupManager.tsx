@@ -37,6 +37,17 @@ export function GroupManager({ open, groups, onClose, onAdd, onRename, onDelete,
     return () => window.removeEventListener('keydown', handler)
   }, [open, editingGroup, onClose])
 
+  // ---- 拖拽排序 ----
+  // 注意：hook 必须放在下方 if (!open) return null 之前——early return 之后调用 hook
+  // 会导致 open 翻转时 hook 数量变化，触发 React "Rendered more hooks" 崩溃
+  const moveGroup = useCallback((from: number, to: number) => {
+    if (from === to) return
+    const next = [...groups]
+    const [item] = next.splice(from, 1)
+    next.splice(to, 0, item)
+    onReorder(next)
+  }, [groups, onReorder])
+
   if (!open) return null
 
   const handleAdd = () => {
@@ -58,15 +69,6 @@ export function GroupManager({ open, groups, onClose, onAdd, onRename, onDelete,
     setEditingGroup(null)
     setEditValue('')
   }
-
-  // ---- 拖拽排序 ----
-  const moveGroup = useCallback((from: number, to: number) => {
-    if (from === to) return
-    const next = [...groups]
-    const [item] = next.splice(from, 1)
-    next.splice(to, 0, item)
-    onReorder(next)
-  }, [groups, onReorder])
 
   const handleDragStart = (idx: number) => {
     setDragIndex(idx)

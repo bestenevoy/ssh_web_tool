@@ -6,6 +6,7 @@ _channel（真实属性是 _chan），导致断线会话被误判存活：
 - 监控永不切换本机 → 输入永远报"SSH 通道已关闭，正在自动切换/重连"
 - 服务器恢复后也无法恢复使用
 """
+
 from types import SimpleNamespace
 
 from ssh_web_tool.sessions import SSHSession
@@ -40,10 +41,10 @@ class _FakeConn:
 
 def _attach_live_ssh(s: SSHSession):
     """构造一个"活着"的 SSH 会话状态"""
-    s.conn = _FakeConn(_FakeTransport(closing=False))
+    s.conn = _FakeConn(_FakeTransport(closing=False))  # type: ignore[assignment]
     s._connected = True
     s._has_shell = True
-    s.process = SimpleNamespace(_chan=_FakeChan(closing=False))
+    s.process = SimpleNamespace(_chan=_FakeChan(closing=False))  # type: ignore[assignment]
 
 
 # ---------- is_alive ----------
@@ -52,16 +53,16 @@ def _attach_live_ssh(s: SSHSession):
 def test_is_alive_false_when_transport_none():
     """连接断开（_transport 置 None）必须判死——旧代码此场景误判存活"""
     s = _mk_session()
-    s.conn = _FakeConn(None)  # asyncssh 断线后的真实状态：_transport=None
+    s.conn = _FakeConn(None)  # asyncssh 断线后的真实状态：_transport=None  # type: ignore[assignment]
     s._connected = True
     s._has_shell = True
-    s.process = SimpleNamespace(_chan=_FakeChan(closing=True))
+    s.process = SimpleNamespace(_chan=_FakeChan(closing=True))  # type: ignore[assignment]
     assert s.is_alive() is False
 
 
 def test_is_alive_false_when_transport_closing():
     s = _mk_session()
-    s.conn = _FakeConn(_FakeTransport(closing=True))
+    s.conn = _FakeConn(_FakeTransport(closing=True))  # type: ignore[assignment]
     s._connected = True
     assert s.is_alive() is False
 
@@ -69,10 +70,10 @@ def test_is_alive_false_when_transport_closing():
 def test_is_alive_false_when_channel_closing():
     """传输层看似存活但 channel 已关（远端 shell 被杀）也要判死"""
     s = _mk_session()
-    s.conn = _FakeConn(_FakeTransport(closing=False))
+    s.conn = _FakeConn(_FakeTransport(closing=False))  # type: ignore[assignment]
     s._connected = True
     s._has_shell = True
-    s.process = SimpleNamespace(_chan=_FakeChan(closing=True))
+    s.process = SimpleNamespace(_chan=_FakeChan(closing=True))  # type: ignore[assignment]
     assert s.is_alive() is False
 
 
@@ -91,7 +92,7 @@ def test_is_alive_false_when_conn_missing():
 
 def test_is_alive_false_when_disconnected_flag():
     s = _mk_session()
-    s.conn = _FakeConn(_FakeTransport(closing=False))
+    s.conn = _FakeConn(_FakeTransport(closing=False))  # type: ignore[assignment]
     s._connected = False
     assert s.is_alive() is False
 
@@ -103,21 +104,21 @@ def test_is_shell_alive_false_when_chan_none():
     """断线后通道对象不存在：shell 必须判死"""
     s = _mk_session()
     s._has_shell = True
-    s.process = SimpleNamespace(_chan=None)
+    s.process = SimpleNamespace(_chan=None)  # type: ignore[assignment]
     assert s.is_shell_alive() is False
 
 
 def test_is_shell_alive_false_when_chan_closing():
     s = _mk_session()
     s._has_shell = True
-    s.process = SimpleNamespace(_chan=_FakeChan(closing=True))
+    s.process = SimpleNamespace(_chan=_FakeChan(closing=True))  # type: ignore[assignment]
     assert s.is_shell_alive() is False
 
 
 def test_is_shell_alive_true_when_healthy():
     s = _mk_session()
     s._has_shell = True
-    s.process = SimpleNamespace(_chan=_FakeChan(closing=False))
+    s.process = SimpleNamespace(_chan=_FakeChan(closing=False))  # type: ignore[assignment]
     assert s.is_shell_alive() is True
 
 
@@ -131,5 +132,5 @@ def test_is_shell_alive_false_when_no_process():
 def test_is_shell_alive_false_when_no_shell_flag():
     s = _mk_session()
     s._has_shell = False
-    s.process = SimpleNamespace(_chan=_FakeChan(closing=False))
+    s.process = SimpleNamespace(_chan=_FakeChan(closing=False))  # type: ignore[assignment]
     assert s.is_shell_alive() is False
