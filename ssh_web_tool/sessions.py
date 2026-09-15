@@ -21,6 +21,7 @@ from fastapi import WebSocket
 from . import prompt_detect
 from .echo_parser import EchoParser
 from .output_bus import OutputBus
+from .ps_history import PSReadlineTailer, TailerLike
 from .session_log import (
     SessionLog,
     build_log_file,
@@ -231,6 +232,9 @@ class SSHSession:
         self._asyncssh_conn: Any = None
         self._local_shell = ""
         self._local_reader_task: asyncio.Task | None = None
+        # PSReadLine 真实命令采集（Tab 补全/预测后的最终文本）与拦截命令补写；
+        # cmd 无历史文件机制，不启用（见 ps_history.py 模块说明）
+        self._ps_tailer: TailerLike | None = None
         # 本地终端输入行缓冲：xterm 前端逐字符发送输入（回车是单独一条 "\r" 消息），
         # 服务端把可打印字符累积成整行，回车时交由 SSH 命令拦截解析（feed_local_input）
         self._local_input_line = ""
@@ -468,6 +472,26 @@ class SSHSession:
             "username": self.username,
             "password": self._password,
         }
+
+    def note_local_command(self, typed: str) -> None:
+        """本地 shell 回车成行（未被 SSH 拦截）时调用：交给 PSReadLine 采集器
+
+        采集器延迟增量读取 ConsoleHost_history.txt，把"Tab 补全/预测后的最终
+        命令"补记进应用历史（前端行缓冲只有键入文本，见 ps_history.py）。
+        cmd 会话无采集器，为空操作。
+        """
+        if self._ps_tailer is not None:
+            self._ps_tailer.note_command(typed)
+
+    def record_intercepted_ssh_command(self, line: str) -> None:
+        """本地终端输入的 ssh 命令被拦截时调用：补写进 shell 自身历史
+
+        拦截时回车未送达本地 shell，shell 没执行过这条命令，其自身历史
+        （PSReadLine ↑ 召回）不会有。补写进历史文件后，新开的 shell 会话可
+        召回。cmd 无历史文件机制，为空操作。
+        """
+        if self._ps_tailer is not None:
+            self._ps_tailer.append_command(line)
 
     def begin_ssh_switch(
         self, websocket: WebSocket, ssh_host: str, ssh_port: int, ssh_user: str, ssh_pass: str
@@ -723,6 +747,8 @@ class SSHSession:
         proc = _DirectPtyWrapper(pty_obj)
         self._local_proc = proc
         self._local_shell = shell
+        # PowerShell 会话启用 PSReadLine 采集器（cmd 无历史文件，跳过）
+        self._ps_tailer = PSReadlineTailer(self._record_echo) if shell in ("powershell", "pwsh") else None
         self._last_cols = cols
         self._last_rows = rows
         self._connected = True

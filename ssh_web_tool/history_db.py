@@ -141,10 +141,21 @@ async def record_command(command: str) -> None:
     if not cmd or len(cmd) > 500:
         return
     conn = await get_db()
+    now = time.time()
+    # 回显已记录本条的超串（Tab 补全/历史翻查后的最终版）：本条是补全前残留，
+    # 跳过。前端 HTTP 记录与回显解析存在竞争，晚到时不能覆盖权威版
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM command_history WHERE last_used > ? "
+        "AND length(command) > length(?) AND substr(command, 1, length(?)) = ?",
+        (now - 3, cmd, cmd, cmd),
+    )
+    row = await cur.fetchone()
+    if row and row[0] > 0:
+        return
     await conn.execute(
         "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
         "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
-        (cmd, time.time()),
+        (cmd, now),
     )
     await conn.commit()
 

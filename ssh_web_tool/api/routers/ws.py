@@ -195,11 +195,16 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             await session.broadcast_output(
                                 f"\r\n\x1b[36m[正在连接 {ssh_user}@{ssh_host}:{ssh_port} ...]\x1b[0m\r\n"
                             )
+                            # 拦截时回车未送达本地 shell，shell 自身历史不会有这条
+                            # 命令：补写进 PSReadLine 历史文件（cmd 无历史文件，空操作）
+                            session.record_intercepted_ssh_command(line)
                             # 后台任务执行连接：不阻塞 WebSocket 消息循环。此前同步等待时
                             # 连接最长卡 30s，期间界面无响应、无法 Ctrl+C 取消，观感"卡死"。
                             # 现在连接期间可随时 Ctrl+C 取消、继续输入/操作其他界面。
                             session.begin_ssh_switch(websocket, ssh_host, ssh_port, ssh_user, ssh_pass)
                             return  # 回车已消费（连接结果由后台任务推送），不写入本地 shell
+                        # 正常命令：交 PSReadLine 采集器补记 Tab 补全/预测后的最终命令
+                        session.note_local_command(line)
                     # Ctrl+C：取消正在进行的 SSH 连接（"正在连接..."时按 Ctrl+C 中止）
                     if data == "\x03" and session.cancel_ssh_switch():
                         return

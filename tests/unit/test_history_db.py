@@ -16,6 +16,28 @@ async def test_record_and_search(fake_history_db):
 
 
 @pytest.mark.asyncio
+async def test_record_command_skips_when_echo_superstring_recent(fake_history_db):
+    """回显已记录更完整的命令（3 秒内）：前端补全前残留晚到时不再入库"""
+    db = fake_history_db
+    await db.record_echo_command("cd /var/log")  # 回显权威版（Tab 补全后）
+    await db.record_command("cd /var")  # 前端键入版（HTTP 晚于回显到达）
+
+    found = await db.search_commands(keyword="cd /var")
+    assert [f["command"] for f in found] == ["cd /var/log"]
+
+
+@pytest.mark.asyncio
+async def test_record_command_unrelated_not_blocked_by_recent(fake_history_db):
+    """超串保护只拦"本条是近 3 秒某记录的严格前缀"，无关命令正常入库"""
+    db = fake_history_db
+    await db.record_echo_command("cd /var/log")
+    await db.record_command("ls -la")
+
+    found = await db.search_commands(keyword="ls -la")
+    assert len(found) == 1
+
+
+@pytest.mark.asyncio
 async def test_recent_ordering(fake_history_db):
     db = fake_history_db
     await db.record_command("cmd-1")

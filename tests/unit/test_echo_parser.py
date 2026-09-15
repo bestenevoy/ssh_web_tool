@@ -71,6 +71,57 @@ def test_blank_line():
     assert extract("   ") == ""
 
 
+# ---------- 提示符独立成行（自研/简易 shell，如 mini>） ----------
+
+
+def test_prompt_own_line_command_next_line():
+    """mini shell：提示符独立成行，命令回显在下一行（分块到达）"""
+    p = EchoParser()
+    assert p.feed("mini> \n") == []
+    assert p.feed("CMD") == []
+    assert p.feed("2\n") == ["CMD2"]  # Tab 补全增量拼在命令行内，最终命令被捕获
+
+
+def test_prompt_own_line_output_after_cmd_not_misrecorded():
+    """mini shell：命令记录后，命令的输出行不再误记为命令"""
+    p = EchoParser()
+    p.feed("mini> \n")
+    assert p.feed("whoami\n") == ["whoami"]
+    assert p.feed("root\n") == []
+
+
+def test_prompt_own_line_empty_enter_then_cmd():
+    """空回车（提示符独立成行）后输入正常命令：只记录一次"""
+    p = EchoParser()
+    assert p.feed("root@host:~#\n") == []
+    assert p.feed("root@host:~# ls\n") == ["ls"]
+
+
+def test_python_continuation_not_prompt_own_line():
+    """python 续行提示符不触发"下一行命令"捕获（其后是多行输出）"""
+    p = EchoParser()
+    assert p.feed(">>> for i in range(2):\n") == ["for i in range(2):"]
+    p.feed("...     print(i)\n")
+    assert p.feed("...\n") == []  # ... 不触发"下一行命令"捕获
+    assert p.feed("0\n") == []  # 多行输出不被误记为命令
+
+
+# ---------- 退格擦除重放（↑ 召回/退格编辑） ----------
+
+
+def test_backspace_erase_replay():
+    """readline ↑ 召回/退格编辑输出 \\b \\b 擦除序列：重放后得到最终命令"""
+    p = EchoParser()
+    # 先敲 l，↑ 召回 cd /var（前缀不同，readline 先擦 l 再输出新内容）
+    assert p.feed("root@host:~# l\b \bcd /var\n") == ["cd /var"]
+
+
+def test_bell_char_cleaned():
+    """多候选补全失败的 bell 残留（行尾 \\x07）：清洗后记录干净命令"""
+    p = EchoParser()
+    assert p.feed("root@host:~# ls /e\x07\n") == ["ls /e"]
+
+
 # ---------- 行内 \r 覆盖（Tab 补全重写整行） ----------
 
 

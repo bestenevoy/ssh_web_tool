@@ -32,17 +32,27 @@ _OSC_KEEP_CR_RE = re.compile(r"\x1b\][\s\S]*?(\x07|\x1b\\)")
 
 
 class EchoParser:
-    """回显解析状态机（每个会话一个实例）"""
+    """回显解析状态机（每个会话一个实例）
+
+    支持两类回显形态：
+    - 标准 readline shell（bash/zsh）：提示符与命令同行，Tab 补全增量直接拼在行内
+    - 简易/自研 shell（如 mini>）：提示符独立成行，命令回显在下一行
+      （is_prompt_only + _await_cmd 状态机捕获，否则这类 shell 完全无法从
+      回显记录命令，只剩前端键入版——Tab 补全场景会记录补全前文本）
+    """
 
     # 异常情况下行缓冲上限，超过直接丢弃防止无限增长
     BUFFER_LIMIT = 4000
     # 同命令去重窗口（秒）
     DEDUP_WINDOW = 3.0
+    # 提示符独立成行时的行长度上限（超过视为普通输出行，防误记）
+    PROMPT_LINE_MAX = 120
 
     def __init__(self) -> None:
         self.buffer = ""  # 输出行缓冲（可能被数据块截断，留到下一块补齐）
         self.last_cmd = ""  # 最近一次解析记录的命令（去重防重复记录）
         self.last_time = 0.0  # 最近一次记录时间
+        self._await_cmd = False  # 提示符独立成行后，等待下一非空行作为命令回显
 
     @classmethod
     def clean_ansi_keep_cr(cls, text: str) -> str:
@@ -51,6 +61,42 @@ class EchoParser:
         text = _OSC_KEEP_CR_RE.sub("", text)
         text = re.sub(r"\x1b[=><]", "", text)
         return text
+
+    @staticmethod
+    def _strip_control_chars(s: str) -> str:
+        """清除残留控制字符（bell \x07、\b 之外的不可见字符）"""
+        return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
+
+    @staticmethod
+    def _apply_backspaces(line: str) -> str:
+        """回放行内退格擦除（readline 退格编辑/↑ 召回时输出 \b \b 或 \b）
+
+        逐字符重放：\b 弹出一个字符，\b \b（退格-空格-退格）自然等效于擦除。
+        """
+        if "\x08" not in line:
+            return line
+        out: list[str] = []
+        for ch in line:
+            if ch == "\x08":
+                if out:
+                    out.pop()
+            else:
+                out.append(ch)
+        return "".join(out)
+
+    @classmethod
+    def is_prompt_only(cls, line: str) -> bool:
+        """该行是否为"只有提示符"的行（命令回显在下一行，如 mini> 自研 shell）"""
+        s = line.strip()
+        if not s or len(s) > cls.PROMPT_LINE_MAX:
+            return False
+        # python 续行提示符不是新命令的起点（其后无独立命令回显行）
+        if s.startswith("..."):
+            return False
+        if _ECHO_PROMPT_RE.fullmatch(s):
+            return True
+        # 宽松兜底与 extract_echo_command 保持一致（[user@host ~]$ 等）
+        return bool(re.fullmatch(r"[\[\]~\w@.\- :/\\]*?[#$]\s*", s))
 
     @classmethod
     def extract_echo_command(cls, line: str) -> str:
@@ -62,6 +108,8 @@ class EchoParser:
           宽松匹配失败 = 普通输出行，不记录
         """
         s = line.strip()
+        # 清除残留控制字符（bell \x07 等，readline 补全失败/响铃会混进行尾）
+        s = cls._strip_control_chars(s).strip()
         if not s:
             return ""
         # python 续行提示符(...)：是上一命令的延续内容，不作为独立命令记录
@@ -111,16 +159,31 @@ class EchoParser:
                 if "\r" in line:
                     # 行内多次 \r 覆盖（Tab 补全会重写整行）：只保留最后一次覆盖后的内容
                     line = line.rsplit("\r", 1)[-1]
+                line = self._apply_backspaces(line)
                 cmd = self.extract_echo_command(line)
-                if not cmd:
+                if cmd:
+                    self._await_cmd = False
+                    self._dedup_append(cmds, cmd)
                     continue
-                now = time.time()
-                # 去重：与 3 秒内刚记录过的相同命令（防止与前端/CLI 注入重复记录）
-                if cmd == self.last_cmd and now - self.last_time < self.DEDUP_WINDOW:
-                    continue
-                self.last_cmd = cmd
-                self.last_time = now
-                cmds.append(cmd)
+                # 无命令的行：提示符独立成行（mini> 等自研 shell）时，下一个非空行
+                # 是该提示符的命令回显（否则这类 shell 完全无法从回显记录命令）
+                if self.is_prompt_only(line):
+                    self._await_cmd = True
+                elif self._await_cmd and line.strip():
+                    self._await_cmd = False
+                    candidate = self._strip_control_chars(line).strip()
+                    if candidate and len(candidate) <= 500:
+                        self._dedup_append(cmds, candidate)
+                # 其余（空行/普通输出行）忽略
         except Exception:
             pass
         return cmds
+
+    def _dedup_append(self, cmds: list[str], cmd: str) -> None:
+        """去重后收集：与 3 秒内刚记录过的相同命令（防止与前端/CLI 注入重复记录）"""
+        now = time.time()
+        if cmd == self.last_cmd and now - self.last_time < self.DEDUP_WINDOW:
+            return
+        self.last_cmd = cmd
+        self.last_time = now
+        cmds.append(cmd)
