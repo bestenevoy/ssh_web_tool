@@ -1,7 +1,7 @@
 """pytest 公共配置：测试隔离 + 共享 fixtures
 
 隔离原则：
-- storage.data_file 在 import main 之前指向临时目录，避免污染 ~/.ai4one/wstool/data.json
+- storage.data_file 在 import main 之前指向临时目录，避免污染 ~/.ai4one/sshtool/data.json
 - history_db.get_db_path 由各测试 monkeypatch 到临时目录
 - API 测试通过替换 main.session_manager 为 FakeSessionManager，不发起真实 SSH
 """

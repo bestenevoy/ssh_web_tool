@@ -221,7 +221,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
                       value={op.source || ''}
                       onChange={(e) => updatePreOp(idx, { source: e.target.value })}
                       className="qc-preop-input"
-                      title="填文件名，在 ~/.ai4one/wstool/scripts/ 下查找；或从下拉选择"
+                      title="填文件名，在 ~/.ai4one/sshtool/scripts/ 下查找；或从下拉选择"
                     />
                   ) : (
                     <input
@@ -300,7 +300,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
             + 添加预操作
           </button>
           <div style={{ fontSize: 10, color: '#5a6a8a', marginTop: 4 }}>
-            上传文件：源文件填「本机绝对路径」由 Server 直接读取，或选「scripts 文件」在 ~/.ai4one/wstool/scripts/ 下查找（可下拉选择），通过 SFTP 上传后再执行命令
+            上传文件：源文件填「本机绝对路径」由 Server 直接读取，或选「scripts 文件」在 ~/.ai4one/sshtool/scripts/ 下查找（可下拉选择），通过 SFTP 上传后再执行命令
           </div>
         </div>
 

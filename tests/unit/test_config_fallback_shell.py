@@ -14,7 +14,7 @@ from ssh_web_tool import config as cfg_mod
 
 @pytest.fixture
 def tmp_app_dir(monkeypatch, tmp_path):
-    """把配置目录隔离到临时目录，避免污染 ~/.ai4one/wstool/config.json"""
+    """把配置目录隔离到临时目录，避免污染 ~/.ai4one/sshtool/config.json"""
     monkeypatch.setattr(cfg_mod, "get_app_dir", lambda: tmp_path)
     return tmp_path
 
@@ -98,24 +98,24 @@ def test_example_json_has_debug(tmp_app_dir):
     assert data["debug"] is False
 
 
-# ============ v0.1.48: find_config_file 查找顺序（EXE 目录 → cwd → 项目根 → 数据目录） ============
+# ============ v0.1.49: 配置文件只认统一数据目录一处（修复"改 A 读 B 不生效"） ============
 
 
 def test_find_config_file_returns_none_when_absent(tmp_app_dir):
-    "四处都没有配置文件 → None（隔离目录）"
+    "数据目录没有配置文件 → None（其他位置一律不查找）"
     assert cfg_mod.find_config_file() is None
 
 
 def test_find_config_file_data_dir_fallback(tmp_app_dir):
-    "只有数据目录有配置文件 → 返回数据目录"
+    "数据目录有配置文件 → 返回数据目录"
     (tmp_app_dir / "config.json").write_text('{"fallback_local_shell": "cmd"}', encoding="utf-8")
     found = cfg_mod.find_config_file()
     assert found is not None
     assert found.parent == tmp_app_dir
 
 
-def test_exe_side_config_wins_over_data_dir(tmp_app_dir, monkeypatch, tmp_path):
-    "EXE 旁边有配置时优先于数据目录（文档声明的顺序）"
+def test_exe_side_config_ignored_single_location(tmp_app_dir, monkeypatch, tmp_path):
+    "EXE 旁的 config.json 不再被读取（旧版会优先它，导致改数据目录配置不生效）"
     exe_dir = tmp_path / "exe"
     exe_dir.mkdir()
     (exe_dir / "config.json").write_text('{"fallback_local_shell": "powershell"}', encoding="utf-8")
@@ -123,21 +123,22 @@ def test_exe_side_config_wins_over_data_dir(tmp_app_dir, monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(exe_dir / "fake_app.exe"), raising=False)
     found = cfg_mod.find_config_file()
-    assert found == exe_dir / "config.json"
-    assert cfg_mod.load_config()["fallback_local_shell"] == "powershell"
+    assert found == tmp_app_dir / "config.json"
+    assert cfg_mod.load_config()["fallback_local_shell"] == "cmd"
 
 
-def test_cwd_config_found(tmp_app_dir, monkeypatch, tmp_path):
-    "当前工作目录有配置 → 可被找到"
-    (tmp_path / "config.json").write_text('{"debug": true}', encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    found = cfg_mod.find_config_file()
-    assert found == tmp_path / "config.json"
-    assert cfg_mod.load_config()["debug"] is True
+def test_cwd_config_ignored(tmp_app_dir, monkeypatch, tmp_path):
+    "当前工作目录的 config.json 不再被读取（cwd 与数据目录不同处）"
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    (cwd_dir / "config.json").write_text('{"debug": true}', encoding="utf-8")
+    monkeypatch.chdir(cwd_dir)
+    assert cfg_mod.find_config_file() is None
+    assert cfg_mod.load_config()["debug"] is False
 
 
-def test_save_config_writes_to_active_exe_side(tmp_app_dir, monkeypatch, tmp_path):
-    "save_config 写入当前生效的配置文件（EXE 旁），而不是数据目录"
+def test_save_config_always_writes_data_dir(tmp_app_dir, monkeypatch, tmp_path):
+    "save_config 始终写数据目录（与读取同一处），即使 EXE 旁存在旧配置文件"
     exe_dir = tmp_path / "exe"
     exe_dir.mkdir()
     (exe_dir / "config.json").write_text('{"fallback_local_shell": "cmd"}', encoding="utf-8")
@@ -146,7 +147,42 @@ def test_save_config_writes_to_active_exe_side(tmp_app_dir, monkeypatch, tmp_pat
     cfg = cfg_mod.load_config()
     cfg["fallback_local_shell"] = "powershell"
     assert cfg_mod.save_config(cfg) is True
-    assert (exe_dir / "config.json").is_file()
-    # 数据目录不应被新建（生效文件在 EXE 旁）
-    assert not (tmp_app_dir / "config.json").exists()
+    # 写入的是数据目录，EXE 旁文件不被触碰
+    assert (tmp_app_dir / "config.json").is_file()
     assert cfg_mod.load_config()["fallback_local_shell"] == "powershell"
+    assert json.loads((exe_dir / "config.json").read_text(encoding="utf-8"))["fallback_local_shell"] == "cmd"
+
+
+# ============ v0.1.49: 旧数据目录 ~/.ai4one/wstool 一次性迁移 ============
+
+
+def test_migrate_from_old_wstool_dir(tmp_app_dir, monkeypatch, tmp_path):
+    "旧目录 wstool 的 config/data/history.db/logs 迁移到新目录，且不覆盖已有文件"
+    old_dir = tmp_path / ".ai4one" / "wstool"
+    old_dir.mkdir(parents=True)
+    (old_dir / "config.json").write_text('{"fallback_local_shell": "pwsh"}', encoding="utf-8")
+    (old_dir / "data.json").write_text('{"hosts": []}', encoding="utf-8")
+    (old_dir / "history.db").write_bytes(b"sqlite")
+    (old_dir / "logs").mkdir()
+    (old_dir / "logs" / "server.log").write_text("log", encoding="utf-8")
+    # 让 migrate_legacy_data 里的 Path.home() 指向临时目录（get_app_dir 已由 fixture 隔离）
+    monkeypatch.setattr(cfg_mod.Path, "home", lambda: tmp_path)
+
+    cfg_mod.migrate_legacy_data()
+
+    assert (tmp_app_dir / "config.json").is_file()
+    assert (tmp_app_dir / "data.json").is_file()
+    assert (tmp_app_dir / "history.db").read_bytes() == b"sqlite"
+    assert (tmp_app_dir / "logs" / "server.log").is_file()
+
+    # 新目录已有文件时不覆盖
+    cfg_mod.save_config({"fallback_local_shell": "cmd"})
+    cfg_mod.migrate_legacy_data()
+    assert json.loads((tmp_app_dir / "config.json").read_text(encoding="utf-8"))["fallback_local_shell"] == "cmd"
+
+
+def test_migrate_noop_when_old_dir_absent(tmp_app_dir, monkeypatch, tmp_path):
+    "旧目录不存在时迁移为空操作"
+    monkeypatch.setattr(cfg_mod.Path, "home", lambda: tmp_path)
+    cfg_mod.migrate_legacy_data()
+    assert not (tmp_app_dir / "config.json").exists()

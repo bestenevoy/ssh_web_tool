@@ -79,7 +79,7 @@ def get_resource_path(relative_path: str) -> Path:
 
 
 def get_data_path(relative_path: str) -> Path:
-    """获取数据文件路径（统一存放在 ~/.ai4one/wstool，不随打包丢失）"""
+    """获取数据文件路径（统一存放在 ~/.ai4one/sshtool，不随打包丢失）"""
     return get_app_dir() / relative_path
 
 
@@ -196,7 +196,7 @@ def main():
 
     import uvicorn
 
-    # 统一数据目录：~/.ai4one/wstool；首次运行迁移旧位置（EXE 目录/项目根）的数据
+    # 统一数据目录：~/.ai4one/sshtool；首次运行一次性迁移旧位置（旧目录 ~/.ai4one/wstool、EXE 目录、项目根）的数据
     ensure_data_dir()
     migrate_legacy_data()
 
@@ -417,7 +417,16 @@ def main():
     # debug 由配置文件决定：config.json 中设置 "debug": true 即开启（打包版也可用 F12 开发者工具），
     # false / 缺省则关闭，减少内存与 CPU 占用
     is_debug = bool(cfg.get("debug", False))
-    webview.start(debug=is_debug)
+    # private_mode=False 关闭 InPrivate 模式：否则 WebView2 每次启动都清空 localStorage，
+    # 前端的字体/主题等设置（存于 localStorage）重启后全部重置。
+    # storage_path 把 WebView2 用户数据目录收敛到应用数据目录下，便于集中管理
+    webview_profile = get_app_dir() / "webview"
+    webview_profile.mkdir(parents=True, exist_ok=True)
+    webview.start(
+        debug=is_debug,
+        private_mode=False,
+        storage_path=str(webview_profile),
+    )
 
 
 if __name__ == "__main__":

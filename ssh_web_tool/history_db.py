@@ -1,7 +1,7 @@
 """
 历史命令存储模块（SQLite + aiosqlite 异步）
 
-- 数据库文件：~/.ai4one/wstool/history.db（随统一数据目录）
+- 数据库文件：~/.ai4one/sshtool/history.db（随统一数据目录）
 - 表 command_history：command(唯一) / count(使用次数) / last_used / ignored(忽略标记)
 - 提供记录、搜索、最近、忽略/恢复、JSON 迁移能力
 

@@ -3,13 +3,11 @@
 
 支持通过 config.json 自定义服务配置（监听地址、端口、端口占用自动切换等）。
 
-配置文件查找顺序（高优先级在前）：
-    1. EXE 所在目录（PyInstaller 打包后，方便用户放在 EXE 旁边修改）
-    2. 当前工作目录
-    3. 项目根目录 / 脚本目录
+配置文件唯一位置：~/.ai4one/sshtool/config.json（读写同一处，保证"改哪生效哪"）。
 
-若找不到 config.json，程序会在上述目录生成一份默认配置（优先复制
-config.example.json 模板），用户修改后重启即可生效。
+历史教训：旧实现按 EXE 目录 → cwd → 项目根 → 数据目录多处查找，
+多处存在 config.json 时"改 A 读 B"，表现为修改配置后重启不生效；
+现只认统一数据目录一处。
 
 端口占用处理：
     - server.auto_find_free_port = true（默认）：指定端口被占用时，
@@ -27,18 +25,37 @@ from pathlib import Path
 CONFIG_FILE_NAME = "config.json"
 EXAMPLE_FILE_NAME = "config.example.json"
 
-# 统一数据目录：~/.ai4one/wstool（配置文件、数据、日志全部存放于此）
+# 统一数据目录：~/.ai4one/sshtool（配置文件、数据、日志全部存放于此）
 DATA_DIR_NAME = ".ai4one"
-DATA_DIR_SUB = "wstool"
+DATA_DIR_SUB = "sshtool"
+# 旧数据目录名（目录改名前的位置），首次运行时一次性迁移到新目录
+OLD_DATA_DIR_SUB = "wstool"
 
 
 def get_app_dir() -> Path:
-    """获取数据/配置目录：~/.ai4one/wstool
+    """获取数据/配置目录：~/.ai4one/sshtool
 
-    配置文件（config.json）、数据（data.json）、日志（logs/）、
-    运行时端口（.running_port）统一存放在用户家目录，方便集中管理。
+    配置文件（config.json）、数据（data.json）、历史库（history.db）、
+    日志（logs/）、脚本（scripts/）、运行时端口（.running_port）
+    统一存放在用户家目录，方便集中管理。
+
+    首次调用时触发一次性旧数据迁移（惰性）：保证任何入口
+    （python main.py / uvicorn 直启 / 打包 EXE）都是"先迁移后读写"，
+    避免 storage 先读到空数据、history_db 先建空库挡住迁移。
     """
-    return Path.home() / DATA_DIR_NAME / DATA_DIR_SUB
+    global _MIGRATION_DONE
+    d = Path.home() / DATA_DIR_NAME / DATA_DIR_SUB
+    if not _MIGRATION_DONE:
+        _MIGRATION_DONE = True
+        if "pytest" not in sys.modules:  # 测试进程绝不触碰真实数据目录
+            try:
+                _do_migrate_legacy(d)
+            except Exception as e:  # 迁移失败不阻塞启动
+                print(f"[config] 旧数据迁移失败: {e}")
+    return d
+
+
+_MIGRATION_DONE = False
 
 
 def ensure_data_dir() -> Path:
@@ -57,18 +74,24 @@ def get_example_path() -> Path | None:
     return p if p.is_file() else None
 
 
-def migrate_legacy_data() -> None:
-    """首次运行：把旧位置（EXE 目录 / 项目根目录）的配置与数据迁移到新目录
+def _do_migrate_legacy(d: Path) -> None:
+    """执行迁移：把旧位置的数据一次性复制到目标数据目录（仅复制缺失文件，不覆盖）
 
-    仅当新目录中不存在同名文件时复制，不覆盖已有数据。
+    迁移来源（按优先级）：
+    1. 旧数据目录 ~/.ai4one/wstool（目录改名 wstool -> sshtool 的一次性迁移）
+    2. EXE 所在目录 / 项目根目录（更早期的散落位置，打包用户的配置可能在 EXE 旁）
+
+    注意：迁移只是复制，配置的读取永远只来自统一数据目录一处。
     """
-    d = get_app_dir()
-    roots = []
+    d.mkdir(parents=True, exist_ok=True)  # 惰性迁移可能先于 ensure_data_dir 执行
+    roots: list[Path] = [Path.home() / DATA_DIR_NAME / OLD_DATA_DIR_SUB]
     if getattr(sys, "frozen", False):
         roots.append(Path(sys.executable).parent)
     roots.append(Path(__file__).resolve().parent.parent)
     for root in roots:
-        for name in (CONFIG_FILE_NAME, "data.json"):
+        if not root.is_dir() or root.resolve() == d.resolve():
+            continue
+        for name in (CONFIG_FILE_NAME, "data.json", "history.db"):
             src = root / name
             if src.is_file() and not (d / name).exists():
                 try:
@@ -76,14 +99,20 @@ def migrate_legacy_data() -> None:
                     print(f"[config] 已迁移 {src.name} -> {d}")
                 except OSError as e:
                     print(f"[config] 迁移 {src} 失败: {e}")
-        src_logs = root / "logs"
-        dst_logs = d / "logs"
-        if src_logs.is_dir() and not dst_logs.exists():
-            try:
-                shutil.copytree(src_logs, dst_logs)
-                print(f"[config] 已迁移日志目录 -> {dst_logs}")
-            except OSError as e:
-                print(f"[config] 迁移日志目录失败: {e}")
+        for sub in ("logs", "scripts"):
+            src_dir = root / sub
+            dst_dir = d / sub
+            if src_dir.is_dir() and not dst_dir.exists():
+                try:
+                    shutil.copytree(src_dir, dst_dir)
+                    print(f"[config] 已迁移 {sub} 目录 -> {dst_dir}")
+                except OSError as e:
+                    print(f"[config] 迁移 {src_dir} 失败: {e}")
+
+
+def migrate_legacy_data() -> None:
+    """显式迁移入口（main.py 启动时调用；幂等，惰性迁移的兜底）"""
+    _do_migrate_legacy(get_app_dir())
 
 
 # 默认配置（无配置文件时的兜底值）
@@ -115,12 +144,13 @@ def get_fallback_local_shell(cfg: dict | None = None) -> str:
 
 
 def save_config(cfg: dict) -> bool:
-    """把配置写回当前生效的配置文件（find_config_file 定位到的那个，保证"改哪读哪"）
+    """把配置写回统一数据目录 ~/.ai4one/sshtool/config.json（与读取同一处）
 
-    未找到任何现有配置文件时写入统一数据目录 ~/.ai4one/wstool/config.json。
+    历史问题：旧实现写到 find_config_file 定位到的文件（可能在 EXE 目录/项目根），
+    与用户实际编辑的位置不一致，表现为"修改配置后重启不生效"。
     """
     try:
-        path = find_config_file() or (get_app_dir() / CONFIG_FILE_NAME)
+        path = get_app_dir() / CONFIG_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
@@ -130,26 +160,13 @@ def save_config(cfg: dict) -> bool:
 
 
 def find_config_file() -> Path | None:
-    """查找配置文件（高优先级在前，与模块文档声明的顺序一致）：
+    """查找配置文件：只认统一数据目录 ~/.ai4one/sshtool/config.json 一处
 
-    1. EXE 所在目录（PyInstaller 打包后，方便用户放在 EXE 旁边修改）
-    2. 当前工作目录
-    3. 项目根目录 / 脚本目录
-    4. 统一数据目录 ~/.ai4one/wstool（应用自身保存/迁移的目标位置，兜底）
-
-    旧实现只读数据目录，用户按文档放在 EXE 旁边的 config.json 会被忽略，
-    表现为"修改配置后重启仍是原来的设置"。
+    旧实现按 EXE 目录 → cwd → 项目根 → 数据目录顺序查找，
+    多处存在 config.json 时"改 A 读 B"，表现为修改配置后重启不生效。
     """
-    candidates: list[Path] = []
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).parent / CONFIG_FILE_NAME)
-    candidates.append(Path.cwd() / CONFIG_FILE_NAME)
-    candidates.append(Path(__file__).resolve().parent.parent / CONFIG_FILE_NAME)
-    candidates.append(get_app_dir() / CONFIG_FILE_NAME)
-    for p in candidates:
-        if p.is_file():
-            return p
-    return None
+    p = get_app_dir() / CONFIG_FILE_NAME
+    return p if p.is_file() else None
 
 
 def ensure_config_file() -> Path:

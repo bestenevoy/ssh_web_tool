@@ -11,7 +11,7 @@ import uuid
 
 
 def get_data_dir() -> str:
-    """获取数据文件目录（统一在 ~/.ai4one/wstool）"""
+    """获取数据文件目录（统一在 ~/.ai4one/sshtool）"""
     from .config import get_app_dir
 
     return str(get_app_dir())

@@ -132,7 +132,7 @@ async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = 
 async def api_preop_upload(req: PreopUploadRequest):
     """预操作上传：后端直读本地源文件（浏览器拿不到本地路径，由同机 Server 读取）
     - source_type=path：source 为本机绝对路径（如 D:/scripts/deploy.sh）
-    - source_type=script：source 为 ~/.ai4one/wstool/scripts/ 下的文件名"""
+    - source_type=script：source 为 ~/.ai4one/sshtool/scripts/ 下的文件名"""
     # get_app_dir 走 deps 动态读取：test_preop_api 通过替换 main.get_app_dir 注入临时目录
     get_app_dir_fn_ = get_app_dir_fn()
     session = _get_connected_session(req.session_id)
@@ -162,7 +162,7 @@ async def api_preop_upload(req: PreopUploadRequest):
 
 @router.get("/scripts")
 async def api_list_scripts():
-    """列出 ~/.ai4one/wstool/scripts/ 下的脚本文件（预操作上传下拉选择）"""
+    """列出 ~/.ai4one/sshtool/scripts/ 下的脚本文件（预操作上传下拉选择）"""
     scripts_dir = get_app_dir_fn()() / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts = sorted(p.name for p in scripts_dir.iterdir() if p.is_file())

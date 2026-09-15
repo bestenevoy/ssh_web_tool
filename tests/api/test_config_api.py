@@ -1,6 +1,6 @@
 """/api/config 与 /api/config/fallback-shell 接口测试
 
-save_config 被 monkeypatch，避免测试写入真实 ~/.ai4one/wstool/config.json。
+save_config 被 monkeypatch，避免测试写入真实 ~/.ai4one/sshtool/config.json。
 （save_config 由路由从 ssh_web_tool.config 模块级绑定，须 patch 该模块）
 """
 

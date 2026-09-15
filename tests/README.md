@@ -38,7 +38,7 @@ python -m pytest tests -v --e2e
 
 1. **隔离优先**：conftest 在 import main 之前把 storage.data_file 指到临时目录；
    history_db 用 `fake_history_db` fixture 指到 tmp_path。**测试永远不会碰真实
-   ~/.ai4one/wstool 下的 data.json / history.db / 日志**。
+   ~/.ai4one/sshtool 下的 data.json / history.db / 日志**。
 2. **分层标记**：`e2e` 标记默认 skip，只有显式 `--e2e` 才运行，避免误连远端。
 3. **网络全 mock**：API 层用 `fake_sessions` fixture 替换 `main.session_manager`，
    新会话用内存 FakeSession 实现，不发真实 SSH。
