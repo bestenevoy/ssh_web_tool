@@ -9,6 +9,8 @@ export interface UiSettingsPayload {
   block_bar: boolean
   block_auto_fold: boolean
   block_max_lines: number
+  block_split_mode: 'enter' | 'prompt'
+  custom_prompt_patterns: string[]
 }
 
 const BASE = ''

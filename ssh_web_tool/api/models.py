@@ -127,6 +127,8 @@ class UiSettingsRequest(BaseModel):
     block_bar: bool | None = None
     block_auto_fold: bool | None = None
     block_max_lines: int | None = None
+    block_split_mode: str | None = None
+    custom_prompt_patterns: list[str] | None = None
 
 
 class RecordCommandRequest(BaseModel):

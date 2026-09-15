@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type { TerminalSettings } from '../lib/useSettings'
 import { FONT_OPTIONS } from '../lib/useSettings'
+import { MAX_PROMPT_PATTERN_COUNT, MAX_PROMPT_PATTERN_LENGTH } from '../lib/promptPatterns'
 
 interface Props {
   settings: TerminalSettings
@@ -40,6 +41,9 @@ export function clearFrontendCache(): number {
 export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices, onSetFallbackShell, configFile, onClose }: Props) {
   const [cacheMsg, setCacheMsg] = useState('')
   const doneBtnRef = useRef<HTMLButtonElement>(null)
+  // 自定义提示符正则：本地草稿 + 失焦/关闭时提交（逐键提交会频繁 POST 并重建 tracker）
+  const [patternDraft, setPatternDraft] = useState(settings.customPromptPatterns.join('\n'))
+  const [patternError, setPatternError] = useState<string | null>(null)
 
   // 打开后聚焦「完成」按钮：Esc 从弹窗内元素冒泡到 window 才能触发关闭
   // （否则焦点留在 xterm textarea，Esc 被终端截获）
@@ -49,11 +53,36 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') handleClose()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
+    // 依赖草稿/设置：保证 handler 闭包里的 handleClose 拿到最新正则草稿
+  }, [onClose, patternDraft, settings.customPromptPatterns])
+
+  /** 提交自定义正则草稿：校验合法才落盘，非法红字提示保持草稿 */
+  function commitPatterns() {
+    const items = patternDraft.split('\n').map((s) => s.trim()).filter(Boolean)
+    if (items.length > MAX_PROMPT_PATTERN_COUNT) return setPatternError(`最多 ${MAX_PROMPT_PATTERN_COUNT} 条`)
+    if (items.some((s) => s.length > MAX_PROMPT_PATTERN_LENGTH)) {
+      return setPatternError(`单条最长 ${MAX_PROMPT_PATTERN_LENGTH} 字符`)
+    }
+    try {
+      items.forEach((s) => new RegExp(`^(?:${s})`))
+    } catch {
+      return setPatternError('存在无法编译的正则表达式，请检查语法')
+    }
+    setPatternError(null)
+    if (items.join('\n') !== settings.customPromptPatterns.join('\n')) {
+      onUpdate({ customPromptPatterns: items })
+    }
+  }
+
+  /** 关闭前先提交正则草稿（Esc / 点遮罩 / 完成按钮统一走这里） */
+  function handleClose() {
+    commitPatterns()
+    onClose()
+  }
 
   const handleClearCache = () => {
     const n = clearFrontendCache()
@@ -61,7 +90,7 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
   }
 
   return (
-    <div className="modal-overlay show" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+    <div className="modal-overlay show" onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}>
       <div className="modal settings-modal">
         <h3>⚙️ 设置</h3>
 
@@ -113,6 +142,18 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
         <div className="settings-modal-section">
           <div className="settings-modal-title">命令块</div>
           <div className="settings-modal-row">
+            <label title="按提示符：识别到新 shell 提示符即开新块（更贴近真实命令边界）；按回车：每次回车开新块（确定性最高）">
+              切块方式
+            </label>
+            <select
+              value={settings.blockSplitMode}
+              onChange={(e) => onUpdate({ blockSplitMode: e.target.value as TerminalSettings['blockSplitMode'] })}
+            >
+              <option value="prompt">按提示符</option>
+              <option value="enter">按回车</option>
+            </select>
+          </div>
+          <div className="settings-modal-row">
             <label title="命令左侧显示色条标记：单击色条折叠/展开输出，双击复制块内容">块标记</label>
             <input
               type="checkbox" checked={settings.blockBar}
@@ -137,6 +178,25 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
               ))}
             </select>
           </div>
+          {/* 自定义提示符正则：prompt 模式下优先于内置正则；草稿失焦/关闭时提交 */}
+          <div className="settings-modal-row-column">
+            <label title="每行一条 JS 正则，无需写 ^（自动锚定行首）。内置正则不识别你的提示符形态时在此添加">
+              自定义提示符正则（每行一条）
+            </label>
+            <textarea
+              className="settings-pattern-input"
+              value={patternDraft}
+              placeholder={'每行一条，例如：\nmini> \ndb \\d+ =>\n留空则只用内置正则'}
+              onChange={(e) => setPatternDraft(e.target.value)}
+              onBlur={commitPatterns}
+              spellCheck={false}
+            />
+            {patternError ? (
+              <div className="settings-pattern-error">{patternError}（未保存）</div>
+            ) : (
+              <div className="settings-modal-hint">修改后从下一个提示符开始生效，已有块会被重置</div>
+            )}
+          </div>
         </div>
 
         {/* 缓存清理：localStorage 只存临时内容（布局宽度等），可一键清空 */}
@@ -150,7 +210,7 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-          <button ref={doneBtnRef} className="btn btn-primary" onClick={onClose}>完成</button>
+          <button ref={doneBtnRef} className="btn btn-primary" onClick={handleClose}>完成</button>
         </div>
       </div>
     </div>

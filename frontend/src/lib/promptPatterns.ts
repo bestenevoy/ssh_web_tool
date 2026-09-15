@@ -33,10 +33,41 @@ const PROMPT_PATTERNS: ReadonlyArray<RegExp> = [
   /^[#$%>](?=\s|$)/,
 ]
 
-export function detectPrompt(text: string): PromptMatch | null {
+export function detectPrompt(text: string, extra?: ReadonlyArray<RegExp>): PromptMatch | null {
+  // 自定义正则优先于内置（用户明确声明的提示符形态最可信）
+  if (extra) {
+    for (const pattern of extra) {
+      const match = pattern.exec(text)
+      if (match) return { end: match[0].length }
+    }
+  }
   for (const pattern of PROMPT_PATTERNS) {
     const match = pattern.exec(text)
     if (match) return { end: match[0].length }
   }
   return null
+}
+
+// 单条自定义正则的最大长度与总条数上限（防超宽正则拖慢检测/误判面扩大）
+export const MAX_PROMPT_PATTERN_LENGTH = 200
+export const MAX_PROMPT_PATTERN_COUNT = 20
+
+/**
+ * 编译用户自定义提示符正则（一行一条的字符串列表 → RegExp[]）。
+ * 自动包裹 `^(?:...)` 锚定行首（与内置正则同规则，防输出内容误判）；
+ * 空/超长/语法非法的条目静默丢弃，调用方无需处理异常。
+ */
+export function compilePromptPatterns(list: ReadonlyArray<string>): RegExp[] {
+  const out: RegExp[] = []
+  for (const body of list) {
+    if (typeof body !== 'string') continue
+    const trimmed = body.trim()
+    if (!trimmed || trimmed.length > MAX_PROMPT_PATTERN_LENGTH) continue
+    try {
+      out.push(new RegExp(`^(?:${trimmed})`))
+    } catch {
+      // 非法正则丢弃（UI 层已提前校验提示，此处兜底）
+    }
+  }
+  return out
 }

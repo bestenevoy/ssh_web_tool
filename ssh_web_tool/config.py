@@ -123,10 +123,15 @@ UI_SETTINGS_DEFAULTS: dict = {
     "block_bar": True,  # 命令块左侧色条标记
     "block_auto_fold": False,  # 命令输出超长时自动折叠（默认关）
     "block_max_lines": 30,  # 自动折叠保留的输出行数
+    "block_split_mode": "prompt",  # 命令块切块方式：按提示符出现 / 按 Enter
+    "custom_prompt_patterns": [],  # 自定义提示符正则（prompt 模式下优先于内置匹配）
 }
 
 # ui_settings 各键的合法值校验器（返回规范化后的值；非法返回 None 表示回退默认）
 _BLOCK_MAX_LINES_CHOICES = (15, 30, 50, 100, 200)
+# 自定义提示符正则上限：单条长度 / 总条数（与前端 promptPatterns.ts 常量保持一致）
+_MAX_PATTERN_LENGTH = 200
+_MAX_PATTERN_COUNT = 20
 
 
 def _validate_ui_setting(key: str, value) -> object | None:
@@ -141,6 +146,16 @@ def _validate_ui_setting(key: str, value) -> object | None:
         return value if isinstance(value, bool) else None
     if key == "block_max_lines":
         return value if value in _BLOCK_MAX_LINES_CHOICES else None
+    if key == "block_split_mode":
+        return value if value in ("enter", "prompt") else None
+    if key == "custom_prompt_patterns":
+        # 列表逐项过滤（剔除而非整键回退）：保留用户合法条目，兜住脏数据
+        if not isinstance(value, list):
+            return None
+        cleaned = [
+            v.strip() for v in value if isinstance(v, str) and v.strip() and len(v.strip()) <= _MAX_PATTERN_LENGTH
+        ]
+        return cleaned[:_MAX_PATTERN_COUNT]
     return None  # 未知键一律忽略
 
 

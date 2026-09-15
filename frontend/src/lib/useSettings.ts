@@ -11,6 +11,10 @@ export interface TerminalSettings {
   blockBar: boolean
   blockAutoFold: boolean
   blockMaxLines: number
+  // 命令块切块方式：按提示符出现（默认）/ 按 Enter 键
+  blockSplitMode: 'enter' | 'prompt'
+  // 自定义提示符正则（一行一条存储；prompt 模式下优先于内置正则）
+  customPromptPatterns: string[]
 }
 
 export const DEFAULT_SETTINGS: TerminalSettings = {
@@ -20,6 +24,8 @@ export const DEFAULT_SETTINGS: TerminalSettings = {
   blockBar: true,
   blockAutoFold: false, // 折叠默认关闭（可在设置弹窗开启）
   blockMaxLines: 30,
+  blockSplitMode: 'prompt',
+  customPromptPatterns: [],
 }
 
 // 可选字体列表
@@ -47,6 +53,8 @@ export function toUiSettingsPayload(partial: Partial<TerminalSettings>): Partial
   if (partial.blockBar !== undefined) out.block_bar = partial.blockBar
   if (partial.blockAutoFold !== undefined) out.block_auto_fold = partial.blockAutoFold
   if (partial.blockMaxLines !== undefined) out.block_max_lines = partial.blockMaxLines
+  if (partial.blockSplitMode !== undefined) out.block_split_mode = partial.blockSplitMode
+  if (partial.customPromptPatterns !== undefined) out.custom_prompt_patterns = partial.customPromptPatterns
   return out
 }
 
@@ -66,6 +74,15 @@ export function applyUiSettings(
   if (typeof payload.block_auto_fold === 'boolean') next.blockAutoFold = payload.block_auto_fold
   if (typeof payload.block_max_lines === 'number' && Number.isFinite(payload.block_max_lines)) {
     next.blockMaxLines = payload.block_max_lines
+  }
+  if (payload.block_split_mode === 'enter' || payload.block_split_mode === 'prompt') {
+    next.blockSplitMode = payload.block_split_mode
+  }
+  if (Array.isArray(payload.custom_prompt_patterns)) {
+    // 逐项过滤：只保留非空字符串（编译层还会做长度/语法兜底）
+    next.customPromptPatterns = payload.custom_prompt_patterns.filter(
+      (p): p is string => typeof p === 'string' && p.trim().length > 0
+    )
   }
   return next
 }

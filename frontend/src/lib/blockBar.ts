@@ -20,6 +20,7 @@ import type { Terminal } from '@xterm/xterm'
 import type { TerminalSettings } from './useSettings'
 import { createCommandBlockTracker } from './commandBlocks'
 import type { CommandBlock, CommandBlockTracker } from './commandBlocks'
+import { compilePromptPatterns } from './promptPatterns'
 
 export interface BlockBarController {
   /** 运行时设置变更（顶栏开关/行数）实时生效。 */
@@ -49,7 +50,12 @@ export function attachBlockBar(
   let autoFoldOn = settings.blockAutoFold
   let maxLines = Math.max(1, settings.blockMaxLines)
 
-  const tracker: CommandBlockTracker = createCommandBlockTracker(term, 'enter')
+  // tracker：切块方式/自定义正则变化时热重建（旧块随之作废重置）
+  const trackerSigOf = (s: TerminalSettings) => `${s.blockSplitMode}|${s.customPromptPatterns.join('\n')}`
+  let tracker: CommandBlockTracker = createCommandBlockTracker(term, settings.blockSplitMode, {
+    extraPromptPatterns: compilePromptPatterns(settings.customPromptPatterns),
+  })
+  let trackerSig = trackerSigOf(settings)
 
   // 折叠状态（按 blockId）：
   //   manualUnfolded：用户手动展开过的自动折叠块——不再自动折叠（尊重用户）
@@ -57,6 +63,29 @@ export function attachBlockBar(
   const folds = new Map<number, FoldEntry>()
   const manualUnfolded = new Set<number>()
   const manualFolded = new Set<number>()
+
+  // tracker 的 onChange 订阅独立管理（重建时旧的单独 dispose，不进共享 disposables）
+  // 声明在 scheduleRedraw 之后（初始化需要它）
+  let trackerChangeSub: { dispose(): void } | null = null
+
+  /** 切块方式/自定义正则变化时重建 tracker：旧块作废，折叠记录一并清空。 */
+  function rebuildTrackerIfNeeded(s: TerminalSettings) {
+    const sig = trackerSigOf(s)
+    if (sig === trackerSig) return
+    trackerSig = sig
+    tracker.dispose()
+    tracker = createCommandBlockTracker(term, s.blockSplitMode, {
+      extraPromptPatterns: compilePromptPatterns(s.customPromptPatterns),
+    })
+    trackerChangeSub?.dispose()
+    trackerChangeSub = tracker.onChange(scheduleRedraw)
+    // blockId 从 1 重新计数，旧折叠记录的 key 全部失效，必须清空
+    folds.clear()
+    manualUnfolded.clear()
+    manualFolded.clear()
+    lastSig = '' // 新 tracker 无块，sig 可能与旧值相同，强制重绘
+    scheduleRedraw()
+  }
 
   // ---- DOM ----
   const overlay = document.createElement('div')
@@ -79,6 +108,7 @@ export function attachBlockBar(
       })
     }
   }
+  trackerChangeSub = tracker.onChange(scheduleRedraw) // 初始订阅（重建时由 rebuildTrackerIfNeeded 更换）
 
   // ---- 折叠逻辑 ----
 
@@ -248,7 +278,7 @@ export function attachBlockBar(
 
   // ---- 事件订阅 ----
   const disposables: { dispose(): void }[] = [
-    tracker.onChange(scheduleRedraw),
+    // tracker.onChange 不在这里订阅：由 trackerChangeSub 独立管理（支持重建时更换）
     term.onScroll(scheduleRedraw),
     term.onWriteParsed(scheduleRedraw),
     // 尺寸变化（字体/拖拽/fit）：reflow 会漂移行号，先全部展开再重绘
@@ -265,6 +295,8 @@ export function attachBlockBar(
       enabled = s.blockBar
       autoFoldOn = s.blockAutoFold
       maxLines = Math.max(1, s.blockMaxLines)
+      // 切块方式/自定义正则变化：先重建 tracker（内部已清空全部折叠记录）
+      rebuildTrackerIfNeeded(s)
       // 阈值/开关变化：清掉旧自动折叠——重绘时按新阈值重评（manualUnfolded 保留，
       // 用户手动展开过的块仍不自动折叠）；关闭自动折叠后旧折叠保持解除
       for (const [id, f] of Array.from(folds)) {
@@ -279,6 +311,7 @@ export function attachBlockBar(
       overlay.removeEventListener('click', onClick)
       overlay.removeEventListener('dblclick', onDblClick)
       disposables.forEach((d) => d.dispose())
+      trackerChangeSub?.dispose()
       tracker.dispose()
       overlay.remove()
     },

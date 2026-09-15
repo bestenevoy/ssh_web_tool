@@ -119,3 +119,55 @@ def test_update_ui_settings_empty_body_400(monkeypatch):
     c = TestClient(main.app)
     r = c.post("/api/config/ui-settings", json={})
     assert r.status_code == 400
+
+
+def test_update_ui_settings_block_keys_roundtrip(monkeypatch):
+    """切块方式 + 自定义正则：合法值保存并回读一致"""
+    saved = {}
+
+    def fake_save(cfg):
+        saved.update(cfg)
+        return True
+
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", fake_save)
+    c = TestClient(main.app)
+    r = c.post(
+        "/api/config/ui-settings",
+        json={"block_split_mode": "enter", "custom_prompt_patterns": ["mini>", "db \\d+ =>"]},
+    )
+    assert r.status_code == 200
+    ui = r.json()["ui_settings"]
+    assert ui["block_split_mode"] == "enter"
+    assert ui["custom_prompt_patterns"] == ["mini>", "db \\d+ =>"]
+    assert saved["ui_settings"]["block_split_mode"] == "enter"
+
+
+def test_update_ui_settings_rejects_invalid_split_mode(monkeypatch):
+    """切块方式非法值返回 400 且不落盘"""
+
+    def fake_save(cfg):
+        raise AssertionError("非法值不应触发保存")
+
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", fake_save)
+    c = TestClient(main.app)
+    r = c.post("/api/config/ui-settings", json={"block_split_mode": "auto"})
+    assert r.status_code == 400
+
+
+def test_update_ui_settings_filters_patterns_not_reject(monkeypatch):
+    """自定义正则：超长条目被过滤后保存合法项（过滤语义而非 400）"""
+    saved = {}
+
+    def fake_save(cfg):
+        saved.update(cfg)
+        return True
+
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", fake_save)
+    c = TestClient(main.app)
+    long_item = "a" * 201
+    r = c.post("/api/config/ui-settings", json={"custom_prompt_patterns": ["ok>", long_item]})
+    assert r.status_code == 200
+    assert r.json()["ui_settings"]["custom_prompt_patterns"] == ["ok>"]
+    # 非字符串条目被 Pydantic 拒绝（422）
+    r = c.post("/api/config/ui-settings", json={"custom_prompt_patterns": ["ok>", 42]})
+    assert r.status_code == 422

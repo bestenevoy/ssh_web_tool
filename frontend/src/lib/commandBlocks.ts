@@ -56,9 +56,15 @@ function logicalLineAtCursor(term: Terminal): { text: string; startLine: number;
   return { text, startLine: startAbs, startOffset: startAbs - cursorAbs }
 }
 
+export interface CommandBlockTrackerOptions {
+  /** 用户自定义提示符正则（已编译，prompt 模式下优先于内置正则匹配）。 */
+  extraPromptPatterns?: ReadonlyArray<RegExp>
+}
+
 export function createCommandBlockTracker(
   term: Terminal,
   splitMode: CommandBlockSplitMode = 'enter',
+  opts?: CommandBlockTrackerOptions,
 ): CommandBlockTracker {
   const blocks: CommandBlock[] = []
   const listeners = new Set<() => void>()
@@ -160,7 +166,7 @@ export function createCommandBlockTracker(
         const line = logicalLineAtCursor(term)
         if (!line) return
         if (submittedLine && !submittedLine.isDisposed && submittedLine.line === line.startLine) return
-        const prompt = detectPrompt(line.text)
+        const prompt = detectPrompt(line.text, opts?.extraPromptPatterns)
         if (!prompt || line.text.slice(prompt.end).trim().length > 0) return
         splitAt(line.startOffset)
         waitingForPrompt = false

@@ -26,6 +26,8 @@ describe('toUiSettingsPayload', () => {
       blockBar: false,
       blockAutoFold: true,
       blockMaxLines: 50,
+      blockSplitMode: 'prompt',
+      customPromptPatterns: ['mini>', 'db \\d+ =>'],
     })
     expect(out).toEqual({
       theme: 'light',
@@ -34,7 +36,14 @@ describe('toUiSettingsPayload', () => {
       block_bar: false,
       block_auto_fold: true,
       block_max_lines: 50,
+      block_split_mode: 'prompt',
+      custom_prompt_patterns: ['mini>', 'db \\d+ =>'],
     })
+  })
+
+  it('命令块两新键（切块方式/自定义正则）部分更新', () => {
+    expect(toUiSettingsPayload({ blockSplitMode: 'enter' })).toEqual({ block_split_mode: 'enter' })
+    expect(toUiSettingsPayload({ customPromptPatterns: ['x>'] })).toEqual({ custom_prompt_patterns: ['x>'] })
   })
 })
 
@@ -51,6 +60,8 @@ describe('applyUiSettings', () => {
       blockBar: false,
       blockAutoFold: true,
       blockMaxLines: 100,
+      blockSplitMode: 'prompt',
+      customPromptPatterns: [],
     })
   })
 
@@ -83,5 +94,29 @@ describe('applyUiSettings', () => {
   it('font_size 超界钳制到 8-32', () => {
     expect(applyUiSettings({ font_size: 99 }, DEFAULT_SETTINGS).fontSize).toBe(32)
     expect(applyUiSettings({ font_size: 2 }, DEFAULT_SETTINGS).fontSize).toBe(8)
+  })
+
+  it('block_split_mode 合法值生效、非法值保留 base', () => {
+    const base = { ...DEFAULT_SETTINGS, blockSplitMode: 'enter' as const }
+    expect(applyUiSettings({ block_split_mode: 'prompt' }, base).blockSplitMode).toBe('prompt')
+    expect(applyUiSettings({ block_split_mode: 'auto' as unknown as 'enter' | 'prompt' }, base).blockSplitMode).toBe('enter')
+  })
+
+  it('custom_prompt_patterns 数组逐项过滤，非数组保留 base', () => {
+    const out = applyUiSettings(
+      { custom_prompt_patterns: ['mini>', '   ', 42 as unknown as string, 'db \\d+ =>'] },
+      DEFAULT_SETTINGS
+    )
+    expect(out.customPromptPatterns).toEqual(['mini>', 'db \\d+ =>'])
+    const base = { ...DEFAULT_SETTINGS, customPromptPatterns: ['keep>'] }
+    expect(applyUiSettings({ custom_prompt_patterns: 'mini>' as unknown as string[] }, base).customPromptPatterns).toEqual([
+      'keep>',
+    ])
+  })
+
+  it('旧配置无新键时保留 DEFAULT（blockSplitMode=prompt / patterns=[]）', () => {
+    const out = applyUiSettings({ theme: 'dark' }, DEFAULT_SETTINGS)
+    expect(out.blockSplitMode).toBe('prompt')
+    expect(out.customPromptPatterns).toEqual([])
   })
 })

@@ -13,6 +13,8 @@
     "font_size": 13,
     "block_bar": true,
     "block_auto_fold": false,
-    "block_max_lines": 30
+    "block_max_lines": 30,
+    "block_split_mode": "prompt",
+    "custom_prompt_patterns": []
   }
 }
