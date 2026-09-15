@@ -72,12 +72,16 @@ class FakeSessionManager:
     def get_session(self, session_id):
         return self.sessions.get(session_id)
 
-    def create_session(self, session_id, host, port, username, **kwargs):
+    def create_session(self, host, port, username, host_id="", terminal_name="", **kwargs):
+        """签名对齐真实 SessionManager.create_session（host/port/username 起始，自动生成 session_id）"""
+        import uuid
+
         from ssh_web_tool.sessions import SSHSession
 
-        s = SSHSession(session_id, host, port, username, **kwargs)
+        session_id = str(uuid.uuid4())[:8]
+        s = SSHSession(session_id, host, port, username, host_id, terminal_name)
         self.sessions[session_id] = s
-        return s
+        return session_id
 
     async def remove_session(self, session_id):
         return self.sessions.pop(session_id, None) is not None

@@ -13,7 +13,7 @@
  *   2) navigator.clipboard.writeText（secure context：http(s)://127.0.0.1/localhost）
  *   3) 隐藏 textarea + document.execCommand('copy') 兜底（旧 WebView / 无 API）
  */
-import type { Terminal } from 'xterm'
+import type { Terminal } from '@xterm/xterm'
 
 declare global {
   interface Window {

@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
-import 'xterm/css/xterm.css'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import '@xterm/xterm/css/xterm.css'
 import './App.css'
 import type { Host, HostType, QuickCommand } from './types'
+import type { SshConnInfo } from './lib/useTerminals'
 import { api } from './lib/api'
 import { useTerminals } from './lib/useTerminals'
 import { writeClipboardText } from './lib/terminalCopy'
@@ -17,9 +18,21 @@ import { EventLog } from './components/EventLog'
 import { ApiDocs } from './components/ApiDocs'
 import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
+import { PasswordModal } from './components/PasswordModal'
 import HistorySearchModal from './components/HistorySearchModal'
 
 type PanelTab = 'quick' | 'sftp' | 'events' | 'api'
+
+// ---- 布局宽度持久化 ----
+const LAYOUT_KEY_PREFIX = 'ssh-web-tool-layout-'
+
+function loadLayoutWidth(key: string, def: number, min: number, max: number): number {
+  try {
+    const v = Number(localStorage.getItem(LAYOUT_KEY_PREFIX + key))
+    if (Number.isFinite(v) && v >= min && v <= max) return v
+  } catch { /* localStorage 不可用时用默认值 */ }
+  return def
+}
 
 function App() {
   const [hosts, setHosts] = useState<Host[]>([])
@@ -30,6 +43,9 @@ function App() {
   const [configFile, setConfigFile] = useState('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
+  // 布局宽度（侧栏/右面板可拖拽调宽，localStorage 持久化；终端是核心区，宽度自适应）
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadLayoutWidth('sidebar', 240, 180, 440))
+  const [panelWidth, setPanelWidth] = useState(() => loadLayoutWidth('panel', 320, 260, 600))
   const [panelTab, setPanelTab] = useState<PanelTab>('quick')
   const [modalOpen, setModalOpen] = useState(false)
   const [editingHost, setEditingHost] = useState<Host | null>(null)
@@ -38,10 +54,36 @@ function App() {
   const [quickCommandModalOpen, setQuickCommandModalOpen] = useState(false)
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null)
 
-  const { settings, toggleTheme, setFontFamily, setFontSize } = useSettings()
+  const { settings, toggleTheme, setFontFamily, setFontSize, updateSettings } = useSettings()
   const terminals = useTerminals(settings)
   const { focusActiveTerminal } = terminals
   const events = useEvents()
+
+  // 拖拽调宽：sidebar 向右拖变宽，panel 向左拖变宽；松开时持久化
+  const startResize = useCallback((side: 'sidebar' | 'panel') => (e: React.MouseEvent) => {
+    e.preventDefault()
+    const isSidebar = side === 'sidebar'
+    const startX = e.clientX
+    const startW = isSidebar ? sidebarWidth : panelWidth
+    const min = isSidebar ? 180 : 260
+    const max = isSidebar ? 440 : 600
+    const dir = isSidebar ? 1 : -1
+    let last = startW
+    const onMove = (ev: MouseEvent) => {
+      last = Math.min(max, Math.max(min, startW + dir * (ev.clientX - startX)))
+      if (isSidebar) setSidebarWidth(last)
+      else setPanelWidth(last)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      try { localStorage.setItem(LAYOUT_KEY_PREFIX + side, String(last)) } catch { /* 忽略 */ }
+    }
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [sidebarWidth, panelWidth])
 
   // 设置快捷键处理函数（Alt+R 打开历史搜索）
   useEffect(() => {
@@ -179,41 +221,111 @@ function App() {
     terminals.disconnectTerminal(session_id).then(() => loadHosts())
   }, [terminals, loadHosts])
 
-  // 重新连接：对同一主机建立新会话，成功后移除旧标签
+  // ---- 重连密码弹窗（Promise 化：askPassword().then(pw => ...)）----
+  // 会话/主机未保存密码且无私钥时，统一重连流程先弹窗取密码再建连
+  const pwResolveRef = useRef<((v: string | null) => void) | null>(null)
+  const [pwPromptTitle, setPwPromptTitle] = useState('')
+  const askPassword = useCallback((title: string) => {
+    return new Promise<string | null>((resolve) => {
+      pwResolveRef.current?.(null)  // 理论不会并发：防抖已保证单连接流程
+      pwResolveRef.current = resolve
+      setPwPromptTitle(title)
+    })
+  }, [])
+  const handlePwSubmit = useCallback((pw: string) => {
+    pwResolveRef.current?.(pw)
+    pwResolveRef.current = null
+    setPwPromptTitle('')
+  }, [])
+  const handlePwCancel = useCallback(() => {
+    pwResolveRef.current?.(null)
+    pwResolveRef.current = null
+    setPwPromptTitle('')
+  }, [])
+
+  // 统一重连流程：置会话为连接中 → 终端写入「连接到 ip」信息 →（未存密码时弹窗）→ 建连。
+  // 成功：新终端显示「已连接」并关闭旧标签；失败/取消：统一走断开流程收尾
+  // （终端写明原因、保持断开标记，重连按钮继续可用，不弹 alert）
   const handleReconnectTerminal = useCallback(async (session_id: string) => {
-    if (terminals.connecting) {
-      setStatus('正在连接其他主机，请稍候...')
+    if (terminals.connecting) { setStatus('正在连接其他主机，请稍候...'); return }
+    const inst = terminals.terminals.get(session_id)
+    if (!inst || inst.reconnecting) return
+
+    // 解析重连目标凭据（两类会话统一）：拦截 ssh 命令的会话用 ssh_conn，已保存主机用主机配置
+    let target: { kind: 'raw'; conn: SshConnInfo; display: string } | { kind: 'host'; host: Host; display: string } | null = null
+    if (inst.ssh_conn?.host) {
+      const c = inst.ssh_conn
+      target = { kind: 'raw', conn: c, display: `${c.username}@${c.host}` }
+    } else {
+      const host = hosts.find((h) => h.id === inst.host_id)
+      if (host) target = { kind: 'host', host, display: `${host.username}@${host.host}` }
+    }
+    if (!target) {
+      // 无凭据：终端提示原因，保持断开态（与断开流程一致的收尾）
+      inst.term.write('\r\n\x1b[31m[重连] 找不到该终端的主机连接信息，无法重连\x1b[0m\r\n')
+      setStatus('重新连接失败：找不到主机连接信息')
       return
     }
-    const inst = terminals.terminals.get(session_id)
-    if (!inst) return
-    // 重连不清空：从日志文件读取旧会话完整历史（断开时后端会话已删，须走 /api/logs 按文件读）
-    // 传入新终端直接写入，保证重连后 banner/命令输出仍可回放
-    let oldHistory = ''
+
+    // ① 置为连接中（Tab 闪烁 + 终端遮罩）+ 终端显示「连接到 ip:port」信息
+    const port = target.kind === 'raw' ? target.conn.port : target.host.port
+    terminals.setReconnecting(session_id, true)
+    inst.term.write(`\r\n\x1b[33m[重连] 正在连接 ${target.display}:${port} ...\x1b[0m\r\n`)
+    setStatus(`正在重新连接 ${target.display}...`)
+
     try {
-      const res = await api.getLogsByFile(inst.session_id)
-      oldHistory = res?.content || ''
-    } catch { /* 旧会话无历史（如本地 shell）则跳过 */ }
-    try {
-      if (inst.ssh_conn?.host) {
-        // 本地终端拦截 ssh 命令建立的会话：没有已保存主机，用会话内保存的连接信息重连
-        setStatus(`正在重新连接 ${inst.ssh_conn.username}@${inst.ssh_conn.host}...`)
-        await terminals.createTerminal(null, inst.terminal_name, 'ssh', 'cmd', oldHistory, inst.ssh_conn)
+      // ② 读取旧会话完整历史（重连不清空：断开时后端会话已删，须走 /api/logs 按文件读）
+      let oldHistory = ''
+      try {
+        const res = await api.getLogsByFile(inst.session_id)
+        oldHistory = res?.content || ''
+      } catch { /* 旧会话无历史（如本地 shell）则跳过 */ }
+
+      // ③ 密码解析：未保存密码且无私钥 → 弹窗输入（取消则按断开流程收尾）
+      const storedPassword = target.kind === 'raw' ? (target.conn.password || '') : (target.host.password || '')
+      const hasKey = target.kind === 'host' && !!target.host.private_key
+      let password = storedPassword
+      let prompted = false
+      if (!password && !hasKey) {
+        const pw = await askPassword(`连接 ${target.display}`)
+        if (pw === null) {
+          inst.term.write('\r\n\x1b[33m[重连] 已取消连接\x1b[0m\r\n')
+          setStatus('已取消重连')
+          return
+        }
+        password = pw
+        prompted = true
+      }
+
+      // ④ 建连：成功后新终端显示「已连接」（ws.onopen 写入），随后关闭旧标签
+      const successMsg = `已连接 ${target.display}`
+      if (target.kind === 'raw') {
+        // 弹窗输入的密码随新实例 ssh_conn 记忆，后续重连不再询问
+        await terminals.createTerminal(null, inst.terminal_name, 'ssh', 'cmd', oldHistory, { ...target.conn, password }, undefined, successMsg)
       } else {
-        const host = hosts.find((h) => h.id === inst.host_id)
-        if (!host) { alert('找不到该主机信息'); return }
-        setStatus(`正在重新连接 ${host.host}...`)
-        await terminals.createTerminal(host, inst.terminal_name, 'ssh', 'cmd', oldHistory)
+        await terminals.createTerminal(target.host, inst.terminal_name, 'ssh', 'cmd', oldHistory, undefined, password || undefined, successMsg)
+      }
+      // 弹窗输入的密码连接成功后持久化到主机配置（PUT 为整体替换语义，须带完整主机字段）
+      if (target.kind === 'host' && prompted && password) {
+        api.updateHost(target.host.id, { ...target.host, password }).catch(() => {})
       }
       await terminals.closeTerminal(session_id, true)
       loadHosts()
       setTimeout(() => loadHosts(), 800)
     } catch (e) {
-      if ((e as any)?.isConnecting) { setStatus('正在连接其他主机，请稍候...'); return }
-      setStatus('重新连接失败')
-      alert('重新连接失败: ' + (e as Error).message)
+      if ((e as any)?.isConnecting) {
+        inst.term.write('\r\n\x1b[33m[重连] 已有连接正在建立，请稍候再试\x1b[0m\r\n')
+        setStatus('正在连接其他主机，请稍候...')
+        return
+      }
+      // ⑤ 失败统一走断开流程：终端写失败原因、保持断开态（重连按钮可用），不弹 alert
+      const msg = (e as Error)?.message || '未知错误'
+      inst.term.write(`\r\n\x1b[31m[重连] 连接失败：${msg}\x1b[0m\r\n`)
+      setStatus(`重新连接失败：${msg}`)
+    } finally {
+      terminals.setReconnecting(session_id, false)
     }
-  }, [terminals, hosts, loadHosts])
+  }, [terminals, hosts, loadHosts, askPassword])
 
   const handleSaveHost = useCallback(async (data: Partial<Host>) => {
     try {
@@ -482,8 +594,9 @@ function App() {
               <button
                 className="btn btn-primary btn-sm conn-action-btn"
                 onClick={() => handleReconnectTerminal(terminals.activeId!)}
-                title="重新连接当前主机"
-              >🔗 重连</button>
+                title={activeInst.reconnecting ? '正在重新连接…' : '重新连接当前主机'}
+                disabled={activeInst.reconnecting}
+              >{activeInst.reconnecting ? '⏳ 连接中…' : '🔗 重连'}</button>
             )
           }
           // 本地终端不显示断开按钮（本地终端没有"断开"的概念）
@@ -500,6 +613,7 @@ function App() {
         })()}
         <div style={{ flex: 1 }} />
         {/* 终端设置 */}
+        <div className="topbar-divider" />
         <div className="topbar-settings">
           <button
             className="btn btn-secondary btn-sm settings-btn"
@@ -528,6 +642,32 @@ function App() {
               <option key={f.value} value={f.value}>{f.label}</option>
             ))}
           </select>
+          <label className="settings-toggle" title="命令块左侧色条标记：单击色条折叠/展开输出，双击复制块内容">
+            <input
+              type="checkbox"
+              checked={settings.blockBar}
+              onChange={(e) => updateSettings({ blockBar: e.target.checked })}
+            />
+            块标记
+          </label>
+          <label className="settings-toggle" title="命令输出超过保留行数时自动折叠旧输出">
+            <input
+              type="checkbox"
+              checked={settings.blockAutoFold}
+              onChange={(e) => updateSettings({ blockAutoFold: e.target.checked })}
+            />
+            自动折叠
+          </label>
+          <select
+            className="settings-max-lines"
+            value={settings.blockMaxLines}
+            onChange={(e) => updateSettings({ blockMaxLines: Number(e.target.value) })}
+            title="自动折叠保留的输出行数"
+          >
+            {[15, 30, 50, 100, 200].map((n) => (
+              <option key={n} value={n}>{n} 行</option>
+            ))}
+          </select>
           <button
             className="btn btn-secondary btn-sm settings-btn"
             onClick={toggleTheme}
@@ -536,6 +676,7 @@ function App() {
             {settings.theme === 'dark' ? '☀️' : '🌙'}
           </button>
         </div>
+        <div className="topbar-divider" />
         <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(!panelCollapsed)}>
           📋 面板
         </button>
@@ -547,8 +688,12 @@ function App() {
 
       {/* 主体 */}
       <div className="main">
-        {/* 左侧主机列表 */}
-        <div className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
+        {/* 左侧主机列表（宽度可拖拽调整） */}
+        <div
+          className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}
+          style={{ width: sidebarWidth, marginLeft: sidebarCollapsed ? -sidebarWidth : 0 }}
+        >
+          {!sidebarCollapsed && <div className="resizer sidebar-resizer" onMouseDown={startResize('sidebar')} title="拖拽调整宽度" />}
           <div className="sidebar-header">
             <span className="title">主机列表</span>
             <button className="btn btn-secondary btn-sm" onClick={loadHosts}>🔄</button>
@@ -597,9 +742,10 @@ function App() {
           />
         </div>
 
-        {/* 右侧面板 */}
+        {/* 右侧面板（宽度可拖拽调整） */}
         {!panelCollapsed && (
-          <div className="panel">
+          <div className="panel" style={{ width: panelWidth }}>
+            <div className="resizer panel-resizer" onMouseDown={startResize('panel')} title="拖拽调整宽度" />
             <div className="panel-header">
               <span className="title">工具面板</span>
               <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(true)}>✕</button>
@@ -659,6 +805,11 @@ function App() {
         />
       )}
 
+
+      {/* 重连密码弹窗：未保存密码且无私钥时，统一重连流程先取密码再建连 */}
+      {pwPromptTitle && (
+        <PasswordModal title={pwPromptTitle} onSubmit={handlePwSubmit} onCancel={handlePwCancel} />
+      )}
 
       {/* 拖拽提示 */}
       <div id="dropHint">释放文件以上传到当前 SFTP 目录</div>

@@ -2,10 +2,11 @@
 // restoreTerminals 重复的装配逻辑（xterm 初始化 / WebSocket 握手 / 消息路由 /
 // 洪水供给器）收敛到一个入口。行为与拆分前完全一致。
 
-import { Terminal } from 'xterm'
+import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { RefObject, Dispatch, SetStateAction } from 'react'
 import type { TerminalSettings } from './useSettings'
+import type { BlockBarController } from './blockBar'
 import type { WsServerMessage } from '../types/ws'
 import { api } from './api'
 import { reflowForCols } from './reflow'
@@ -37,10 +38,13 @@ export interface TerminalInstance {
   input_buffer: string  // 当前输入行缓冲区（用于记录命令历史）
   input_cursor: number  // 输入行光标位置（行编辑用，精确跟踪命令内容）
   disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
+  reconnecting: boolean  // 重连建立中标记（Tab/终端遮罩显示"连接中"，期间禁止重复点击）
   ssh_exited: boolean  // SSH exit 退出后自动切换到本地终端，可点重连回到原 SSH 主机
   local_starting: boolean  // 本机终端创建后等待首批输出（开启启动提示）；收到第一条 output 后变 false
   feeder: ReturnType<typeof createOutputFeeder> | null
   ssh_conn: SshConnInfo | null  // 本地拦截 SSH 会话的连接信息（重连凭据）；已保存主机会话为 null
+  // 命令块渲染层（左侧色条 + 遮罩折叠）：容器挂载（registerContainer → term.open）后创建
+  blockBar: BlockBarController | null
 }
 
 // 洪水输出内存上限：xterm write 缓冲无上限（超 50MB 抛错），这里限 2MB 积压，
@@ -48,6 +52,9 @@ export interface TerminalInstance {
 export const MAX_PENDING_BYTES = 2 * 1024 * 1024
 
 // 终端主题（settings.theme → xterm options.theme）
+// xterm 6.0 起：滚动条为自绘组件（宽度由 options.overviewRuler.width 决定，默认 14px），
+// 滑块颜色走 theme.scrollbarSlider*；overviewRulerBorder 不钉透明会在滚动条旁
+// 画出一条前景色竖线（rssh 同款处理）
 export function getTerminalTheme(settings: TerminalSettings) {
   if (settings.theme === 'light') {
     return {
@@ -55,6 +62,11 @@ export function getTerminalTheme(settings: TerminalSettings) {
       foreground: '#1a1a2e',
       cursor: '#e94560',
       selectionBackground: 'rgba(233, 69, 96, 0.3)',
+      // 滚动条滑块：沿用 6.0 之前 thumb 的边框系配色，hover/active 用次级文字色
+      scrollbarSliderBackground: '#cbd5e0',
+      scrollbarSliderHoverBackground: '#a0aec0',
+      scrollbarSliderActiveBackground: '#718096',
+      overviewRulerBorder: 'rgba(0,0,0,0)',
     }
   }
   return {
@@ -62,6 +74,10 @@ export function getTerminalTheme(settings: TerminalSettings) {
     foreground: '#c8d0e0',
     cursor: '#e94560',
     selectionBackground: 'rgba(233, 69, 96, 0.3)',
+    scrollbarSliderBackground: '#2a3040',
+    scrollbarSliderHoverBackground: '#5a6a8a',
+    scrollbarSliderActiveBackground: '#8892b0',
+    overviewRulerBorder: 'rgba(0,0,0,0)',
   }
 }
 
@@ -76,6 +92,8 @@ export interface TerminalInstanceSpec {
   // 历史回放：重连时由 App 预先读取旧会话历史传入；否则按 historyLimit 从后端加载
   historyContent?: string
   historyLimit: number
+  // 连接成功提示（重连用）：ws.onopen 写入新终端，如「已连接 user@host」
+  connectMessage?: string
   ssh_conn: SshConnInfo | null
   settings: TerminalSettings
   // ---- hook 注入（useTerminals 持有状态/回调，经此注入，避免与 React 生命周期耦合）----
@@ -107,6 +125,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     local_starting,
     historyContent,
     historyLimit,
+    connectMessage,
     ssh_conn,
     settings,
     containersRef,
@@ -128,6 +147,8 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     lineHeight: 1.2,
     // 保留足够滚动历史：clear/连接时不丢之前内容（只能滚动回看）
     scrollback: 5000,
+    // xterm 6.0：自绘滚动条宽度（收窄到 6px；默认 14px）。滑块颜色在 getTerminalTheme
+    overviewRuler: { width: 6 },
   })
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
@@ -182,6 +203,8 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
         }
       }).catch(() => {})
     }
+    // 连接成功提示（重连流程）：绿色写入新终端，随后是主机 banner/回显
+    if (connectMessage) term.write(`\r\n\x1b[32m[${connectMessage}]\x1b[0m\r\n`)
   }
 
   ws.onmessage = (event) => {
@@ -274,6 +297,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     input_buffer: '',
     input_cursor: 0,
     disconnected: false,
+    reconnecting: false,
     ssh_exited: false,
     local_starting,
     feeder: createOutputFeeder({
@@ -281,6 +305,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
       maxPendingBytes: MAX_PENDING_BYTES,
     }),
     ssh_conn,
+    blockBar: null,
   }
   return instance
 }

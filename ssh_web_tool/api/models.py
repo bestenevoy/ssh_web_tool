@@ -25,6 +25,7 @@ class CreateRawSessionRequest(BaseModel):
 class CreateSessionFromHostRequest(BaseModel):
     host_id: str
     terminal_name: str | None = ""  # 可选：指定终端名称，不填则自动生成
+    password: str | None = None  # 可选：密码覆盖（重连弹窗输入），优先于已保存密码
 
 
 class RunCommandRequest(BaseModel):

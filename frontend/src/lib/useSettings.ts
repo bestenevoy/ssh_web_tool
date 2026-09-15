@@ -6,14 +6,21 @@ export interface TerminalSettings {
   theme: Theme
   fontFamily: string
   fontSize: number
+  // 命令块（借鉴 rssh）：左侧色条标记 / 自动折叠 / 折叠保留行数
+  blockBar: boolean
+  blockAutoFold: boolean
+  blockMaxLines: number
 }
 
 const STORAGE_KEY = 'ssh-web-tool-settings'
 
 const DEFAULT_SETTINGS: TerminalSettings = {
-  theme: 'dark',
+  theme: 'light',
   fontFamily: 'Consolas, "Microsoft YaHei", monospace',
   fontSize: 13,
+  blockBar: true,
+  blockAutoFold: true,
+  blockMaxLines: 30,
 }
 
 // 可选字体列表

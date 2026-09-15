@@ -96,7 +96,8 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
         # 外层总超时兜底：目标不可达/认证卡住时不至于让前端请求无限挂起
         async with asyncio.timeout(30):  # type: ignore[attr-defined]
             await session.connect(
-                password=host.get("password") or None,
+                # 密码覆盖：重连时弹窗输入的密码优先于已保存密码（连接成功后由前端保存到主机配置）
+                password=req.password if req.password else (host.get("password") or None),
                 private_key=host.get("private_key") or None,
                 passphrase=host.get("passphrase") or None,
             )

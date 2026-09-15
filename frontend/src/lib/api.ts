@@ -70,10 +70,11 @@ export const api = {
   // 会话
   listSessions: () => request<{ sessions: Session[] }>('/api/sessions'),
   listActiveTerminals: () => request<{ terminals: ActiveTerminal[] }>('/api/sessions/active'),
-  connectHost: (host_id: string, terminal_name?: string) =>
+  // password：可选密码覆盖（重连弹窗输入，优先于已保存密码；不传则后端用主机配置）
+  connectHost: (host_id: string, terminal_name?: string, password?: string) =>
     request<{ session_id: string; status: string; terminal_name: string; host: Host }>('/api/sessions/from-host', {
       method: 'POST',
-      body: JSON.stringify({ host_id, terminal_name }),
+      body: JSON.stringify({ host_id, terminal_name, ...(password ? { password } : {}) }),
     }, 35000),
   // 原始连接信息创建会话（本地终端拦截 SSH 后的"重连"入口，无已保存主机）
   connectRaw: (conn: { host: string; port: number; username: string; password: string }, terminal_name?: string) =>

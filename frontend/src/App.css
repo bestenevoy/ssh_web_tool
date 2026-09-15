@@ -202,8 +202,8 @@
   width: 80vw;
   max-width: 1100px;
   height: 85vh;
-  background: #1a1f2e;
-  border: 1px solid #3a4050;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-radius: 12px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(233, 69, 96, 0.1);
   overflow: hidden;
@@ -216,15 +216,15 @@
   justify-content: space-between;
   align-items: center;
   padding: 10px 16px;
-  background: #222838;
-  border-bottom: 1px solid #2a3040;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
 
 .sftp-viewer-title {
   font-size: 13px;
   font-weight: 600;
-  color: #c8d0e0;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -233,7 +233,7 @@
 .sftp-viewer-close {
   background: none;
   border: none;
-  color: #8a94ad;
+  color: var(--text-secondary);
   font-size: 14px;
   cursor: pointer;
   padding: 4px 8px;
@@ -241,7 +241,7 @@
   flex-shrink: 0;
 }
 
-.sftp-viewer-close:hover { background: #2a3040; color: #e94560; }
+.sftp-viewer-close:hover { background: var(--bg-hover); color: var(--accent); }
 
 .sftp-viewer-content {
   flex: 1;
@@ -253,8 +253,8 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
-  background: #0a0e1a;
-  color: #c8d0e0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 /* ============ 历史搜索弹窗 ============ */
@@ -276,8 +276,8 @@
   width: 640px;
   max-width: 90vw;
   max-height: 80vh;
-  background: #1a1f2e;
-  border: 1px solid #3a4050;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-radius: 12px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(233, 69, 96, 0.1);
   overflow: hidden;
@@ -290,28 +290,28 @@
   justify-content: space-between;
   align-items: center;
   padding: 10px 16px;
-  background: #222838;
-  border-bottom: 1px solid #2a3040;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .history-modal-title {
   font-size: 13px;
   font-weight: 600;
-  color: #c8d0e0;
+  color: var(--text-primary);
 }
 
 .history-modal-hint {
   font-size: 11px;
-  color: #6b7280;
+  color: var(--text-tertiary);
 }
 
 .history-search-input {
   width: 100%;
   padding: 10px 16px;
-  background: #0f1420;
+  background: var(--bg-primary);
   border: none;
-  border-bottom: 1px solid #2a3040;
-  color: #c8d0e0;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
   font-size: 14px;
   font-family: 'Consolas', 'Monaco', monospace;
   outline: none;
@@ -319,7 +319,7 @@
 }
 
 .history-search-input:focus {
-  background: #141a28;
+  background: var(--bg-tertiary);
 }
 
 .history-result-list {
@@ -336,7 +336,7 @@
   cursor: pointer;
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 13px;
-  color: #9ca3af;
+  color: var(--text-secondary);
   transition: all 0.15s;
   border-left: 3px solid transparent;
 }
@@ -354,7 +354,7 @@
 
 .history-cmd-index {
   width: 30px;
-  color: #4b5563;
+  color: var(--text-muted);
   font-size: 11px;
   flex-shrink: 0;
 }
@@ -452,10 +452,10 @@
 .history-save-input {
   flex: 1;
   padding: 5px 10px;
-  background: #0f1420;
-  border: 1px solid #2a3040;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #c8d0e0;
+  color: var(--text-primary);
   font-size: 12px;
   font-family: inherit;
   outline: none;
@@ -483,8 +483,8 @@
 
 .history-cancel-btn {
   padding: 5px 10px;
-  background: #2a3040;
-  color: #8892b0;
+  background: var(--bg-active);
+  color: var(--text-secondary);
   border: none;
   border-radius: 4px;
   font-size: 12px;
@@ -493,15 +493,15 @@
 }
 
 .history-cancel-btn:hover {
-  background: #3a4050;
-  color: #c8d0e0;
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .history-loading,
 .history-empty {
   padding: 24px;
   text-align: center;
-  color: #6b7280;
+  color: var(--text-tertiary);
   font-size: 13px;
 }
 
@@ -566,8 +566,8 @@
 /* 已忽略入口按钮 */
 .history-ignored-toggle {
   cursor: pointer;
-  background: #2a3040;
-  color: #8892b0;
+  background: var(--bg-active);
+  color: var(--text-secondary);
   border: none;
   border-radius: 4px;
   flex-shrink: 0;
@@ -577,8 +577,8 @@
 }
 
 .history-ignored-toggle:hover {
-  background: #3a4050;
-  color: #c8d0e0;
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .history-ignored-toggle.active {
@@ -599,7 +599,7 @@
 
 .history-restore-btn {
   padding: 4px 10px;
-  background: #2a3040;
+  background: var(--bg-active);
   color: #4caf50;
   border: 1px solid rgba(76, 175, 80, 0.35);
   border-radius: 4px;
@@ -610,6 +610,6 @@
 }
 
 .history-restore-btn:hover {
-  background: #3a4050;
+  background: var(--bg-hover);
   color: #66d97a;
 }

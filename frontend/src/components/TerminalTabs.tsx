@@ -57,9 +57,9 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, on
           return (
             <div
               key={t.session_id}
-              className={`tab${t.session_id === activeId ? ' active' : ''}${t.disconnected ? ' disconnected' : ''}`}
+              className={`tab${t.session_id === activeId ? ' active' : ''}${t.disconnected ? ' disconnected' : ''}${t.reconnecting ? ' connecting' : ''}`}
               onClick={() => onSwitch(t.session_id)}
-              title={`${t.host_name} · ${t.terminal_name}${group ? ` · ${group}` : ''}${t.disconnected ? '（已断开）' : ''}`}
+              title={`${t.host_name} · ${t.terminal_name}${group ? ` · ${group}` : ''}${t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
             >
               <span className="type-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: getTypeColor(t.type), display: 'inline-block' }} />
               <span className="tab-title">{t.host_name} · {t.terminal_name}</span>

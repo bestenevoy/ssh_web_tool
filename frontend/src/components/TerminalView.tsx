@@ -29,10 +29,12 @@ export function TerminalView({ terminals, activeId, registerContainer }: Props) 
           ref={setRef(t.session_id)}
           className={`terminal-instance${t.session_id === activeId ? ' active' : ''}`}
         >
-          {t.local_starting && (
+          {(t.reconnecting || t.local_starting) && (
             <div className="terminal-starting">
               <div className="terminal-starting-spinner" />
-              <div className="terminal-starting-text">正在启动本机终端…</div>
+              <div className="terminal-starting-text">
+                {t.reconnecting ? '正在重新连接，请稍候…' : '正在启动本机终端…'}
+              </div>
             </div>
           )}
         </div>

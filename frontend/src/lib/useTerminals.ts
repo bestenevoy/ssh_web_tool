@@ -1,6 +1,6 @@
 // 终端状态管理 hook
 import { useState, useCallback, useRef, useEffect } from 'react'
-import type { Terminal } from 'xterm'
+import type { Terminal } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { Host } from '../types'
 import { api } from './api'
@@ -9,6 +9,7 @@ import { setupCopyOnSelect } from './terminalCopy'
 import { editLineBuffer, isEnter } from './lineEditor'
 import { createTerminalInstance, getTerminalTheme } from './terminalInstance'
 import type { TerminalInstance, SshConnInfo } from './terminalInstance'
+import { attachBlockBar } from './blockBar'
 import type { WsClientMessage } from '../types/ws'
 
 // 类型从 terminalInstance.ts 重导出（组件导入路径不变）
@@ -146,6 +147,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     inst.term.options.fontFamily = s.fontFamily
     inst.term.options.fontSize = s.fontSize
     inst.term.options.theme = getTerminalTheme(s)
+    // 命令块设置（开关/自动折叠/行数）实时同步到渲染层
+    inst.blockBar?.applySettings(s)
     // 重新计算终端尺寸
     if (inst.container) {
       fitTerminal(inst)
@@ -207,6 +210,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     localShell = 'cmd',
     history_content?: string,
     rawConn?: SshConnInfo,  // 本地拦截 SSH 会话重连：用原始凭据建会话（无已保存主机）
+    password?: string,      // 已保存主机连接的密码覆盖（重连弹窗输入）；raw 会话密码带在 rawConn 内
+    connect_message?: string,  // 连接成功后写入新终端的提示（如「已连接 user@host」）
   ) => {
     // 连接防抖：已有连接正在建立时拒绝新的连接请求
     if (connectingRef.current) {
@@ -232,7 +237,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         tname = result.terminal_name || terminal_name || '终端1'
         hostLike = { id: '', host: rawConn.host, name: `${rawConn.username}@${rawConn.host}`, type: 'ssh' }
       } else {
-        const result = await api.connectHost(host!.id, terminal_name)
+        const result = await api.connectHost(host!.id, terminal_name, password)
         session_id = result.session_id
         tname = result.terminal_name || terminal_name || '终端1'
         hostLike = { id: host!.id, host: host!.host, name: host!.name || host!.host, type: host!.type }
@@ -254,6 +259,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         historyContent: history_content,
         // limit 200000：完整回放同会话历史（同一终端 = 同一份记录）
         historyLimit: 200000,
+        connectMessage: connect_message,
         ssh_conn: rawConn ? { ...rawConn } : null,
         settings: s,
         containersRef,
@@ -404,6 +410,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     if (!inst) return
     if (inst.ws) inst.ws.close()
     inst.feeder?.dispose()
+    inst.blockBar?.dispose()
     // state_timer 已改为批量轮询，不再需要单独清理
     try { await api.closeSession(session_id) } catch {}
     setTerminals((prev) => {
@@ -434,6 +441,18 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
       return next
     })
   }, [terminals])
+
+  // 重连中状态标记：统一重连流程入口置 true，成功/失败后置 false
+  // （Tab/终端遮罩显示"连接中"，期间重复点击重连被 App 层拦截）
+  const setReconnecting = useCallback((session_id: string, value: boolean) => {
+    setTerminals((prev) => {
+      const cur = prev.get(session_id)
+      if (!cur || cur.reconnecting === value) return prev
+      const next = new Map(prev)
+      next.set(session_id, { ...cur, reconnecting: value })
+      return next
+    })
+  }, [])
 
   const sendCommand = useCallback((command: string, execute: boolean = true) => {
     if (!activeId) return
@@ -468,6 +487,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         inst.container = el
         // 选中即复制：鼠标拖选松开即写入系统剪贴板（绑定到容器 mouseup）
         setupCopyOnSelect(inst.term, el)
+        // 命令块渲染层（左侧色条 + 遮罩折叠）：xterm 打开后才有几何信息可测
+        if (!inst.blockBar) inst.blockBar = attachBlockBar(inst.term, el, settingsRef.current)
         // 终端真正打开后，使用 resyncTerminal 确保 xterm.js 状态正确
         // 关键：先 fit 计算正确的 cols/rows，再 reset 清除可能错误的状态，再发送 resize 和 Ctrl+L
         fitTerminal(inst)
@@ -530,6 +551,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     switchTerminal,
     closeTerminal,
     disconnectTerminal,
+    setReconnecting,
     sendCommand,
     registerContainer,
     focusActiveTerminal,
