@@ -118,6 +118,17 @@ class FallbackShellRequest(BaseModel):
     shell: str
 
 
+class UiSettingsRequest(BaseModel):
+    """部分更新前端 UI 设置（只传需要修改的键；逐键校验，非法键返回 400）"""
+
+    theme: str | None = None
+    font_family: str | None = None
+    font_size: int | None = None
+    block_bar: bool | None = None
+    block_auto_fold: bool | None = None
+    block_max_lines: int | None = None
+
+
 class RecordCommandRequest(BaseModel):
     command: str
 

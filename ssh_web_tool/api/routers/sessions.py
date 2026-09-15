@@ -12,6 +12,7 @@ from ssh_web_tool.api.models import (
     CreateSessionRequest,
     RunCommandRequest,
 )
+from ssh_web_tool.config import get_fallback_local_shell, load_config
 from ssh_web_tool.deps import get_event_bus, get_history_db, get_session_manager, get_ssh_session_cls, get_storage
 
 router = APIRouter(prefix="/api", tags=["sessions"])
@@ -135,9 +136,11 @@ async def api_create_local_session(req: dict | None = None):
     session_manager = get_session_manager()
     event_bus = get_event_bus()
     req = req or {}
-    shell = str(req.get("shell") or "cmd").lower()
+    # shell 未指定时使用配置的默认本机终端（默认终端条目与断开后共用同一配置）
+    default_shell = get_fallback_local_shell(load_config())
+    shell = str(req.get("shell") or default_shell).lower()
     if shell not in ("cmd", "powershell", "pwsh"):
-        shell = "cmd"
+        shell = default_shell
     import getpass
 
     tname = "本机 cmd" if shell == "cmd" else ("本机 PowerShell" if shell == "powershell" else "本机 pwsh")

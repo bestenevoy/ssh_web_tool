@@ -207,7 +207,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     host: Host | null,
     terminal_name?: string,
     kind: 'ssh' | 'local' = 'ssh',
-    localShell = 'cmd',
+    localShell = 'powershell',
     history_content?: string,
     rawConn?: SshConnInfo,  // 本地拦截 SSH 会话重连：用原始凭据建会话（无已保存主机）
     password?: string,      // 已保存主机连接的密码覆盖（重连弹窗输入）；raw 会话密码带在 rawConn 内
@@ -229,7 +229,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
         // 本机终端（cmd/powershell，WinPTY，不经过 SSH）
         const r = await api.createLocalSession(localShell)
         session_id = r.session_id
-        tname = r.terminal_name || terminal_name || (localShell === 'powershell' ? '本机 PowerShell' : '本机 cmd')
+        tname = r.terminal_name || terminal_name || (localShell === 'cmd' ? '本机 cmd' : localShell === 'powershell' ? '本机 PowerShell' : '本机 pwsh')
         hostLike = { id: 'local', host: 'localhost', name: tname, type: 'local' }
       } else if (rawConn) {
         const result = await api.connectRaw(rawConn, terminal_name)
@@ -544,8 +544,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     connecting,
     activeSessions,
     createTerminal,
-    // 打开本机终端（cmd / powershell，WinPTY，不经过 SSH）
-    openLocalTerminal: (shell: 'cmd' | 'powershell') =>
+    // 打开本机终端（cmd / powershell / pwsh，WinPTY，不经过 SSH）
+    openLocalTerminal: (shell: 'cmd' | 'powershell' | 'pwsh') =>
       createTerminal({} as Host, undefined, 'local', shell),
     restoreTerminals,
     switchTerminal,

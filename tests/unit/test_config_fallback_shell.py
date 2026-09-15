@@ -19,12 +19,12 @@ def tmp_app_dir(monkeypatch, tmp_path):
     return tmp_path
 
 
-def test_default_fallback_shell_is_cmd(tmp_app_dir):
-    """默认（无配置/空配置）为 cmd"""
-    assert cfg_mod.get_fallback_local_shell({}) == "cmd"
-    assert cfg_mod.get_fallback_local_shell(None) == "cmd"
+def test_default_fallback_shell_is_powershell(tmp_app_dir):
+    """默认（无配置/空配置）为 powershell"""
+    assert cfg_mod.get_fallback_local_shell({}) == "powershell"
+    assert cfg_mod.get_fallback_local_shell(None) == "powershell"
     # 真实 load_config（隔离目录无配置文件 → 全默认）
-    assert cfg_mod.get_fallback_local_shell(cfg_mod.load_config()) == "cmd"
+    assert cfg_mod.get_fallback_local_shell(cfg_mod.load_config()) == "powershell"
 
 
 def test_valid_shell_values(tmp_app_dir):
@@ -32,10 +32,10 @@ def test_valid_shell_values(tmp_app_dir):
     assert cfg_mod.get_fallback_local_shell({"fallback_local_shell": "pwsh"}) == "pwsh"
 
 
-def test_invalid_shell_falls_back_to_cmd(tmp_app_dir):
-    """非法取值回退 cmd（不抛异常）"""
+def test_invalid_shell_falls_back_to_powershell(tmp_app_dir):
+    """非法取值回退 powershell（不抛异常）"""
     for bad in ("bash", "zsh", "PowerShell.exe", "", None, 123, "cmd.exe"):
-        assert cfg_mod.get_fallback_local_shell({"fallback_local_shell": bad}) == "cmd", bad
+        assert cfg_mod.get_fallback_local_shell({"fallback_local_shell": bad}) == "powershell", bad
 
 
 def test_save_then_load_roundtrip(tmp_app_dir):
@@ -62,7 +62,7 @@ def test_example_json_is_valid_and_has_shell(tmp_app_dir):
     """config.example.json 必须可被 json 解析（曾因非法尾逗号直接失败），且包含新配置项"""
     p = Path(__file__).resolve().parent.parent.parent / "config.example.json"
     data = json.loads(p.read_text(encoding="utf-8"))
-    assert data["fallback_local_shell"] == "cmd"
+    assert data["fallback_local_shell"] == "powershell"
 
 
 def test_default_debug_is_false(tmp_app_dir):

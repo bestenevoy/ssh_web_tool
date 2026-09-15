@@ -19,6 +19,7 @@ import { ApiDocs } from './components/ApiDocs'
 import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
 import { PasswordModal } from './components/PasswordModal'
+import { SettingsModal } from './components/SettingsModal'
 import HistorySearchModal from './components/HistorySearchModal'
 
 type PanelTab = 'quick' | 'sftp' | 'events' | 'api'
@@ -39,7 +40,8 @@ function App() {
   const [groups, setGroups] = useState<string[]>([])
   const [hostTypes, setHostTypes] = useState<HostType[]>([])
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
-  const [fallbackShell, setFallbackShell] = useState('cmd')
+  const [fallbackShell, setFallbackShell] = useState<'cmd' | 'powershell' | 'pwsh'>('powershell')
+  const [shellChoices, setShellChoices] = useState<string[]>(['cmd', 'powershell', 'pwsh'])
   const [configFile, setConfigFile] = useState('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
@@ -51,6 +53,7 @@ function App() {
   const [editingHost, setEditingHost] = useState<Host | null>(null)
   const [status, setStatus] = useState('就绪')
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [quickCommandModalOpen, setQuickCommandModalOpen] = useState(false)
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null)
 
@@ -109,12 +112,12 @@ function App() {
     return () => window.removeEventListener('keydown', handler, true)
   }, [terminals.activeId])
 
-  // SSH 断开后自动进入的本机终端（保存到全局配置 config.json）
-  const handleSetFallbackShell = useCallback(async (shell: string) => {
+  // 默认本机终端 shell（左侧「默认终端」条目 + SSH 断开后自动进入共用，保存到 config.json）
+  const handleSetFallbackShell = useCallback(async (shell: 'cmd' | 'powershell' | 'pwsh') => {
     try {
       await api.setFallbackShell(shell)
       setFallbackShell(shell)
-      setStatus(`断开后自动进入 ${shell === 'powershell' ? 'PowerShell' : 'cmd'}`)
+      setStatus(`默认本机终端已设为 ${shell}`)
     } catch (e) {
       setStatus('保存配置失败: ' + (e as Error).message)
     }
@@ -144,7 +147,8 @@ function App() {
     loadHosts()
       api.getConfig()
         .then((c) => {
-          if (c?.fallback_local_shell) setFallbackShell(c.fallback_local_shell)
+          if (c?.fallback_local_shell) setFallbackShell(c.fallback_local_shell as 'cmd' | 'powershell' | 'pwsh')
+          if (c?.local_shell_choices?.length) setShellChoices(c.local_shell_choices)
           if (c?.config_file) setConfigFile(c.config_file)
         })
         .catch(() => {})
@@ -642,38 +646,19 @@ function App() {
               <option key={f.value} value={f.value}>{f.label}</option>
             ))}
           </select>
-          <label className="settings-toggle" title="命令块左侧色条标记：单击色条折叠/展开输出，双击复制块内容">
-            <input
-              type="checkbox"
-              checked={settings.blockBar}
-              onChange={(e) => updateSettings({ blockBar: e.target.checked })}
-            />
-            块标记
-          </label>
-          <label className="settings-toggle" title="命令输出超过保留行数时自动折叠旧输出">
-            <input
-              type="checkbox"
-              checked={settings.blockAutoFold}
-              onChange={(e) => updateSettings({ blockAutoFold: e.target.checked })}
-            />
-            自动折叠
-          </label>
-          <select
-            className="settings-max-lines"
-            value={settings.blockMaxLines}
-            onChange={(e) => updateSettings({ blockMaxLines: Number(e.target.value) })}
-            title="自动折叠保留的输出行数"
-          >
-            {[15, 30, 50, 100, 200].map((n) => (
-              <option key={n} value={n}>{n} 行</option>
-            ))}
-          </select>
           <button
             className="btn btn-secondary btn-sm settings-btn"
             onClick={toggleTheme}
             title={settings.theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
           >
             {settings.theme === 'dark' ? '☀️' : '🌙'}
+          </button>
+          <button
+            className="btn btn-secondary btn-sm settings-btn"
+            onClick={() => setSettingsOpen(true)}
+            title="设置（本机终端 / 命令块 / 缓存清理等）"
+          >
+            ⚙️
           </button>
         </div>
         <div className="topbar-divider" />
@@ -683,7 +668,6 @@ function App() {
         <button className="btn btn-secondary btn-sm" onClick={handleReloadConfig} title="扫描配置文件与 scripts 脚本目录并刷新">
           🔄 检查配置
         </button>
-        <button className="btn btn-primary btn-sm" onClick={() => { setEditingHost(null); setModalOpen(true) }}>+ 新建主机</button>
       </div>
 
       {/* 主体 */}
@@ -696,24 +680,27 @@ function App() {
           {!sidebarCollapsed && <div className="resizer sidebar-resizer" onMouseDown={startResize('sidebar')} title="拖拽调整宽度" />}
           <div className="sidebar-header">
             <span className="title">主机列表</span>
-            <button className="btn btn-secondary btn-sm" onClick={loadHosts}>🔄</button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => { setEditingHost(null); setModalOpen(true) }}
+              title="新建主机"
+            >＋</button>
+            <button className="btn btn-secondary btn-sm" onClick={loadHosts} title="刷新主机列表">🔄</button>
           </div>
           <HostList
             hosts={hosts}
             hostTypes={hostTypes}
             groups={groups}
             activeHostId={activeHostId}
-            fallbackShell={fallbackShell}
-            configFile={configFile}
-            onSetFallbackShell={handleSetFallbackShell}
-            onHostClick={handleHostClick}
-            onOpenLocalTerminal={(shell: 'cmd' | 'powershell') => {
+            defaultShell={fallbackShell}
+            onOpenDefaultTerminal={() => {
               if (terminals.connecting) { setStatus('正在连接其他终端，请稍候...'); return }
-              setStatus(`正在打开本机 ${shell}...`)
-              terminals.openLocalTerminal(shell)
-                .then(() => { setStatus(`本机 ${shell} 已打开`); setTimeout(() => loadHosts(), 500) })
+              setStatus(`正在打开本机 ${fallbackShell}...`)
+              terminals.openLocalTerminal(fallbackShell)
+                .then(() => { setStatus(`本机 ${fallbackShell} 已打开`); setTimeout(() => loadHosts(), 500) })
                 .catch((e) => { setStatus('打开本机终端失败'); alert('本机终端打开失败: ' + (e as Error).message) })
             }}
+            onHostClick={handleHostClick}
             onEdit={(h) => { setEditingHost(h); setModalOpen(true) }}
             onDelete={handleDeleteHost}
             onCopy={handleCopyConnection}
@@ -809,6 +796,19 @@ function App() {
       {/* 重连密码弹窗：未保存密码且无私钥时，统一重连流程先取密码再建连 */}
       {pwPromptTitle && (
         <PasswordModal title={pwPromptTitle} onSubmit={handlePwSubmit} onCancel={handlePwCancel} />
+      )}
+
+      {/* 设置弹窗：本机终端 / 命令块 / 字体主题 / 缓存清理 */}
+      {settingsOpen && (
+        <SettingsModal
+          settings={settings}
+          onUpdate={updateSettings}
+          fallbackShell={fallbackShell}
+          shellChoices={shellChoices}
+          onSetFallbackShell={handleSetFallbackShell}
+          configFile={configFile}
+          onClose={() => { setSettingsOpen(false); focusActiveTerminal() }}
+        />
       )}
 
       {/* 拖拽提示 */}

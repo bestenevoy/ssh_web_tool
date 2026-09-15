@@ -62,3 +62,60 @@ def test_set_fallback_shell_case_insensitive(monkeypatch):
     assert r.status_code == 200
     assert r.json()["fallback_local_shell"] == "powershell"
     assert saved.get("fallback_local_shell") == "powershell"
+
+
+# ============ ui_settings：前端 UI 设置持久化到 config.json ============
+
+
+def test_get_config_returns_ui_settings():
+    c = TestClient(main.app)
+    r = c.get("/api/config")
+    assert r.status_code == 200
+    body = r.json()
+    ui = body["ui_settings"]
+    assert ui["theme"] in ("light", "dark")
+    assert isinstance(ui["font_size"], int)
+    assert "font_family" in ui
+    assert ui["block_auto_fold"] is False  # 折叠默认关闭
+
+
+def test_update_ui_settings_partial(monkeypatch):
+    """部分更新：只传部分键，返回完整 ui_settings 且保存值含本次修改"""
+    saved = {}
+
+    def fake_save(cfg):
+        saved.update(cfg)
+        return True
+
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", fake_save)
+    c = TestClient(main.app)
+    r = c.post("/api/config/ui-settings", json={"theme": "dark", "font_size": 16})
+    assert r.status_code == 200
+    ui = r.json()["ui_settings"]
+    assert ui["theme"] == "dark"
+    assert ui["font_size"] == 16
+    # 未传的键保留原值
+    assert "font_family" in ui
+    assert saved["ui_settings"]["theme"] == "dark"
+    assert saved["ui_settings"]["font_size"] == 16
+
+
+def test_update_ui_settings_rejects_invalid(monkeypatch):
+    """非法值返回 400 且不落盘"""
+
+    def fake_save(cfg):
+        raise AssertionError("非法值不应触发保存")
+
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", fake_save)
+    c = TestClient(main.app)
+    r = c.post("/api/config/ui-settings", json={"font_size": 999})
+    assert r.status_code == 400
+    r = c.post("/api/config/ui-settings", json={"theme": "solarized"})
+    assert r.status_code == 400
+
+
+def test_update_ui_settings_empty_body_400(monkeypatch):
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", lambda cfg: True)
+    c = TestClient(main.app)
+    r = c.post("/api/config/ui-settings", json={})
+    assert r.status_code == 400

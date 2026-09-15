@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { api, type UiSettingsPayload } from './api'
 
 export type Theme = 'dark' | 'light'
 
@@ -12,14 +13,12 @@ export interface TerminalSettings {
   blockMaxLines: number
 }
 
-const STORAGE_KEY = 'ssh-web-tool-settings'
-
-const DEFAULT_SETTINGS: TerminalSettings = {
+export const DEFAULT_SETTINGS: TerminalSettings = {
   theme: 'light',
   fontFamily: 'Consolas, "Microsoft YaHei", monospace',
   fontSize: 13,
   blockBar: true,
-  blockAutoFold: true,
+  blockAutoFold: false, // 折叠默认关闭（可在设置弹窗开启）
   blockMaxLines: 30,
 }
 
@@ -35,28 +34,58 @@ export const FONT_OPTIONS = [
   { label: 'Cascadia Code', value: '"Cascadia Code", Consolas, "Microsoft YaHei", monospace' },
 ]
 
-function loadSettings(): TerminalSettings {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) }
-    }
-  } catch (e) {
-    console.error('加载设置失败', e)
-  }
-  return DEFAULT_SETTINGS
+function clampFontSize(size: number): number {
+  return Math.max(8, Math.min(32, Math.round(size)))
 }
 
-function saveSettings(settings: TerminalSettings) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
-  } catch (e) {
-    console.error('保存设置失败', e)
+/** 前端 camelCase 设置 → 后端 snake_case ui_settings 负载（只映射传入的键，用于部分更新） */
+export function toUiSettingsPayload(partial: Partial<TerminalSettings>): Partial<UiSettingsPayload> {
+  const out: Partial<UiSettingsPayload> = {}
+  if (partial.theme !== undefined) out.theme = partial.theme
+  if (partial.fontFamily !== undefined) out.font_family = partial.fontFamily
+  if (partial.fontSize !== undefined) out.font_size = partial.fontSize
+  if (partial.blockBar !== undefined) out.block_bar = partial.blockBar
+  if (partial.blockAutoFold !== undefined) out.block_auto_fold = partial.blockAutoFold
+  if (partial.blockMaxLines !== undefined) out.block_max_lines = partial.blockMaxLines
+  return out
+}
+
+/** 后端 ui_settings 负载 → 前端设置（逐键校验，非法/缺失键保留 base 默认值） */
+export function applyUiSettings(
+  payload: Partial<UiSettingsPayload> | null | undefined,
+  base: TerminalSettings = DEFAULT_SETTINGS
+): TerminalSettings {
+  const next: TerminalSettings = { ...base }
+  if (!payload) return next
+  if (payload.theme === 'dark' || payload.theme === 'light') next.theme = payload.theme
+  if (typeof payload.font_family === 'string' && payload.font_family.trim()) next.fontFamily = payload.font_family
+  if (typeof payload.font_size === 'number' && Number.isFinite(payload.font_size)) {
+    next.fontSize = clampFontSize(payload.font_size)
   }
+  if (typeof payload.block_bar === 'boolean') next.blockBar = payload.block_bar
+  if (typeof payload.block_auto_fold === 'boolean') next.blockAutoFold = payload.block_auto_fold
+  if (typeof payload.block_max_lines === 'number' && Number.isFinite(payload.block_max_lines)) {
+    next.blockMaxLines = payload.block_max_lines
+  }
+  return next
 }
 
 export function useSettings() {
-  const [settings, setSettings] = useState<TerminalSettings>(loadSettings)
+  const [settings, setSettings] = useState<TerminalSettings>(DEFAULT_SETTINGS)
+
+  // 挂载时从后端 config.json 读取持久化设置（设置不再存 localStorage，只存临时内容）
+  useEffect(() => {
+    let cancelled = false
+    api
+      .getConfig()
+      .then((cfg) => {
+        if (!cancelled) setSettings((prev) => applyUiSettings(cfg.ui_settings, prev))
+      })
+      .catch((e) => console.error('读取 UI 设置失败，使用默认值', e))
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // 应用主题到 document
   useEffect(() => {
@@ -64,11 +93,9 @@ export function useSettings() {
   }, [settings.theme])
 
   const updateSettings = useCallback((partial: Partial<TerminalSettings>) => {
-    setSettings((prev) => {
-      const next = { ...prev, ...partial }
-      saveSettings(next)
-      return next
-    })
+    setSettings((prev) => ({ ...prev, ...partial }))
+    // 持久化到后端 config.json（异步不阻塞 UI，失败仅提示）
+    api.updateUiSettings(toUiSettingsPayload(partial)).catch((e) => console.error('保存 UI 设置失败', e))
   }, [])
 
   const toggleTheme = useCallback(() => {
@@ -80,7 +107,7 @@ export function useSettings() {
   }, [updateSettings])
 
   const setFontSize = useCallback((fontSize: number) => {
-    updateSettings({ fontSize: Math.max(8, Math.min(32, fontSize)) })
+    updateSettings({ fontSize: clampFontSize(fontSize) })
   }, [updateSettings])
 
   return {

@@ -5,6 +5,14 @@
     "auto_find_free_port": true
   },
   "open_browser": true,
-  "fallback_local_shell": "cmd",
-  "debug": false
+  "fallback_local_shell": "powershell",
+  "debug": false,
+  "ui_settings": {
+    "theme": "light",
+    "font_family": "Consolas, \"Microsoft YaHei\", monospace",
+    "font_size": 13,
+    "block_bar": true,
+    "block_auto_fold": false,
+    "block_max_lines": 30
+  }
 }

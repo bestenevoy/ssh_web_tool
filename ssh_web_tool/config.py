@@ -115,6 +115,35 @@ def migrate_legacy_data() -> None:
     _do_migrate_legacy(get_app_dir())
 
 
+# 前端 UI 设置默认值（持久化到 config.json 的 ui_settings 段；逐键校验后透出给前端）
+UI_SETTINGS_DEFAULTS: dict = {
+    "theme": "light",  # light / dark
+    "font_family": 'Consolas, "Microsoft YaHei", monospace',  # 终端字体栈
+    "font_size": 13,  # 终端字号（8-32）
+    "block_bar": True,  # 命令块左侧色条标记
+    "block_auto_fold": False,  # 命令输出超长时自动折叠（默认关）
+    "block_max_lines": 30,  # 自动折叠保留的输出行数
+}
+
+# ui_settings 各键的合法值校验器（返回规范化后的值；非法返回 None 表示回退默认）
+_BLOCK_MAX_LINES_CHOICES = (15, 30, 50, 100, 200)
+
+
+def _validate_ui_setting(key: str, value) -> object | None:
+    """校验单个 ui_settings 键值，返回规范化值；非法返回 None"""
+    if key == "theme":
+        return value if value in ("light", "dark") else None
+    if key == "font_family":
+        return value if isinstance(value, str) and value.strip() else None
+    if key == "font_size":
+        return value if isinstance(value, int) and not isinstance(value, bool) and 8 <= value <= 32 else None
+    if key in ("block_bar", "block_auto_fold"):
+        return value if isinstance(value, bool) else None
+    if key == "block_max_lines":
+        return value if value in _BLOCK_MAX_LINES_CHOICES else None
+    return None  # 未知键一律忽略
+
+
 # 默认配置（无配置文件时的兜底值）
 DEFAULT_CONFIG: dict = {
     "server": {
@@ -123,24 +152,41 @@ DEFAULT_CONFIG: dict = {
         "auto_find_free_port": True,  # 端口被占用时自动寻找空闲端口
     },
     "open_browser": True,  # 启动后延迟自动打开浏览器
-    "fallback_local_shell": "cmd",  # SSH 断开自动切换本机终端时使用的 shell（cmd / powershell / pwsh）
+    # 默认本机终端 shell：左侧「默认终端」条目打开的 shell + SSH 断开后自动进入的 shell
+    "fallback_local_shell": "powershell",
     "debug": False,  # 是否开启 pywebview 调试模式（F12 开发者工具）；开启会略增内存/CPU
+    "ui_settings": dict(UI_SETTINGS_DEFAULTS),  # 前端 UI 设置（主题/字体/命令块等）
 }
 
 # 合法本机 shell 取值
 LOCAL_SHELL_CHOICES = ("cmd", "powershell", "pwsh")
 
 # 顶层标量配置白名单：这些键会在 load_config 时从用户 config.json 合并进来
+# （ui_settings 不在此列：它是子字典，由下方逐键合并逻辑独家处理，整体替换会丢默认值）
 _TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell", "debug")
 
 
 def get_fallback_local_shell(cfg: dict | None = None) -> str:
-    """读取"SSH 断开后切换本机终端"的 shell 配置，非法取值回退 cmd"""
+    """读取默认本机终端 shell 配置（默认终端条目 + SSH 断开后共用），非法取值回退 powershell"""
     c = cfg if cfg is not None else load_config()
-    val = (c or {}).get("fallback_local_shell", "cmd")
+    val = (c or {}).get("fallback_local_shell", "powershell")
     if val not in LOCAL_SHELL_CHOICES:
-        return "cmd"
+        return "powershell"
     return val
+
+
+def get_ui_settings(cfg: dict | None = None) -> dict:
+    """读取前端 UI 设置（逐键校验，非法/缺失键回退默认值）"""
+    c = cfg if cfg is not None else load_config()
+    user_ui = (c or {}).get("ui_settings")
+    result = dict(UI_SETTINGS_DEFAULTS)
+    if isinstance(user_ui, dict):
+        for key in UI_SETTINGS_DEFAULTS:
+            if key in user_ui:
+                validated = _validate_ui_setting(key, user_ui[key])
+                if validated is not None:
+                    result[key] = validated
+    return result
 
 
 def save_config(cfg: dict) -> bool:
@@ -216,6 +262,12 @@ def load_config() -> dict:
         for key in _TOP_LEVEL_KEYS:
             if key in user_cfg:
                 cfg[key] = user_cfg[key]
+        # ui_settings 子字典逐键合并：用户只写部分键时其余键保留默认值（整体替换会丢默认）
+        ui = user_cfg.get("ui_settings")
+        if isinstance(ui, dict):
+            for key, value in ui.items():
+                if key in UI_SETTINGS_DEFAULTS and value is not None:
+                    cfg["ui_settings"][key] = value
     except (json.JSONDecodeError, OSError) as e:
         print(f"[config] 配置文件解析失败，使用默认配置: {e}")
     return cfg

@@ -1,6 +1,16 @@
 // API 调用封装
 import type { Host, HostType, Session, ActiveTerminal, QuickCommand, SftpItem, CommandResult, TerminalState, SavedTerminal } from '../types'
 
+// 后端 ui_settings（config.json 持久化的前端 UI 设置；snake_case）
+export interface UiSettingsPayload {
+  theme: 'dark' | 'light'
+  font_family: string
+  font_size: number
+  block_bar: boolean
+  block_auto_fold: boolean
+  block_max_lines: number
+}
+
 const BASE = ''
 
 async function request<T>(path: string, options?: RequestInit, timeoutMs?: number): Promise<T> {
@@ -39,13 +49,22 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
 
 // 主机管理
 export const api = {
-  // 全局配置
-  getConfig: () => request<{ fallback_local_shell: string; local_shell_choices: string[]; config_file: string }>('/api/config'),
-  // 设置 SSH 断开后自动进入的本机终端（cmd / powershell / pwsh）
+  // 全局配置（含 ui_settings：前端 UI 设置，持久化在 config.json）
+  getConfig: () =>
+    request<{ fallback_local_shell: string; local_shell_choices: string[]; ui_settings: UiSettingsPayload; config_file: string }>(
+      '/api/config'
+    ),
+  // 设置默认本机终端 shell（默认终端条目 + SSH 断开后自动进入共用）
   setFallbackShell: (shell: string) =>
     request<{ status: string; fallback_local_shell: string }>('/api/config/fallback-shell', {
       method: 'POST',
       body: JSON.stringify({ shell }),
+    }),
+  // 部分更新前端 UI 设置（只传需要修改的键，非法值后端返回 400）
+  updateUiSettings: (partial: Partial<UiSettingsPayload>) =>
+    request<{ status: string; ui_settings: UiSettingsPayload }>('/api/config/ui-settings', {
+      method: 'POST',
+      body: JSON.stringify(partial),
     }),
 
   // 主机

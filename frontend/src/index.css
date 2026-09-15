@@ -112,24 +112,6 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   color: var(--text-primary);
 }
 
-/* 顶栏命令块开关（块标记 / 自动折叠 / 保留行数） */
-.settings-toggle {
-  display: inline-flex; align-items: center; gap: 3px;
-  font-size: 11px; color: var(--text-secondary);
-  cursor: pointer; user-select: none; white-space: nowrap;
-}
-.settings-toggle input { cursor: pointer; accent-color: var(--accent); }
-.settings-max-lines {
-  padding: 3px 4px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-primary);
-  font-size: 11px; font-family: inherit;
-  cursor: pointer; outline: none;
-}
-.settings-max-lines option { background: var(--bg-secondary); color: var(--text-primary); }
-
 .btn {
   padding: 5px 12px; border: none; border-radius: 4px; font-size: 12px;
   cursor: pointer; transition: all .15s; font-family: inherit;
@@ -571,6 +553,34 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 .form-row .form-group { flex: 1; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 
+/* 设置弹窗（分区块布局；设置持久化到 config.json，localStorage 仅存临时内容） */
+.settings-modal { width: 460px; max-height: 86vh; overflow-y: auto; }
+.settings-modal-section {
+  border: 1px solid var(--border-color); border-radius: 6px;
+  padding: 10px 12px; margin-bottom: 10px;
+}
+.settings-modal-title {
+  font-size: 11px; font-weight: 600; color: var(--accent);
+  margin-bottom: 8px; letter-spacing: .5px;
+}
+.settings-modal-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 8px; min-height: 24px;
+}
+.settings-modal-row:last-child { margin-bottom: 0; }
+.settings-modal-row > label {
+  font-size: 12px; color: var(--text-secondary); flex: 1; cursor: default;
+}
+.settings-modal-row select, .settings-modal-row input[type="range"] {
+  flex-shrink: 0; max-width: 220px;
+  padding: 4px 8px; background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: 4px; color: var(--text-primary); font-size: 12px; font-family: inherit;
+}
+.settings-modal-row input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.settings-modal-hint {
+  font-size: 10px; color: var(--text-tertiary); margin-top: 6px; word-break: break-all;
+}
+
 /* 拖拽提示 */
 #dropHint {
   display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -656,32 +666,14 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 }
 .host-search-group-btn:hover { border-color: #e94560; color: #e94560; }
 
-/* 本机终端入口（cmd / powershell，不经过 SSH） */
-.local-terminal-bar {
-  display: flex; gap: 6px; align-items: center;
-  padding: 6px 10px; border-bottom: 1px solid var(--border-color);
+/* 默认终端条目（单行，host-item 风格；点击打开配置的默认本机 shell） */
+.local-default-terminal { margin-bottom: 6px; }
+.local-default-terminal .default-shell-label {
+  font-size: 10px; color: #4caf50; background: rgba(76, 175, 80, 0.1);
+  border: 1px solid rgba(76, 175, 80, 0.35); border-radius: 8px;
+  padding: 1px 7px; flex-shrink: 0; white-space: nowrap;
 }
-.local-terminal-label {
-  font-size: 10px; color: var(--text-tertiary); flex-shrink: 0;
-}
-.local-terminal-btn {
-  background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px;
-  color: var(--text-secondary); cursor: pointer; font-size: 11px;
-  padding: 3px 10px; font-family: inherit; transition: all .15s;
-}
-.local-terminal-btn:hover {
-  border-color: #4caf50; color: #4caf50; background: rgba(76, 175, 80, 0.08);
-}
-.fallback-shell-select {
-  background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px;
-  color: var(--text-secondary); font-size: 11px; padding: 3px 4px; font-family: inherit;
-  cursor: pointer; flex-shrink: 0; max-width: 88px;
-}
-.fallback-shell-select:focus { outline: none; border-color: #4caf50; }
-.config-path-hint {
-  font-size: 10px; color: var(--text-tertiary); padding: 2px 10px 6px;
-  border-bottom: 1px solid var(--border-color); word-break: break-all;
-}
+.local-default-terminal:hover .default-shell-label { background: rgba(76, 175, 80, 0.18); }
 
 /* 分组管理面板 */
 .group-add-row { display: flex; gap: 8px; margin-bottom: 12px; }

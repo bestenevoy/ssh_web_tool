@@ -7,11 +7,9 @@ interface Props {
   hostTypes: HostType[]
   groups: string[]
   activeHostId: string | null
-  fallbackShell: string
-  configFile: string
-  onSetFallbackShell: (shell: string) => void
+  defaultShell: string
+  onOpenDefaultTerminal: () => void
   onHostClick: (host: Host) => void
-  onOpenLocalTerminal: (shell: 'cmd' | 'powershell') => void
   onEdit: (host: Host) => void
   onDelete: (host: Host) => void
   onCopy: (host: Host) => void
@@ -20,6 +18,9 @@ interface Props {
   onReorderHosts: (ids: string[]) => void
 }
 
+// 默认终端条目右侧的 shell 显示名
+const SHELL_LABELS: Record<string, string> = { cmd: 'cmd', powershell: 'PowerShell', pwsh: 'pwsh' }
+
 // 格式化连接时长：xx秒 / xx分钟 / xx小时
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.max(1, seconds)}秒`
@@ -27,7 +28,7 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
 }
 
-export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, fallbackShell, configFile, onSetFallbackShell, onHostClick, onOpenLocalTerminal, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -173,22 +174,18 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
         )}
         <button className="host-search-group-btn" onClick={onManageGroups} title="管理分组">📁</button>
       </div>
-      <div className="local-terminal-bar" title="打开本机终端（不经过 SSH）">
-        <span className="local-terminal-label">本机</span>
-        <button className="local-terminal-btn" onClick={() => onOpenLocalTerminal('cmd')}>cmd</button>
-        <button className="local-terminal-btn" onClick={() => onOpenLocalTerminal('powershell')}>PowerShell</button>
-        <span className="local-terminal-label" title="SSH 断开后自动进入的本机终端">断开后</span>
-        <select
-          className="fallback-shell-select"
-          value={fallbackShell}
-          onChange={(e) => onSetFallbackShell(e.target.value)}
-          title="SSH 连接断开后自动切换到哪种本机终端"
-        >
-          <option value="cmd">cmd</option>
-          <option value="powershell">PowerShell</option>
-        </select>
+      {/* 默认终端：单行条目，打开配置的默认本机 shell（不经过 SSH） */}
+      <div
+        className="host-item local-default-terminal"
+        onClick={onOpenDefaultTerminal}
+        title={`打开本机 ${SHELL_LABELS[defaultShell] || defaultShell} 终端（不经过 SSH）`}
+      >
+        <span className="type-dot" style={{ background: '#10b981' }} />
+        <div className="host-info">
+          <div className="host-name">默认终端</div>
+        </div>
+        <span className="default-shell-label">{SHELL_LABELS[defaultShell] || defaultShell}</span>
       </div>
-      <div className="config-path-hint" title="编辑此文件后重启生效">配置文件：{configFile || '（加载中）'}</div>
       {orderedGroups.map((group) => {
         const groupHosts = grouped[group] || []
         if (groupHosts.length === 0) return null
@@ -260,7 +257,7 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
       })}
       {hosts.length === 0 && (
         <div style={{ textAlign: 'center', color: '#3a4a6a', padding: '30px 10px', fontSize: 11 }}>
-          暂无主机<br />点击右上角「+ 新建主机」添加
+          暂无主机<br />点击左侧「＋」新建主机
         </div>
       )}
     </div>
