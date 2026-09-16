@@ -78,7 +78,7 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
     }
   }
 
-  /** 关闭前先提交正则草稿（Esc / 点遮罩 / 完成按钮统一走这里） */
+  /** 关闭前先提交正则草稿（Esc / 完成按钮统一走这里；遮罩点击不关闭，见 AGENTS.md UI 交互规范） */
   function handleClose() {
     commitPatterns()
     onClose()
@@ -90,7 +90,7 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
   }
 
   return (
-    <div className="modal-overlay show" onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}>
+    <div className="modal-overlay show">
       <div className="modal settings-modal">
         <h3>⚙️ 设置</h3>
 
