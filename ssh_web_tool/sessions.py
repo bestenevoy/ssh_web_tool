@@ -19,6 +19,7 @@ import asyncssh
 from fastapi import WebSocket
 
 from . import prompt_detect
+from .config import get_connect_timeout
 from .echo_parser import EchoParser
 from .output_bus import OutputBus
 from .ps_history import PSReadlineTailer, TailerLike
@@ -333,8 +334,8 @@ class SSHSession:
 
     # TCP 建连超时：目标主机不可达时（SYN 无响应/防火墙丢弃）asyncssh 默认会
     # 重试很久，导致 WebSocket 消息循环被 await 阻塞、整窗卡死无法操作。
-    # connect_timeout 限制 TCP 建连；认证阶段另有 main.py 外层总超时兜底
-    CONNECT_TIMEOUT = 10.0
+    # 超时秒数从全局配置读取（config.json connect_timeout，1-300 默认 10）；
+    # 认证阶段另有路由层外层总超时兜底
 
     async def connect(self, password: str | None = None, private_key: str | None = None, passphrase: str | None = None):
         """建立 SSH 连接（带 keepalive 防止空闲超时断开）"""
@@ -350,7 +351,7 @@ class SSHSession:
             "known_hosts": None,  # 跳过主机密钥校验（本地工具简化处理）
             "keepalive_interval": 10,  # 每 10 秒发送 keepalive 包，防止空闲超时断开
             "keepalive_count_max": 2,  # 2 次 keepalive 无响应（约 20s）即判定连接断开，快速发现静默断线
-            "connect_timeout": self.CONNECT_TIMEOUT,  # TCP 建连超时，防不可达主机卡死
+            "connect_timeout": get_connect_timeout(),  # TCP 建连超时（配置化），防不可达主机卡死
         }
         if password:
             kwargs["password"] = password
@@ -552,8 +553,9 @@ class SSHSession:
         from .event_bus import event_bus
 
         try:
-            # 总超时兜底：连接阶段最多 30s（connect 内部还有 TCP connect_timeout）
-            async with asyncio.timeout(30):  # type: ignore[attr-defined]
+            # 总超时兜底：max(30s, 配置超时×3)——覆盖 TCP 建连 + 认证 + 启动 shell 的余量，
+            # 用户把 connect_timeout 调大时外层同步放大，避免外层先于建连超时触发
+            async with asyncio.timeout(max(30.0, get_connect_timeout() * 3)):  # type: ignore[attr-defined]
                 await self.switch_to_ssh(ssh_host, ssh_port, ssh_user, ssh_pass)
             await websocket.send_json(
                 {
@@ -698,7 +700,8 @@ class SSHSession:
     async def start_local_shell(self, shell: str = "cmd", cols: int = 120, rows: int = 40, start_reader: bool = True):
         """启动本机交互式 shell（WinPTY）。SSH 断开自动切换或用户主动创建本地终端时调用
 
-        - shell: 'cmd' / 'powershell' / 'pwsh'
+        - shell: 短标识 'cmd' / 'powershell' / 'pwsh'，或 detect_local_shells 扫描出的
+          可执行文件完整路径（本机终端检测功能引入，路径直接 spawn）
         - start_reader: 是否立即启动输出读取器。HTTP API 创建本机终端时传 False，
           由后续 WebSocket 连接的 start_output_reader 统一启动，确保 listener 先注册，
           避免初始提示符输出在无 listener 时被丢弃导致前端永远等不到首包。
@@ -708,8 +711,12 @@ class SSHSession:
             argv = ["powershell.exe", "-NoLogo"]
         elif shell == "pwsh":
             argv = ["pwsh", "-NoLogo"]
-        else:
+        elif shell == "cmd":
             argv = ["cmd.exe"]
+        else:
+            # 其它检测到的 shell：完整路径直接启动（无附加参数）；路径非法时
+            # spawn 会抛错，由调用方捕获（HTTP 路由返回 400）
+            argv = [shell]
         try:
             import winpty  # noqa: F401 — 仅检测可用性，实际使用 winpty._winpty.PTY
         except ImportError as e:

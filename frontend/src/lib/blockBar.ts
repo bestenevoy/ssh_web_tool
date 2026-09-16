@@ -3,10 +3,11 @@
  *
  * 折叠本体在 folds.ts（FoldStore）：直接 splice xterm buffer 抽出 body 行，
  * 折叠后 buffer 实际行数减少（滚动条变短）；本文件只负责渲染与交互——
- *   - 色条：每块一条左侧色条，折叠态降透明度；
+ *   - 色条：每块一条左侧色条，折叠态降透明度、选中态加描边光环；
  *   - 徽标：折叠块在提示符行上叠加「⋯ 已折叠 N 行，点击展开」；
- *   - 交互：点色条折叠/展开、点徽标展开、双击色条复制块内容
- *     （折叠块复制走 fold.savedLines，见 copyBlockText）。
+ *   - 交互：单击色条选中块（rssh Finder 风格：Shift 范围 / Ctrl 切换）、
+ *     点徽标展开、双击色条复制块内容（折叠块复制走 fold.savedLines）、
+ *     折叠/展开走终端右键菜单（hitTest + toggleFold 供 App 层菜单使用）。
  *
  * 不变量与私有 API 全部收口在 folds.ts（本文件零私有 API，只用
  * buffer/marker/viewportY 公开接口），xterm 升级只需复核 folds.ts。
@@ -25,6 +26,7 @@ import type { CommandBlock, CommandBlockTracker } from './commandBlocks'
 import { createFoldStore } from './folds'
 import type { FoldStore } from './folds'
 import { compilePromptPatterns } from './promptPatterns'
+import { writeClipboardText } from './terminalCopy'
 import { TERMINAL_SCROLLBACK_LINES } from './terminalInstance'
 
 export interface BlockBarController {
@@ -38,6 +40,18 @@ export interface BlockBarController {
   handleTerminalReset(): void
   /** 搜索打开期间暂停自动折叠（保证 unfoldAll 后内容不被再次折起）。 */
   setSearchActive(active: boolean): void
+  /** 命中测试：屏幕坐标 → 左侧色条区命中的块 id（未命中/色条关闭返回 null）。 */
+  hitTest(clientX: number, clientY: number): number | null
+  /** 选中块 id 快照（rssh Finder 风格多选）。 */
+  getSelection(): number[]
+  /** 排他选中单块并顺带选中文本（单击语义，让 Ctrl+C 直接复制单块输出）。 */
+  selectBlock(id: number): void
+  clearSelection(): void
+  isFolded(id: number): boolean
+  /** 折叠/展开单块（右键菜单用）：已折叠展开，未折叠且已关闭块则折叠。 */
+  toggleFold(id: number): void
+  /** 复制一个或多个块内容（多块按块序拼接，块间空行分隔）。 */
+  copyBlocks(ids: number[]): void
   dispose(): void
 }
 
@@ -71,6 +85,91 @@ export function attachBlockBar(
   let trackerChangeSub: { dispose(): void } | null = null
   // foldStore 的 onChange 订阅同理（重建时更换）
   let foldStoreChangeSub: { dispose(): void } | null = null
+
+  // ---- 色块选中（rssh TerminalPane 同款 Finder 风格多选）----
+  //   单击 → 排他选中 + 顺带选中文本；Shift+click → 锚点..目标范围（锚点不动）；
+  //   Ctrl/Cmd+click → toggle（锚点移到此块）；点 bar 外 → 清空；Esc → 清空。
+  const selectedIds = new Set<number>()
+  let selectionAnchorId: number | null = null
+
+  /** 块当前可见终点行（full 折叠抽走 body 后只剩提示符行；运行中块随光标增长）。 */
+  function endLineOf(b: CommandBlock): number {
+    const f = foldStore?.getFold(b.id)
+    if (f && f.kind === 'full') return b.start.line
+    const cursorAbs = term.buffer.active.baseY + term.buffer.active.cursorY
+    return b.end && !b.end.isDisposed ? b.end.line : cursorAbs
+  }
+
+  function clearSelection() {
+    if (selectedIds.size > 0) scheduleRedraw()
+    selectedIds.clear()
+    selectionAnchorId = null
+  }
+
+  function singleSelect(id: number) {
+    selectedIds.clear()
+    selectedIds.add(id)
+    selectionAnchorId = id
+    scheduleRedraw()
+    // 顺带选中文本——单块复制是最高频场景，Ctrl+C 直接走通
+    const b = tracker.blocks.find((x) => x.id === id)
+    if (b && !b.start.isDisposed) {
+      try { term.selectLines(b.start.line, endLineOf(b)) } catch { /* 备用缓冲区等场景忽略 */ }
+    }
+  }
+
+  function toggleSelect(id: number) {
+    if (selectedIds.has(id)) selectedIds.delete(id)
+    else selectedIds.add(id)
+    selectionAnchorId = id
+    scheduleRedraw()
+  }
+
+  function rangeSelectTo(id: number) {
+    // 没 anchor 时退化为单击——Finder 同款行为
+    if (selectionAnchorId === null) {
+      singleSelect(id)
+      return
+    }
+    const lo = Math.min(selectionAnchorId, id)
+    const hi = Math.max(selectionAnchorId, id)
+    selectedIds.clear()
+    for (const b of tracker.blocks) {
+      if (b.id >= lo && b.id <= hi) selectedIds.add(b.id)
+    }
+    // anchor 不动：shift 是"扩展"，不重置锚点
+    scheduleRedraw()
+  }
+
+  /** 块被 scrollback GC 后从选中集合剪枝（新块复用旧 id 会"鬼选中"） */
+  function pruneSelection() {
+    if (selectedIds.size === 0) return
+    const alive = new Set(tracker.blocks.map((b) => b.id))
+    for (const id of selectedIds) {
+      if (!alive.has(id)) selectedIds.delete(id)
+    }
+    if (selectionAnchorId !== null && !alive.has(selectionAnchorId)) selectionAnchorId = null
+  }
+
+  /** tracker 变化统一回调：GC 剪枝选中集合 + 重绘（重建 tracker 后同样接线） */
+  function onTrackerChanged() {
+    pruneSelection()
+    scheduleRedraw()
+  }
+
+  // 点 bar 外（且不在右键菜单内）清空选中；Esc 清空但不拦截（Esc 仍要送到 shell）
+  const onWindowMouseDown = (ev: MouseEvent) => {
+    if (selectedIds.size === 0) return
+    const t = ev.target as Element | null
+    if (!t) return
+    if (t.closest('.block-bar-overlay') || t.closest('.ctx-menu')) return
+    clearSelection()
+  }
+  const onWindowKeyDown = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape' && selectedIds.size > 0) clearSelection()
+  }
+  window.addEventListener('mousedown', onWindowMouseDown)
+  window.addEventListener('keydown', onWindowKeyDown)
 
   /** 按 maxLines 等当前设置创建 FoldStore（tracker 之后——订阅顺序：tracker 先、fold 后）。 */
   function createFoldStoreFor() {
@@ -106,7 +205,7 @@ export function attachBlockBar(
       extraPromptPatterns: compilePromptPatterns(s.customPromptPatterns),
       onReset: () => foldStore?.discardAll(),
     })
-    trackerChangeSub = tracker.onChange(scheduleRedraw)
+    trackerChangeSub = tracker.onChange(onTrackerChanged)
     createFoldStoreFor() // 新 tracker 无块，fold 从零开始
     lastSig = '' // 新 tracker 无块，sig 可能与旧值相同，强制重绘
     scheduleRedraw()
@@ -138,10 +237,46 @@ export function attachBlockBar(
       })
     }
   }
-  trackerChangeSub = tracker.onChange(scheduleRedraw) // 初始订阅（重建时由 rebuildTrackerIfNeeded 更换）
+  trackerChangeSub = tracker.onChange(onTrackerChanged) // 初始订阅（重建时由 rebuildTrackerIfNeeded 更换）
   createFoldStoreFor()
 
   // ---- 几何与渲染 ----
+
+  interface BarGeometry {
+    rowHeight: number
+    originTop: number
+    originLeft: number
+    viewportY: number
+    visBot: number
+  }
+
+  /** 几何测量（redraw 与 hitTest 共用）：行高/容器内原点/视口范围；不可测返回 null */
+  function measureGeometry(): BarGeometry | null {
+    const active = term.buffer.active
+    // 备用缓冲区（vim/top/less）：行号坐标系完全不同，无法换算
+    if (active.type !== 'normal') return null
+    // 行高测量：优先实测 .xterm-rows（渲染器会内联设置其高度），
+    // .xterm-screen 作退路（部分渲染器盒高为 0）
+    const rowsEl = term.element?.querySelector('.xterm-rows') as HTMLElement | null
+    const screen = term.element?.querySelector('.xterm-screen') as HTMLElement | null
+    if (!rowsEl && !screen) return null
+    const rowsRect = rowsEl?.getBoundingClientRect()
+    const screenRect = screen?.getBoundingClientRect()
+    const originRect = rowsRect && rowsRect.height > 0 ? rowsRect : (screenRect && screenRect.height > 0 ? screenRect : null)
+    let rowHeight = 0
+    if (rowsRect && rowsRect.height > 0) rowHeight = rowsRect.height / term.rows
+    else if (screenRect && screenRect.height > 0) rowHeight = screenRect.height / term.rows
+    if (!originRect || rowHeight <= 0 || term.rows <= 0) return null
+    const containerRect = container.getBoundingClientRect()
+    const viewportY = active.viewportY
+    return {
+      rowHeight,
+      originTop: originRect.top - containerRect.top,
+      originLeft: originRect.left - containerRect.left,
+      viewportY,
+      visBot: viewportY + term.rows - 1,
+    }
+  }
 
   let lastSig = ''
   function redraw() {
@@ -153,33 +288,18 @@ export function attachBlockBar(
       lastSig = ''
       return
     }
-    // 行高测量：优先实测 .xterm-rows（渲染器会内联设置其高度），
-    // .xterm-screen 作退路（部分渲染器盒高为 0）
-    const rowsEl = term.element?.querySelector('.xterm-rows') as HTMLElement | null
-    const screen = term.element?.querySelector('.xterm-screen') as HTMLElement | null
-    if (!rowsEl && !screen) return
-    const rowsRect = rowsEl?.getBoundingClientRect()
-    const screenRect = screen?.getBoundingClientRect()
-    const originRect = rowsRect && rowsRect.height > 0 ? rowsRect : (screenRect && screenRect.height > 0 ? screenRect : null)
-    let rowHeight = 0
-    if (rowsRect && rowsRect.height > 0) rowHeight = rowsRect.height / term.rows
-    else if (screenRect && screenRect.height > 0) rowHeight = screenRect.height / term.rows
-    if (!originRect || rowHeight <= 0 || term.rows <= 0) {
+    const g = measureGeometry()
+    if (!g) {
       overlay.style.display = 'none'
       return
     }
     overlay.style.display = 'block'
-
-    const viewportY = active.viewportY
+    const { rowHeight, originTop, originLeft, viewportY, visBot } = g
     const cursorAbs = active.baseY + active.cursorY
-    const visBot = viewportY + term.rows - 1
-    const containerRect = container.getBoundingClientRect()
-    const originTop = originRect.top - containerRect.top
-    const originLeft = originRect.left - containerRect.left
 
     const bars: string[] = []
     const badges: string[] = []
-    let sig = `${viewportY}|${term.rows}|`
+    let sig = `${viewportY}|${term.rows}|${selectedIds.size}|`
     for (const b of tracker.blocks) {
       if (b.start.isDisposed) continue
       const f = foldStore?.getFold(b.id)
@@ -188,18 +308,19 @@ export function attachBlockBar(
       let endLine = b.end && !b.end.isDisposed ? b.end.line : cursorAbs
       if (f && f.kind === 'full') endLine = b.start.line
       if (endLine < b.start.line) continue
-      // 色条覆盖可见范围（折叠态画虚线感——透明度减半）
+      // 色条覆盖可见范围（折叠态画虚线感——透明度减半；选中态加描边光环）
       const t = Math.max(b.start.line, viewportY)
       const btm = Math.min(endLine, visBot)
       const folded = !!f
+      const selected = selectedIds.has(b.id)
       if (btm >= t) {
         const top = originTop + (t - viewportY) * rowHeight
         const h = (btm - t + 1) * rowHeight
         bars.push(
           `<rect class="block-hit" data-block="${b.id}" x="0" y="${top.toFixed(1)}" width="${HIT_WIDTH}" height="${h.toFixed(1)}" fill="transparent"></rect>` +
-          `<rect class="block-bar${folded ? ' folded' : ''}" x="${((BAR_ZONE_PX - BAR_WIDTH) / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${BAR_WIDTH}" height="${h.toFixed(1)}" rx="1.5" fill="${b.color}"></rect>`,
+          `<rect class="block-bar${folded ? ' folded' : ''}${selected ? ' selected' : ''}" x="${((BAR_ZONE_PX - BAR_WIDTH) / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${BAR_WIDTH}" height="${h.toFixed(1)}" rx="1.5" fill="${b.color}"></rect>`,
         )
-        sig += `${b.id}:${t}-${btm}${folded ? 'F' : ''};`
+        sig += `${b.id}:${t}-${btm}${folded ? 'F' : ''}${selected ? 'S' : ''};`
       }
       // 折叠徽标：定位在提示符行，仅可见时绘制
       if (f && b.start.line >= viewportY && b.start.line <= visBot) {
@@ -218,10 +339,28 @@ export function attachBlockBar(
     overlay.insertAdjacentHTML('beforeend', badges.join(''))
   }
 
+  /** 命中测试：屏幕坐标 → 左侧色条区命中的块 id（终端右键菜单据此决定块操作项） */
+  function hitTest(clientX: number, clientY: number): number | null {
+    if (disposed || !enabled) return null
+    const g = measureGeometry()
+    if (!g) return null
+    const containerRect = container.getBoundingClientRect()
+    const x = clientX - containerRect.left
+    // 命中区放宽 4px：色条 14px 窄区 + 少量余量，右键更容易命中
+    if (x < -4 || x > BAR_ZONE_PX + 4) return null
+    const line = g.viewportY + Math.floor((clientY - containerRect.top - g.originTop) / g.rowHeight)
+    for (const b of tracker.blocks) {
+      if (b.start.isDisposed) continue
+      if (line >= b.start.line && line <= endLineOf(b)) return b.id
+    }
+    return null
+  }
+
   // ---- 交互 ----
 
-  function copyBlockText(b: CommandBlock) {
-    if (b.start.isDisposed) return
+  /** 块内容 → 文本（折叠块走 savedLines，rssh block-content 同款；软换行合并） */
+  function blockText(b: CommandBlock): string {
+    if (b.start.isDisposed) return ''
     const f = foldStore?.getFold(b.id)
     const lines: string[] = []
     // BufferLine → 文本（行尾 trim；isWrapped 软换行合并到上一行）
@@ -243,9 +382,17 @@ export function attachBlockBar(
       const endLine = b.end && !b.end.isDisposed ? b.end.line : cursorAbs
       for (let y = b.start.line; y <= endLine; y++) pushLine(buf.getLine(y))
     }
-    const text = lines.join('\n')
+    return lines.join('\n')
+  }
+
+  function writeBlockClipboard(text: string) {
     if (!text) return
-    navigator.clipboard.writeText(text).catch(() => {})
+    // 统一走三级兜底（pywebview 桥 → navigator.clipboard → execCommand）
+    writeClipboardText(text)
+  }
+
+  function copyBlockText(b: CommandBlock) {
+    writeBlockClipboard(blockText(b))
   }
 
   const onClick = (ev: MouseEvent) => {
@@ -259,14 +406,13 @@ export function attachBlockBar(
     }
     const b = tracker.blocks.find((x) => x.id === id)
     if (!b) return
-    // 点色条 → 切换折叠（仅已关闭块可折叠——运行中块终点会漂移，抽不住）
-    if (foldStore?.isFolded(b.id)) {
-      foldStore.unfold(b.id)
-    } else if (b.end && !b.end.isDisposed && !b.start.isDisposed) {
-      foldStore?.fold(b.id)
-    }
+    // 点色条 → 选中块（rssh Finder 风格：Shift 范围 / Ctrl 切换 / 单击排他）；
+    // 折叠/展开改走右键菜单（点徽标仍可直接展开），双击复制保留
+    if (ev.shiftKey) rangeSelectTo(id)
+    else if (ev.ctrlKey || ev.metaKey) toggleSelect(id)
+    else singleSelect(id)
   }
-  // 双击色条复制块内容（双击前会触发两次 click，折叠状态翻转两次复原，无副作用）
+  // 双击色条复制块内容（双击前会触发两次 click，单击选中同一块两次，无副作用）
   const onDblClick = (ev: MouseEvent) => {
     const el = (ev.target as Element).closest('rect.block-hit') as SVGRectElement | null
     if (!el) return
@@ -324,10 +470,40 @@ export function attachBlockBar(
     setSearchActive(active: boolean) {
       searchActive = active
     },
+    hitTest,
+    getSelection(): number[] {
+      return [...selectedIds]
+    },
+    selectBlock(id: number) {
+      singleSelect(id)
+    },
+    clearSelection,
+    isFolded(id: number): boolean {
+      return !!foldStore?.isFolded(id)
+    },
+    toggleFold(id: number) {
+      if (!foldStore) return
+      const b = tracker.blocks.find((x) => x.id === id)
+      if (!b || b.start.isDisposed) return
+      if (foldStore.isFolded(id)) foldStore.unfold(id)
+      // 仅已关闭块可折叠——运行中块终点会漂移，抽不住
+      else if (b.end && !b.end.isDisposed) foldStore.fold(id)
+    },
+    copyBlocks(ids: number[]) {
+      const blocks = ids
+        .map((id) => tracker.blocks.find((x) => x.id === id))
+        .filter((b): b is CommandBlock => !!b && !b.start.isDisposed)
+        .sort((a, b) => a.id - b.id)
+      if (blocks.length === 0) return
+      // 多块按块序拼接，块间空行分隔
+      writeBlockClipboard(blocks.map(blockText).filter(Boolean).join('\n\n'))
+    },
     dispose() {
       disposed = true
       if (rafId) cancelAnimationFrame(rafId)
       rafId = 0
+      window.removeEventListener('mousedown', onWindowMouseDown)
+      window.removeEventListener('keydown', onWindowKeyDown)
       overlay.removeEventListener('click', onClick)
       overlay.removeEventListener('dblclick', onDblClick)
       disposables.forEach((d) => d.dispose())

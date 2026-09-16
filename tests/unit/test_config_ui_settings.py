@@ -128,3 +128,74 @@ def test_new_block_keys_partial_config(tmp_app_dir):
     got = cfg_mod.get_ui_settings()
     assert got["block_split_mode"] == "enter"
     assert got["custom_prompt_patterns"] == ["mini>"]
+
+
+# ============ 关键字高亮规则（highlight_rules，rssh 同款） ============
+
+
+def _rule(keyword="ERROR", name="错误", color="#FF6B6B", enabled: object = True, case: object = False):
+    # enabled/case 用 object：测试会故意喂非法值（非 bool）
+    return {"keyword": keyword, "name": name, "color": color, "enabled": enabled, "is_case_sensitive": case}
+
+
+def test_default_highlight_rules(tmp_app_dir):
+    """默认 9 条规则（rssh 同款），字段齐全"""
+    got = cfg_mod.get_ui_settings()
+    rules = got["highlight_rules"]
+    assert isinstance(rules, list) and len(rules) == 9
+    assert all(set(r) == {"keyword", "name", "color", "enabled", "is_case_sensitive"} for r in rules)
+
+
+def test_validate_highlight_rules_filters_and_dedups():
+    """逐项过滤非法条目 + keyword 去重（keyword 是规则身份键）"""
+    v = cfg_mod._validate_ui_setting
+    got = v(
+        "highlight_rules",
+        [_rule(), _rule(), _rule(keyword="", name="空"), _rule(keyword="X", name=""), _rule(color="red"), "junk", 42],
+    )
+    assert got == [_rule()]
+    # 相同 keyword 只保留首条
+    assert v("highlight_rules", [_rule(name="a"), _rule(name="b")]) == [_rule(name="a")]
+
+
+def test_validate_highlight_rules_limits():
+    """条数/keyword 长度/名称长度上限与颜色格式"""
+    v = cfg_mod._validate_ui_setting
+    many = [_rule(keyword=f"k{i}", name=f"n{i}") for i in range(60)]
+    filtered = v("highlight_rules", many)
+    assert isinstance(filtered, list) and len(filtered) == 50
+    assert v("highlight_rules", [_rule(keyword="a" * 201)]) == []
+    assert v("highlight_rules", [_rule(name="x" * 101)]) == []
+    assert v("highlight_rules", [_rule(color="#12345")]) == []  # 5 位 hex 非法
+    assert v("highlight_rules", [_rule(color="red")]) == []  # 非 hex 非法
+    assert v("highlight_rules", [_rule(color="#abcdEf")]) == [_rule(color="#ABCDEF")]  # 规范化为大写
+
+
+def test_validate_highlight_rules_bool_fields_required():
+    """enabled / is_case_sensitive 必须是 bool"""
+    v = cfg_mod._validate_ui_setting
+    assert v("highlight_rules", [_rule(enabled="yes")]) == []
+    assert v("highlight_rules", [_rule(case=1)]) == []
+
+
+def test_validate_highlight_rules_not_list_falls_back():
+    """整体不是列表 → 回退默认（None），与 custom_prompt_patterns 同语义"""
+    assert cfg_mod._validate_ui_setting("highlight_rules", "ERROR") is None
+    assert cfg_mod._validate_ui_setting("highlight_rules", {"keyword": "x"}) is None
+
+
+def test_highlight_rules_roundtrip(tmp_app_dir):
+    """save_config 写入后 get_ui_settings 能读到同一值"""
+    rules = [_rule(keyword="WARN", color="#FFD060")]
+    cfg = cfg_mod.load_config()
+    cfg["ui_settings"]["highlight_rules"] = rules
+    assert cfg_mod.save_config(cfg) is True
+    assert cfg_mod.get_ui_settings()["highlight_rules"] == rules
+
+
+def test_highlight_rules_partial_config_falls_back_default(tmp_app_dir):
+    """旧配置无 highlight_rules 键时回退默认 9 条"""
+    (tmp_app_dir / "config.json").write_text(json.dumps({"ui_settings": {"theme": "dark"}}), encoding="utf-8")
+    got = cfg_mod.get_ui_settings()
+    assert got["theme"] == "dark"
+    assert len(got["highlight_rules"]) == 9

@@ -170,16 +170,7 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   font-size: 9px; background: var(--accent); color: #fff; padding: 1px 5px;
   border-radius: 8px; min-width: 16px; text-align: center;
 }
-.host-item .actions {
-  display: none; gap: 3px; position: absolute; right: 6px; top: 50%;
-  transform: translateY(-50%); background: var(--bg-secondary); padding: 2px; border-radius: 4px;
-}
-.host-item:hover .actions { display: flex; }
-.host-item .action-btn {
-  font-size: 11px; padding: 1px 4px; border-radius: 3px; cursor: pointer;
-  color: var(--text-tertiary); background: none; border: none;
-}
-.host-item .action-btn:hover { color: #fff; background: var(--border-light); }
+/* 主机条目操作已收编进右键菜单（原 hover 按钮组已移除） */
 
 /* 中间终端区域 */
 .terminal-area { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg-primary); }
@@ -230,6 +221,13 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 .block-bar-svg .block-hit { pointer-events: auto; cursor: pointer; }
 .block-bar-svg .block-bar { pointer-events: none; }
 .block-bar-svg .block-bar.folded { opacity: 0.35; }
+/* 选中态（rssh Finder 风格）：描边 + 光环，折叠态选中仍保持高可见 */
+.block-bar-svg .block-bar.selected {
+  opacity: 1;
+  stroke: var(--accent);
+  stroke-width: 1;
+  filter: drop-shadow(0 0 3px var(--accent));
+}
 /* 折叠徽标：定位在折叠块的提示符行上，点击展开 */
 .block-fold-badge {
   position: absolute;
@@ -285,6 +283,8 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   line-height: 1;
 }
 .terminal-search-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+/* 激活态：区分大小写 / 正则表达式 开关开启 */
+.terminal-search-btn.active { background: #e94560; color: #fff; }
 
 .terminal-starting {
   position: absolute; inset: 0; z-index: 10;
@@ -628,6 +628,62 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 .settings-pattern-input:focus { outline: none; border-color: var(--accent); }
 .settings-pattern-error { font-size: 11px; color: #e06c75; margin-top: 4px; }
 
+/* 设置弹窗：配置文件「打开目录」按钮 + 结果消息 */
+.settings-open-dir-btn { margin-left: 8px; }
+.settings-open-dir-msg { margin-top: 4px; color: var(--text-secondary); }
+
+/* 设置弹窗：关键字高亮规则列表（颜色块 / 名称 / 启用 / 编辑 / 删除） */
+.settings-hl-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-height: 24px;
+}
+.settings-hl-row:last-of-type { margin-bottom: 0; }
+.settings-hl-color {
+  width: 24px; height: 24px; padding: 0; border: 1px solid var(--border-color);
+  border-radius: 4px; background: none; cursor: pointer; flex: none;
+}
+.settings-hl-color:disabled { cursor: default; opacity: .45; }
+.settings-hl-name {
+  flex: 1; font-size: 12px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-hl-edit {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 8px; padding: 8px; border: 1px dashed var(--border-color); border-radius: 6px;
+}
+.settings-hl-edit > input[type='text'], .settings-hl-edit > input:not([type]) {
+  flex: 1 1 130px; min-width: 0;
+}
+.settings-hl-case {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--text-secondary); white-space: nowrap; cursor: pointer;
+}
+.settings-hl-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+/* ---- 右键菜单（ContextMenu 通用组件：主机列表 / 终端窗口各自实例） ---- */
+/* backdrop 仅作关闭热区（右键菜单非表单弹窗，不适用「禁止点遮罩关闭」规范） */
+.ctx-backdrop { position: fixed; inset: 0; z-index: 3000; }
+.ctx-menu {
+  position: fixed; z-index: 3001; min-width: 170px; max-height: 80vh; overflow-y: auto;
+  visibility: hidden; padding: 4px;
+  background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+}
+/* 测量 clamp 完成前隐藏，避免从 (x,y) 原位闪一帧 */
+.ctx-menu.ready { visibility: visible; }
+.ctx-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  width: 100%; padding: 6px 10px; border: none; background: none; cursor: pointer;
+  font-size: 12px; color: var(--text-primary); border-radius: 4px; text-align: left;
+  font-family: inherit; white-space: nowrap;
+}
+.ctx-item:hover:not(:disabled) { background: var(--bg-hover); }
+.ctx-item:disabled { color: var(--text-tertiary); opacity: .55; cursor: default; }
+.ctx-item.danger { color: var(--accent); }
+.ctx-item.danger:hover:not(:disabled) { background: rgba(233, 69, 96, .12); }
+.ctx-label { flex-shrink: 0; }
+.ctx-shortcut { font-size: 10px; color: var(--text-tertiary); }
+.ctx-sep { height: 1px; background: var(--border-color); margin: 4px 2px; }
+
 /* 拖拽提示 */
 #dropHint {
   display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -646,8 +702,7 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 }
 
 /* 管理页面按钮 */
-.mgmt-btn { color: #4fc3f7 !important; }
-.mgmt-btn:hover { background: rgba(79,195,247,.15) !important; }
+/* （mgmt-btn 随主机 hover 按钮组移除而废弃，操作已收编进主机右键菜单） */
 
 /* 表单分区标题 */
 .form-section-title {

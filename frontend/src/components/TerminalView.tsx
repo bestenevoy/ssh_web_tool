@@ -5,9 +5,11 @@ interface Props {
   terminals: Map<string, TerminalInstance>
   activeId: string | null
   registerContainer: (session_id: string, el: HTMLDivElement | null) => void
+  /** 终端区右键：App 层弹终端专属菜单（块操作由 blockBar.hitTest 判定），与主机列表菜单区分 */
+  onTerminalContextMenu?: (session_id: string, e: React.MouseEvent) => void
 }
 
-export function TerminalView({ terminals, activeId, registerContainer }: Props) {
+export function TerminalView({ terminals, activeId, registerContainer, onTerminalContextMenu }: Props) {
   const containerRefs = useRef<Map<string, HTMLDivElement>>(new Map())
 
   const setRef = (session_id: string) => (el: HTMLDivElement | null) => {
@@ -28,6 +30,7 @@ export function TerminalView({ terminals, activeId, registerContainer }: Props) 
           key={t.session_id}
           ref={setRef(t.session_id)}
           className={`terminal-instance${t.session_id === activeId ? ' active' : ''}`}
+          onContextMenu={(e) => onTerminalContextMenu?.(t.session_id, e)}
         >
           {(t.reconnecting || t.local_starting) && (
             <div className="terminal-starting">

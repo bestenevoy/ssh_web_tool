@@ -14,15 +14,20 @@ import { reflowForCols } from './reflow'
 import { setupTerminalCopy } from './terminalCopy'
 import { createOutputFeeder } from './outputFeeder'
 import { markDisconnected } from './terminalDisconnect'
+import type { HighlightDecorator } from './highlightDecorations'
 
 // 终端回滚行数（单一定义源）：folds.ts 的 savedLines 缓存预算按
 // 5000 − blockMaxLines − 1 计算，保证 visible + cached < scrollback
 export const TERMINAL_SCROLLBACK_LINES = 5000
 
 // 内容搜索装饰（addon-search 0.16 的 decorations 是每次 findNext/findPrevious
-// 的 ISearchOptions，非构造参数）：总览标尺匹配标记，同时启用 onDidChangeResults 计数
+// 的 ISearchOptions，非构造参数）：普通匹配淡蓝灰背景、当前匹配红色背景+红边框，
+// 两者颜色明显区分；总览标尺同色系。背景用 #RRGGBBAA 带透明度（纯色会盖住终端文字）
 export const SEARCH_DECORATIONS = {
+  matchBackground: '#8892b040',
   matchOverviewRuler: '#8892b0',
+  activeMatchBackground: '#e9456090',
+  activeMatchBorder: '#e94560',
   activeMatchColorOverviewRuler: '#e94560',
 } as const
 
@@ -57,6 +62,9 @@ export interface TerminalInstance {
   ssh_conn: SshConnInfo | null  // 本地拦截 SSH 会话的连接信息（重连凭据）；已保存主机会话为 null
   // 命令块渲染层（左侧色条 + 真折叠）：容器挂载（registerContainer → term.open）后创建
   blockBar: BlockBarController | null
+  // 关键字高亮装饰层（rssh 同款）：容器挂载后创建（同 blockBar 模式），规则经
+  // updateTerminalSettings 同步；dispose 走 closeTerminal
+  highlight: HighlightDecorator | null
   // 终端内容搜索（Ctrl+F）：真折叠内容不在 buffer，打开搜索时先 unfoldAll（SearchBar 负责）
   search: SearchAddon
 }
@@ -330,6 +338,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     }),
     ssh_conn,
     blockBar: null,
+    highlight: null,
     search: searchAddon,
   }
   return instance

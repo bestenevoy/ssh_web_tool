@@ -10,6 +10,8 @@ import { editLineBuffer, isEnter } from './lineEditor'
 import { createTerminalInstance, getTerminalTheme } from './terminalInstance'
 import type { TerminalInstance, SshConnInfo } from './terminalInstance'
 import { attachBlockBar } from './blockBar'
+import { HighlightDecorator } from './highlightDecorations'
+import { compileHighlightRules } from './highlight'
 import type { WsClientMessage } from '../types/ws'
 
 // 类型从 terminalInstance.ts 重导出（组件导入路径不变）
@@ -160,6 +162,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     inst.term.options.theme = getTerminalTheme(s)
     // 命令块设置（开关/自动折叠/行数）实时同步到渲染层
     inst.blockBar?.applySettings(s)
+    // 关键字高亮规则实时同步（重编译全部规则并全量重画装饰层）
+    inst.highlight?.setRules(compileHighlightRules(s.highlightRules))
     // 重新计算终端尺寸
     if (inst.container) {
       fitTerminal(inst)
@@ -424,6 +428,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     if (inst.ws) inst.ws.close()
     inst.feeder?.dispose()
     inst.blockBar?.dispose()
+    inst.highlight?.dispose()
     // state_timer 已改为批量轮询，不再需要单独清理
     try { await api.closeSession(session_id) } catch {}
     setTerminals((prev) => {
@@ -507,6 +512,12 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         setupCopyOnSelect(inst.term, el)
         // 命令块渲染层（左侧色条 + 遮罩折叠）：xterm 打开后才有几何信息可测
         if (!inst.blockBar) inst.blockBar = attachBlockBar(inst.term, el, settingsRef.current)
+        // 关键字高亮装饰层（rssh 同款）：xterm 打开后创建（同 blockBar 模式），
+        // 创建即应用当前规则集，后续规则变化走 updateTerminalSettings
+        if (!inst.highlight) {
+          inst.highlight = new HighlightDecorator(inst.term)
+          inst.highlight.setRules(compileHighlightRules(settingsRef.current.highlightRules))
+        }
         // 终端真正打开后，使用 resyncTerminal 确保 xterm.js 状态正确
         // 关键：先 fit 计算正确的 cols/rows，再 reset 清除可能错误的状态，再发送 resize 和 Ctrl+L
         fitTerminal(inst)
@@ -564,9 +575,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     searchOpenId,
     setSearchOpenId,
     createTerminal,
-    // 打开本机终端（cmd / powershell / pwsh，WinPTY，不经过 SSH）
-    openLocalTerminal: (shell: 'cmd' | 'powershell' | 'pwsh') =>
-      createTerminal({} as Host, undefined, 'local', shell),
+    // 打开本机终端（shell 为短标识或检测列表里的完整路径，WinPTY，不经过 SSH）
+    openLocalTerminal: (shell: string) => createTerminal({} as Host, undefined, 'local', shell),
     restoreTerminals,
     switchTerminal,
     closeTerminal,

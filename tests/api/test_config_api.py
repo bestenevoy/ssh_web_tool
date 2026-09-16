@@ -171,3 +171,82 @@ def test_update_ui_settings_filters_patterns_not_reject(monkeypatch):
     # 非字符串条目被 Pydantic 拒绝（422）
     r = c.post("/api/config/ui-settings", json={"custom_prompt_patterns": ["ok>", 42]})
     assert r.status_code == 422
+
+
+# ============ 连接超时 / 本机 shell 检测 / 高亮规则 API ============
+
+
+def test_get_config_returns_connect_timeout():
+    c = TestClient(main.app)
+    r = c.get("/api/config")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["connect_timeout"], (int, float))
+    assert 1 <= body["connect_timeout"] <= 300
+
+
+def test_set_connect_timeout_saves(monkeypatch):
+    saved = {}
+
+    def fake_save(cfg):
+        saved.update(cfg)
+        return True
+
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", fake_save)
+    c = TestClient(main.app)
+    r = c.post("/api/config/connect-timeout", json={"seconds": 45})
+    assert r.status_code == 200
+    assert r.json()["connect_timeout"] == 45.0
+    assert saved["connect_timeout"] == 45
+
+
+def test_set_connect_timeout_rejects_out_of_range():
+    c = TestClient(main.app)
+    assert c.post("/api/config/connect-timeout", json={"seconds": 0}).status_code == 422
+    assert c.post("/api/config/connect-timeout", json={"seconds": 301}).status_code == 422
+
+
+def test_get_config_local_shell_choices_dynamic():
+    """/api/config 返回动态检测结果（非静态三元组），且至少含内置 shell"""
+    c = TestClient(main.app)
+    body = c.get("/api/config").json()
+    choices = body["local_shell_choices"]
+    assert isinstance(choices, list) and choices
+    assert "powershell" in choices
+
+
+def test_set_fallback_shell_accepts_short_id_any_case(monkeypatch):
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", lambda cfg: True)
+    c = TestClient(main.app)
+    r = c.post("/api/config/fallback-shell", json={"shell": "CMD"})
+    assert r.status_code == 200
+    assert r.json()["fallback_local_shell"] == "cmd"
+
+
+def test_update_ui_settings_highlight_rules_roundtrip(monkeypatch):
+    """高亮规则：合法列表保存并回读一致"""
+    saved = {}
+
+    def fake_save(cfg):
+        saved.update(cfg)
+        return True
+
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", fake_save)
+    c = TestClient(main.app)
+    rule = {"keyword": "WARN", "name": "警告", "color": "#FFD060", "enabled": True, "is_case_sensitive": False}
+    r = c.post("/api/config/ui-settings", json={"highlight_rules": [rule]})
+    assert r.status_code == 200
+    assert r.json()["ui_settings"]["highlight_rules"] == [rule]
+    assert saved["ui_settings"]["highlight_rules"] == [rule]
+
+
+def test_update_ui_settings_highlight_rules_filtered_not_rejected(monkeypatch):
+    """高亮规则：非法条目被过滤而非整键 400；非对象条目 Pydantic 422"""
+    monkeypatch.setattr(_SAVE_TARGET, "save_config", lambda cfg: True)
+    c = TestClient(main.app)
+    rule = {"keyword": "E", "name": "e", "color": "#FF0000", "enabled": True, "is_case_sensitive": False}
+    r = c.post("/api/config/ui-settings", json={"highlight_rules": [rule, {**rule, "color": "bad"}]})
+    assert r.status_code == 200
+    assert r.json()["ui_settings"]["highlight_rules"] == [rule]
+    r = c.post("/api/config/ui-settings", json={"highlight_rules": [rule, "junk"]})
+    assert r.status_code == 422

@@ -1,6 +1,6 @@
 """API 请求模型（从 main.py 拆分，按域集中在单文件便于统一审视）"""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CreateSessionRequest(BaseModel):
@@ -118,6 +118,22 @@ class FallbackShellRequest(BaseModel):
     shell: str
 
 
+class ConnectTimeoutRequest(BaseModel):
+    """设置 SSH 连接超时（秒）"""
+
+    seconds: int = Field(ge=1, le=300)
+
+
+class HighlightRuleItem(BaseModel):
+    """关键字高亮规则（keyword 即正则源，前端按 RegExp 编译；keyword 为规则身份键）"""
+
+    keyword: str
+    name: str
+    color: str = "#FF6B6B"
+    enabled: bool = True
+    is_case_sensitive: bool = False
+
+
 class UiSettingsRequest(BaseModel):
     """部分更新前端 UI 设置（只传需要修改的键；逐键校验，非法键返回 400）"""
 
@@ -129,6 +145,7 @@ class UiSettingsRequest(BaseModel):
     block_max_lines: int | None = None
     block_split_mode: str | None = None
     custom_prompt_patterns: list[str] | None = None
+    highlight_rules: list[HighlightRuleItem] | None = None
 
 
 class RecordCommandRequest(BaseModel):

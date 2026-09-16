@@ -1,5 +1,6 @@
 // API 调用封装
 import type { Host, HostType, Session, ActiveTerminal, QuickCommand, SftpItem, CommandResult, TerminalState, SavedTerminal } from '../types'
+import type { HighlightRule } from './highlight'
 
 // 后端 ui_settings（config.json 持久化的前端 UI 设置；snake_case）
 export interface UiSettingsPayload {
@@ -11,6 +12,7 @@ export interface UiSettingsPayload {
   block_max_lines: number
   block_split_mode: 'enter' | 'prompt'
   custom_prompt_patterns: string[]
+  highlight_rules: HighlightRule[]
 }
 
 const BASE = ''
@@ -53,14 +55,24 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
 export const api = {
   // 全局配置（含 ui_settings：前端 UI 设置，持久化在 config.json）
   getConfig: () =>
-    request<{ fallback_local_shell: string; local_shell_choices: string[]; ui_settings: UiSettingsPayload; config_file: string }>(
-      '/api/config'
-    ),
+    request<{
+      fallback_local_shell: string
+      local_shell_choices: string[]
+      connect_timeout: number
+      ui_settings: UiSettingsPayload
+      config_file: string
+    }>('/api/config'),
   // 设置默认本机终端 shell（默认终端条目 + SSH 断开后自动进入共用）
   setFallbackShell: (shell: string) =>
     request<{ status: string; fallback_local_shell: string }>('/api/config/fallback-shell', {
       method: 'POST',
       body: JSON.stringify({ shell }),
+    }),
+  // 设置 SSH 连接超时（秒，1-300）
+  setConnectTimeout: (seconds: number) =>
+    request<{ status: string; connect_timeout: number }>('/api/config/connect-timeout', {
+      method: 'POST',
+      body: JSON.stringify({ seconds }),
     }),
   // 部分更新前端 UI 设置（只传需要修改的键，非法值后端返回 400）
   updateUiSettings: (partial: Partial<UiSettingsPayload>) =>
@@ -68,6 +80,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(partial),
     }),
+  // 在系统文件管理器中打开配置文件所在目录（设置弹窗「打开目录」按钮）
+  openConfigDir: () => request<{ status: string; dir: string }>('/api/config/open-dir', { method: 'POST' }),
 
   // 主机
   listHosts: () => request<{ hosts: Host[]; groups: string[]; host_types: HostType[] }>('/api/hosts'),

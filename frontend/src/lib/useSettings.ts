@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api, type UiSettingsPayload } from './api'
+import { DEFAULT_HIGHLIGHT_RULES, MAX_HIGHLIGHT_RULES, type HighlightRule } from './highlight'
 
 export type Theme = 'dark' | 'light'
 
@@ -15,6 +16,8 @@ export interface TerminalSettings {
   blockSplitMode: 'enter' | 'prompt'
   // 自定义提示符正则（一行一条存储；prompt 模式下优先于内置正则）
   customPromptPatterns: string[]
+  // 关键字高亮规则（借鉴 rssh；keyword 即正则源，也是规则身份键）
+  highlightRules: HighlightRule[]
 }
 
 export const DEFAULT_SETTINGS: TerminalSettings = {
@@ -26,6 +29,8 @@ export const DEFAULT_SETTINGS: TerminalSettings = {
   blockMaxLines: 30,
   blockSplitMode: 'prompt',
   customPromptPatterns: [],
+  // 深拷贝默认规则：SettingsModal 的编辑都产生新数组，此处防御共享引用被就地改
+  highlightRules: DEFAULT_HIGHLIGHT_RULES.map((r) => ({ ...r })),
 }
 
 // 可选字体列表
@@ -55,7 +60,23 @@ export function toUiSettingsPayload(partial: Partial<TerminalSettings>): Partial
   if (partial.blockMaxLines !== undefined) out.block_max_lines = partial.blockMaxLines
   if (partial.blockSplitMode !== undefined) out.block_split_mode = partial.blockSplitMode
   if (partial.customPromptPatterns !== undefined) out.custom_prompt_patterns = partial.customPromptPatterns
+  if (partial.highlightRules !== undefined) out.highlight_rules = partial.highlightRules
   return out
+}
+
+/** 高亮规则的形状校验（逐项过滤的判据；与后端 _validate_highlight_rule 对齐） */
+function isHighlightRuleShape(r: unknown): r is HighlightRule {
+  if (!r || typeof r !== 'object') return false
+  const v = r as Partial<HighlightRule>
+  return (
+    typeof v.keyword === 'string' &&
+    v.keyword.trim() !== '' &&
+    typeof v.name === 'string' &&
+    v.name.trim() !== '' &&
+    typeof v.color === 'string' &&
+    typeof v.enabled === 'boolean' &&
+    typeof v.is_case_sensitive === 'boolean'
+  )
 }
 
 /** 后端 ui_settings 负载 → 前端设置（逐键校验，非法/缺失键保留 base 默认值） */
@@ -83,6 +104,20 @@ export function applyUiSettings(
     next.customPromptPatterns = payload.custom_prompt_patterns.filter(
       (p): p is string => typeof p === 'string' && p.trim().length > 0
     )
+  }
+  if (Array.isArray(payload.highlight_rules)) {
+    // 逐项过滤（形状校验）+ keyword 去重（keyword 是规则身份键）+ 条数上限，
+    // 与后端 config.py 的校验规则对齐；非法条目剔除而非整键回退
+    const seenKeywords = new Set<string>()
+    const cleaned: HighlightRule[] = []
+    for (const r of payload.highlight_rules) {
+      if (!isHighlightRuleShape(r)) continue
+      if (seenKeywords.has(r.keyword)) continue
+      seenKeywords.add(r.keyword)
+      cleaned.push(r)
+      if (cleaned.length >= MAX_HIGHLIGHT_RULES) break
+    }
+    next.highlightRules = cleaned
   }
   return next
 }

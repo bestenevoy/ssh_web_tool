@@ -2,8 +2,10 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import '@xterm/xterm/css/xterm.css'
 import './App.css'
 import type { Host, HostType, QuickCommand } from './types'
-import type { SshConnInfo } from './lib/useTerminals'
+import type { SshConnInfo, TerminalInstance } from './lib/useTerminals'
 import { api } from './lib/api'
+import { ContextMenu } from './components/ContextMenu'
+import type { CtxMenuItem } from './components/ContextMenu'
 import { useTerminals } from './lib/useTerminals'
 import { writeClipboardText } from './lib/terminalCopy'
 import { useEvents } from './lib/useEvents'
@@ -41,8 +43,9 @@ function App() {
   const [groups, setGroups] = useState<string[]>([])
   const [hostTypes, setHostTypes] = useState<HostType[]>([])
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
-  const [fallbackShell, setFallbackShell] = useState<'cmd' | 'powershell' | 'pwsh'>('powershell')
+  const [fallbackShell, setFallbackShell] = useState<string>('powershell')
   const [shellChoices, setShellChoices] = useState<string[]>(['cmd', 'powershell', 'pwsh'])
+  const [connectTimeout, setConnectTimeout] = useState(10)
   const [configFile, setConfigFile] = useState('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
@@ -57,6 +60,10 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [quickCommandModalOpen, setQuickCommandModalOpen] = useState(false)
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null)
+  // 终端窗口右键菜单（与主机列表右键菜单各自独立）：坐标 + 会话 + 命中的色块 id
+  const [terminalMenu, setTerminalMenu] = useState<{
+    x: number; y: number; sessionId: string; blockId: number | null
+  } | null>(null)
 
   const { settings, toggleTheme, setFontFamily, setFontSize, updateSettings } = useSettings()
   const terminals = useTerminals(settings)
@@ -122,14 +129,27 @@ function App() {
     return () => window.removeEventListener('keydown', handler, true)
   }, [terminals.activeId])
 
-  // 默认本机终端 shell（左侧「默认终端」条目 + SSH 断开后自动进入共用，保存到 config.json）
-  const handleSetFallbackShell = useCallback(async (shell: 'cmd' | 'powershell' | 'pwsh') => {
+  // 默认本机终端 shell（左侧「默认终端」条目 + SSH 断开后自动进入共用，保存到 config.json；
+  // 取值为短标识或检测列表里的完整路径）
+  const handleSetFallbackShell = useCallback(async (shell: string) => {
     try {
       await api.setFallbackShell(shell)
       setFallbackShell(shell)
       setStatus(`默认本机终端已设为 ${shell}`)
     } catch (e) {
       setStatus('保存配置失败: ' + (e as Error).message)
+    }
+  }, [])
+
+  // SSH 连接超时（秒，1-300，保存到 config.json 顶层）
+  const handleSetConnectTimeout = useCallback(async (seconds: number) => {
+    try {
+      const r = await api.setConnectTimeout(seconds)
+      setConnectTimeout(r.connect_timeout)
+      setStatus(`SSH 连接超时已设为 ${r.connect_timeout} 秒`)
+    } catch (e) {
+      setStatus('保存配置失败: ' + (e as Error).message)
+      throw e // 设置弹窗感知失败以回退输入显示
     }
   }, [])
 
@@ -157,8 +177,9 @@ function App() {
     loadHosts()
       api.getConfig()
         .then((c) => {
-          if (c?.fallback_local_shell) setFallbackShell(c.fallback_local_shell as 'cmd' | 'powershell' | 'pwsh')
+          if (c?.fallback_local_shell) setFallbackShell(c.fallback_local_shell)
           if (c?.local_shell_choices?.length) setShellChoices(c.local_shell_choices)
+          if (typeof c?.connect_timeout === 'number') setConnectTimeout(c.connect_timeout)
           if (c?.config_file) setConfigFile(c.config_file)
         })
         .catch(() => {})
@@ -234,6 +255,27 @@ function App() {
   const handleDisconnectTerminal = useCallback((session_id: string) => {
     terminals.disconnectTerminal(session_id).then(() => loadHosts())
   }, [terminals, loadHosts])
+
+  // ---- 终端窗口右键菜单（rssh 同款：右键命中色条 → 未选中块排他选中，已多选则保留）----
+  const handleTerminalContextMenu = useCallback((sessionId: string, e: React.MouseEvent) => {
+    e.preventDefault()
+    const inst = terminals.terminals.get(sessionId)
+    if (!inst) return
+    const bb = inst.blockBar
+    const blockId = bb?.hitTest(e.clientX, e.clientY) ?? null
+    if (blockId != null && bb) {
+      const sel = bb.getSelection()
+      if (!sel.includes(blockId)) bb.selectBlock(blockId)
+    }
+    setTerminalMenu({ x: e.clientX, y: e.clientY, sessionId, blockId })
+  }, [terminals])
+
+  // 粘贴到终端：pywebview/WebView2 下 navigator.clipboard.readText 可能被拒，失败则提示用 Ctrl+V
+  const pasteToTerminal = useCallback((inst: TerminalInstance) => {
+    navigator.clipboard.readText()
+      .then((text) => { if (text) inst.term.paste(text) })
+      .catch(() => alert('读取剪贴板失败，请在终端中直接按 Ctrl+V 粘贴'))
+  }, [])
 
   // ---- 重连密码弹窗（Promise 化：askPassword().then(pw => ...)）----
   // 会话/主机未保存密码且无私钥时，统一重连流程先弹窗取密码再建连
@@ -736,6 +778,7 @@ function App() {
             terminals={terminals.terminals}
             activeId={terminals.activeId}
             registerContainer={terminals.registerContainer}
+            onTerminalContextMenu={handleTerminalContextMenu}
           />
           {/* 终端内容搜索条（Ctrl+F）：浮在活动终端右上角；切换活动终端时跟随显示对应实例 */}
           {terminals.searchOpenId && (() => {
@@ -827,10 +870,50 @@ function App() {
           fallbackShell={fallbackShell}
           shellChoices={shellChoices}
           onSetFallbackShell={handleSetFallbackShell}
+          connectTimeout={connectTimeout}
+          onSetConnectTimeout={handleSetConnectTimeout}
           configFile={configFile}
           onClose={() => { setSettingsOpen(false); focusActiveTerminal() }}
         />
       )}
+
+      {/* 终端窗口右键菜单：块操作（右键命中色条时）+ 复制/粘贴/全选/搜索，与主机列表菜单各自独立 */}
+      {terminalMenu && (() => {
+        const inst = terminals.terminals.get(terminalMenu.sessionId)
+        if (!inst) return null
+        const bb = inst.blockBar
+        const sel = bb?.getSelection() ?? []
+        // 右键命中的块已在多选集合中 → 操作整组；否则只操作命中块
+        const ids = terminalMenu.blockId != null && sel.length > 1 && sel.includes(terminalMenu.blockId)
+          ? sel
+          : terminalMenu.blockId != null ? [terminalMenu.blockId] : []
+        const sections: CtxMenuItem[][] = []
+        if (bb && ids.length > 0) {
+          const nTag = ids.length > 1 ? `（${ids.length} 块）` : ''
+          sections.push([
+            { label: bb.isFolded(ids[0]) ? `展开块${nTag}` : `折叠块${nTag}`, onClick: () => ids.forEach((id) => bb.toggleFold(id)) },
+            { label: `复制块内容${nTag}`, onClick: () => bb.copyBlocks(ids) },
+          ])
+        }
+        sections.push([
+          {
+            label: '复制',
+            disabled: !inst.term.hasSelection(),
+            onClick: () => { const text = inst.term.getSelection(); if (text) writeClipboardText(text) },
+          },
+          { label: '粘贴', onClick: () => pasteToTerminal(inst) },
+          { label: '全选', onClick: () => inst.term.selectAll() },
+          { label: '搜索内容', shortcut: 'Ctrl+F', onClick: () => terminals.setSearchOpenId(terminalMenu.sessionId) },
+        ])
+        return (
+          <ContextMenu
+            x={terminalMenu.x}
+            y={terminalMenu.y}
+            sections={sections}
+            onClose={() => { setTerminalMenu(null); focusActiveTerminal() }}
+          />
+        )
+      })()}
 
       {/* 拖拽提示 */}
       <div id="dropHint">释放文件以上传到当前 SFTP 目录</div>

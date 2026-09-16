@@ -1,6 +1,8 @@
 import { useState, memo } from 'react'
 import type { Host, HostType } from '../types'
 import { writeClipboardText } from '../lib/terminalCopy'
+import { ContextMenu } from './ContextMenu'
+import type { CtxMenuItem } from './ContextMenu'
 
 interface Props {
   hosts: Host[]
@@ -35,6 +37,8 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
   // 主机拖拽排序
   const [dragHostId, setDragHostId] = useState<string | null>(null)
   const [overHostId, setOverHostId] = useState<string | null>(null)
+  // 主机右键菜单（原 hover 按钮的操作全部收编进来，条目上不再常驻按钮）
+  const [menu, setMenu] = useState<{ x: number; y: number; host: Host } | null>(null)
 
   const getTypeColor = (key: string) => hostTypes.find((t) => t.key === key)?.color || '#999'
 
@@ -158,6 +162,31 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
     setOverHostId(null)
   }
 
+  /** 主机右键菜单项（原 hover 按钮动作收编：连接 / 管理页面 / 复制 / 编辑 / 删除） */
+  const buildHostMenuSections = (h: Host): CtxMenuItem[][] => {
+    const sections: CtxMenuItem[][] = [
+      [
+        { label: '连接', onClick: () => onHostClick(h) },
+      ],
+    ]
+    if (h.device_type === 'storage') {
+      sections[0].push({
+        label: '打开管理页面',
+        disabled: autoLoggingHosts.has(h.id),
+        onClick: () => openMgmtPage(h),
+      })
+    }
+    sections.push([
+      { label: '复制连接信息', onClick: () => onCopy(h) },
+      { label: '复制主机', onClick: () => onDuplicate(h) },
+    ])
+    sections.push([
+      { label: '编辑', onClick: () => onEdit(h) },
+      { label: '删除', danger: true, onClick: () => onDelete(h) },
+    ])
+    return sections
+  }
+
   return (
     <div className="host-list">
       {/* 搜索框 + 分组管理 */}
@@ -206,12 +235,16 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                     key={h.id}
                     className={`host-item${activeHostId === h.id ? ' active' : ''}${dragHostId === h.id ? ' dragging' : ''}${overHostId === h.id && dragHostId && dragHostId !== h.id ? ' drag-over' : ''}`}
                     onClick={() => onHostClick(h)}
+                    onContextMenu={(e) => {
+                      e.preventDefault()
+                      setMenu({ x: e.clientX, y: e.clientY, host: h })
+                    }}
                     draggable
                     onDragStart={() => handleHostDragStart(h)}
                     onDragOver={(e) => handleHostDragOver(e, h)}
                     onDrop={() => handleHostDrop(h)}
                     onDragEnd={handleHostDragEnd}
-                    title="拖动可调整顺序"
+                    title="右键打开操作菜单，拖动调整顺序"
                   >
                     <span className="type-dot" style={{ background: getTypeColor(h.type) }} />
                     <span className={`conn-dot${h.is_connected ? ' online' : ''}`} title={h.is_connected ? '已连接' : '未连接'} />
@@ -232,22 +265,6 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                     {h.terminal_count && h.terminal_count > 0 && (
                       <span className="term-count">{h.terminal_count}</span>
                     )}
-                    <div className="actions">
-                      {h.device_type === 'storage' && (
-                        <button
-                          className={`action-btn mgmt-btn${autoLoggingHosts.has(h.id) ? ' loading' : ''}`}
-                          onClick={(e) => { e.stopPropagation(); openMgmtPage(h) }}
-                          title={hasAutoLoginConfig(h) ? '自动登录管理页面' : '打开管理页面'}
-                          disabled={autoLoggingHosts.has(h.id)}
-                        >
-                          {autoLoggingHosts.has(h.id) ? '⏳' : '🌐'}
-                        </button>
-                      )}
-                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onDuplicate(h) }} title="复制主机">📄</button>
-                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onCopy(h) }} title="复制连接信息">📋</button>
-                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onEdit(h) }} title="编辑">✎</button>
-                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onDelete(h) }} title="删除">🗑</button>
-                    </div>
                   </div>
                 ))}
               </div>
@@ -259,6 +276,15 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
         <div style={{ textAlign: 'center', color: '#3a4a6a', padding: '30px 10px', fontSize: 11 }}>
           暂无主机<br />点击左侧「＋」新建主机
         </div>
+      )}
+      {/* 主机右键菜单：与终端窗口右键菜单（App 层）各自独立 */}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          sections={buildHostMenuSections(menu.host)}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   )

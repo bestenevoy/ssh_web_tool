@@ -17,6 +17,8 @@
 """
 
 import json
+import os
+import re
 import shutil
 import socket
 import sys
@@ -115,6 +117,62 @@ def migrate_legacy_data() -> None:
     _do_migrate_legacy(get_app_dir())
 
 
+# 关键字高亮默认规则（rssh 同款 9 条）：keyword 即正则源（前端按 RegExp 编译），
+# 规则顺序 = UI 展示顺序 = 重叠匹配优先级（先出现者优先），全部默认大小写不敏感
+_DEFAULT_HIGHLIGHT_RULES: list[dict] = [
+    {"keyword": r"\bINFO\b", "name": "Info", "color": "#6EDAA0", "enabled": True, "is_case_sensitive": False},
+    {"keyword": r"\bDEBUG\b", "name": "Debug", "color": "#40C8E0", "enabled": True, "is_case_sensitive": False},
+    {
+        "keyword": r"\b(?:error|fail(?:s|ed|ing|ures?)?|denied|refused|fatal|timed out|timeout|invalid)\b",
+        "name": "Errors",
+        "color": "#FF6B6B",
+        "enabled": True,
+        "is_case_sensitive": False,
+    },
+    {
+        "keyword": r"\b(?:success(?:ful)?|succeeded|passed|completed)\b",
+        "name": "Success",
+        "color": "#6EDAA0",
+        "enabled": True,
+        "is_case_sensitive": False,
+    },
+    {
+        "keyword": r"\bwarn(?:ing)?s?\b",
+        "name": "Warnings",
+        "color": "#FFD060",
+        "enabled": True,
+        "is_case_sensitive": False,
+    },
+    {
+        "keyword": r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?\b",
+        "name": "Date/Time",
+        "color": "#82AAFF",
+        "enabled": True,
+        "is_case_sensitive": False,
+    },
+    {
+        "keyword": r"\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b",
+        "name": "MAC",
+        "color": "#D86BFF",
+        "enabled": True,
+        "is_case_sensitive": False,
+    },
+    {
+        "keyword": r"\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b",
+        "name": "IPv4",
+        "color": "#D86BFF",
+        "enabled": True,
+        "is_case_sensitive": False,
+    },
+    {
+        "keyword": r"\b\d+(?:\.\d+)?(?:[KMGTPE]i?B|[KMGTPE]|B)\b",
+        "name": "File sizes",
+        "color": "#E8A87C",
+        "enabled": True,
+        "is_case_sensitive": False,
+    },
+]
+
 # 前端 UI 设置默认值（持久化到 config.json 的 ui_settings 段；逐键校验后透出给前端）
 UI_SETTINGS_DEFAULTS: dict = {
     "theme": "light",  # light / dark
@@ -125,6 +183,7 @@ UI_SETTINGS_DEFAULTS: dict = {
     "block_max_lines": 30,  # 自动折叠保留的输出行数
     "block_split_mode": "prompt",  # 命令块切块方式：按提示符出现 / 按 Enter
     "custom_prompt_patterns": [],  # 自定义提示符正则（prompt 模式下优先于内置匹配）
+    "highlight_rules": _DEFAULT_HIGHLIGHT_RULES,  # 关键字高亮规则（keyword=正则源）
 }
 
 # ui_settings 各键的合法值校验器（返回规范化后的值；非法返回 None 表示回退默认）
@@ -132,6 +191,35 @@ _BLOCK_MAX_LINES_CHOICES = (15, 30, 50, 100, 200)
 # 自定义提示符正则上限：单条长度 / 总条数（与前端 promptPatterns.ts 常量保持一致）
 _MAX_PATTERN_LENGTH = 200
 _MAX_PATTERN_COUNT = 20
+# 关键字高亮规则上限：总条数 / keyword 长度 / 名称长度（与前端 highlight.ts 常量保持一致）
+_MAX_HIGHLIGHT_COUNT = 50
+_MAX_HIGHLIGHT_KEYWORD_LENGTH = 200
+_MAX_HIGHLIGHT_NAME_LENGTH = 100
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _validate_highlight_rule(item: object) -> dict | None:
+    """校验单条高亮规则，返回规范化 dict；非法返回 None（keyword 唯一性由调用方去重）"""
+    if not isinstance(item, dict):
+        return None
+    keyword = item.get("keyword")
+    if not isinstance(keyword, str) or not keyword.strip() or len(keyword) > _MAX_HIGHLIGHT_KEYWORD_LENGTH:
+        return None
+    name = item.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > _MAX_HIGHLIGHT_NAME_LENGTH:
+        return None
+    color = item.get("color")
+    if not isinstance(color, str) or not _HEX_COLOR_RE.match(color):
+        return None
+    if not isinstance(item.get("enabled"), bool) or not isinstance(item.get("is_case_sensitive"), bool):
+        return None
+    return {
+        "keyword": keyword,
+        "name": name.strip(),
+        "color": color.upper(),
+        "enabled": item["enabled"],
+        "is_case_sensitive": item["is_case_sensitive"],
+    }
 
 
 def _validate_ui_setting(key: str, value) -> object | None:
@@ -156,8 +244,24 @@ def _validate_ui_setting(key: str, value) -> object | None:
             v.strip() for v in value if isinstance(v, str) and v.strip() and len(v.strip()) <= _MAX_PATTERN_LENGTH
         ]
         return cleaned[:_MAX_PATTERN_COUNT]
+    if key == "highlight_rules":
+        # 列表逐项过滤 + keyword 去重（keyword 是规则身份键）：非法条目剔除而非整键回退
+        if not isinstance(value, list):
+            return None
+        cleaned_rules: list[dict] = []
+        seen_keywords: set[str] = set()
+        for item in value:
+            rule = _validate_highlight_rule(item)
+            if rule is not None and rule["keyword"] not in seen_keywords:
+                seen_keywords.add(rule["keyword"])
+                cleaned_rules.append(rule)
+        return cleaned_rules[:_MAX_HIGHLIGHT_COUNT]
     return None  # 未知键一律忽略
 
+
+# SSH 连接超时（秒）默认值与合法范围：TCP 建连超时上限
+DEFAULT_CONNECT_TIMEOUT = 10
+_CONNECT_TIMEOUT_RANGE = (1, 300)
 
 # 默认配置（无配置文件时的兜底值）
 DEFAULT_CONFIG: dict = {
@@ -167,7 +271,10 @@ DEFAULT_CONFIG: dict = {
         "auto_find_free_port": True,  # 端口被占用时自动寻找空闲端口
     },
     "open_browser": True,  # 启动后延迟自动打开浏览器
+    # SSH 连接超时（秒）：TCP 建连超时上限（1-300，默认 10）
+    "connect_timeout": DEFAULT_CONNECT_TIMEOUT,
     # 默认本机终端 shell：左侧「默认终端」条目打开的 shell + SSH 断开后自动进入的 shell
+    # 取值为短标识（cmd/powershell/pwsh）或 detect_local_shells 扫描出的完整路径
     "fallback_local_shell": "powershell",
     "debug": False,  # 是否开启 pywebview 调试模式（F12 开发者工具）；开启会略增内存/CPU
     "ui_settings": dict(UI_SETTINGS_DEFAULTS),  # 前端 UI 设置（主题/字体/命令块等）
@@ -178,16 +285,104 @@ LOCAL_SHELL_CHOICES = ("cmd", "powershell", "pwsh")
 
 # 顶层标量配置白名单：这些键会在 load_config 时从用户 config.json 合并进来
 # （ui_settings 不在此列：它是子字典，由下方逐键合并逻辑独家处理，整体替换会丢默认值）
-_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell", "debug")
+_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell", "connect_timeout", "debug")
+
+
+def validate_local_shell_value(shell: object) -> str | None:
+    """校验 shell 设置值：短标识（cmd/powershell/pwsh，大小写不敏感）或真实存在的可执行文件路径
+
+    返回规范化后的值（短标识转小写）；非法返回 None。
+    """
+    if not isinstance(shell, str):
+        return None
+    s = shell.strip()
+    lowered = s.lower()
+    if lowered in LOCAL_SHELL_CHOICES:
+        return lowered
+    if s and Path(s).is_file():
+        return s
+    return None
 
 
 def get_fallback_local_shell(cfg: dict | None = None) -> str:
     """读取默认本机终端 shell 配置（默认终端条目 + SSH 断开后共用），非法取值回退 powershell"""
     c = cfg if cfg is not None else load_config()
     val = (c or {}).get("fallback_local_shell", "powershell")
-    if val not in LOCAL_SHELL_CHOICES:
+    return validate_local_shell_value(val) or "powershell"
+
+
+def get_connect_timeout(cfg: dict | None = None) -> float:
+    """读取 SSH 连接超时配置（秒，范围 1-300），非法值回退默认 10"""
+    c = cfg if cfg is not None else load_config()
+    raw = (c or {}).get("connect_timeout", DEFAULT_CONNECT_TIMEOUT)
+    if isinstance(raw, bool):  # bool 是 int 子类：true/false 不当作 1/0 秒
+        return float(DEFAULT_CONNECT_TIMEOUT)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULT_CONNECT_TIMEOUT)
+    lo, hi = _CONNECT_TIMEOUT_RANGE
+    return val if lo <= val <= hi else float(DEFAULT_CONNECT_TIMEOUT)
+
+
+def _short_shell_id(path: str) -> str | None:
+    """shell 可执行文件路径 → 短标识；非内置三类 shell 返回 None（保留完整路径）"""
+    name = Path(path).name.lower()
+    if name == "cmd.exe":
+        return "cmd"
+    if name == "powershell.exe":
         return "powershell"
-    return val
+    if name == "pwsh.exe":
+        return "pwsh"
+    return None
+
+
+def detect_local_shells() -> list[str]:
+    """扫描本机可用 shell（rssh 同款策略：Windows 已知绝对路径 + PATH 扫描）
+
+    返回元素为短标识（cmd/powershell/pwsh）或可执行文件完整路径；
+    短标识排在前（保持 LOCAL_SHELL_CHOICES 顺序），其余按文件名字典序。
+    一个都找不到时回退静态 LOCAL_SHELL_CHOICES，保证前端下拉不为空。
+    """
+    candidates: list[str] = []
+    # Windows 下 os.environ 键自动规范化为大写（SystemRoot -> SYSTEMROOT，等价）
+    system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    candidates += [
+        os.path.join(system_root, "System32", "cmd.exe"),
+        os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        os.path.join(system_root, "System32", "wsl.exe"),
+        r"C:\Program Files\PowerShell\7\pwsh.exe",
+        r"C:\Program Files\Git\bin\bash.exe",
+    ]
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        candidates.append(os.path.join(local_app, "Programs", "Git", "bin", "bash.exe"))
+    # PATH 扫描：覆盖随安装器注册到 PATH 的 pwsh / bash / nushell 等第三方 shell
+    for name in ("pwsh.exe", "bash.exe", "nu.exe", "fish.exe", "elvish.exe", "xonsh.exe"):
+        hit = shutil.which(name)
+        if hit:
+            candidates.append(hit)
+
+    seen_paths: set[str] = set()
+    seen_ids: set[str] = set()
+    extras: list[str] = []
+    for raw in candidates:
+        try:
+            resolved = str(Path(raw).resolve())
+        except OSError:
+            resolved = raw
+        if not Path(resolved).is_file() or resolved.lower() in seen_paths:
+            continue
+        seen_paths.add(resolved.lower())
+        sid = _short_shell_id(resolved)
+        if sid:
+            seen_ids.add(sid)
+        else:
+            extras.append(resolved)
+    ordered = [s for s in LOCAL_SHELL_CHOICES if s in seen_ids]
+    extras.sort(key=lambda p: (Path(p).name.lower(), p.lower()))
+    result = ordered + extras
+    return result or list(LOCAL_SHELL_CHOICES)
 
 
 def get_ui_settings(cfg: dict | None = None) -> dict:

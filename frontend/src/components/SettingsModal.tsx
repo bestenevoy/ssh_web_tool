@@ -2,13 +2,24 @@ import { useState, useEffect, useRef } from 'react'
 import type { TerminalSettings } from '../lib/useSettings'
 import { FONT_OPTIONS } from '../lib/useSettings'
 import { MAX_PROMPT_PATTERN_COUNT, MAX_PROMPT_PATTERN_LENGTH } from '../lib/promptPatterns'
+import {
+  DEFAULT_HIGHLIGHT_RULES,
+  MAX_HIGHLIGHT_KEYWORD_LENGTH,
+  MAX_HIGHLIGHT_RULES,
+  validateHighlightRule,
+  type HighlightRule,
+  type HighlightValidationError,
+} from '../lib/highlight'
+import { api } from '../lib/api'
 
 interface Props {
   settings: TerminalSettings
   onUpdate: (partial: Partial<TerminalSettings>) => void
   fallbackShell: string
   shellChoices: string[]
-  onSetFallbackShell: (shell: 'cmd' | 'powershell' | 'pwsh') => void
+  onSetFallbackShell: (shell: string) => void
+  connectTimeout: number
+  onSetConnectTimeout: (seconds: number) => Promise<void>
   configFile: string
   onClose: () => void
 }
@@ -38,12 +49,34 @@ export function clearFrontendCache(): number {
  * 除字体与主题外，其余配置项统一收拢到本弹窗（不再占顶栏）；
  * 所有持久化配置写入后端 config.json，localStorage 只保留临时内容。
  */
-export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices, onSetFallbackShell, configFile, onClose }: Props) {
+export function SettingsModal({
+  settings,
+  onUpdate,
+  fallbackShell,
+  shellChoices,
+  onSetFallbackShell,
+  connectTimeout,
+  onSetConnectTimeout,
+  configFile,
+  onClose,
+}: Props) {
   const [cacheMsg, setCacheMsg] = useState('')
+  const [openDirMsg, setOpenDirMsg] = useState('')
   const doneBtnRef = useRef<HTMLButtonElement>(null)
   // 自定义提示符正则：本地草稿 + 失焦/关闭时提交（逐键提交会频繁 POST 并重建 tracker）
   const [patternDraft, setPatternDraft] = useState(settings.customPromptPatterns.join('\n'))
   const [patternError, setPatternError] = useState<string | null>(null)
+  // SSH 连接超时：本地草稿 + 失焦提交（1-300 秒）
+  const [timeoutDraft, setTimeoutDraft] = useState(String(connectTimeout))
+  const [timeoutMsg, setTimeoutMsg] = useState('')
+  // 关键字高亮：编辑态（index=-1 表示新增草稿；null 表示未在编辑）
+  const [ruleEdit, setRuleEdit] = useState<{ index: number; draft: HighlightRule } | null>(null)
+  const [ruleError, setRuleError] = useState<string | null>(null)
+
+  // 外部超时变化（保存成功后 App 回传）时同步草稿
+  useEffect(() => {
+    setTimeoutDraft(String(connectTimeout))
+  }, [connectTimeout])
 
   // 打开后聚焦「完成」按钮：Esc 从弹窗内元素冒泡到 window 才能触发关闭
   // （否则焦点留在 xterm textarea，Esc 被终端截获）
@@ -89,6 +122,86 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
     setCacheMsg(n > 0 ? `已清理 ${n} 项临时缓存（布局宽度等），重新打开页面后生效` : '没有可清理的临时缓存')
   }
 
+  /** 在系统文件管理器中打开配置文件所在目录（后端 os.startfile / xdg-open） */
+  const handleOpenConfigDir = () => {
+    api.openConfigDir()
+      .then((r) => setOpenDirMsg(`已打开 ${r.dir}`))
+      .catch((e) => setOpenDirMsg('打开目录失败: ' + (e as Error).message))
+  }
+
+  /** 提交连接超时草稿：1-300 秒，失焦生效 */
+  function commitTimeout() {
+    const n = Math.round(Number(timeoutDraft))
+    if (!Number.isFinite(n)) return setTimeoutMsg('请输入数字')
+    if (n < 1 || n > 300) return setTimeoutMsg('范围 1-300 秒')
+    if (n === connectTimeout) return setTimeoutMsg('')
+    onSetConnectTimeout(n)
+      .then(() => setTimeoutMsg(''))
+      .catch((e) => {
+        setTimeoutDraft(String(connectTimeout)) // 保存失败回退显示
+        setTimeoutMsg('保存失败: ' + (e as Error).message)
+      })
+  }
+
+  /** 校验错误 → 中文提示 */
+  function ruleErrorText(err: HighlightValidationError): string {
+    switch (err.kind) {
+      case 'name_required':
+        return '规则名称不能为空'
+      case 'name_too_long':
+        return '规则名称最长 100 字符'
+      case 'keyword_too_long':
+        return `关键字最长 ${MAX_HIGHLIGHT_KEYWORD_LENGTH} 字符`
+      case 'zero_width':
+        return '该正则匹配不到任何可见字符（纯锚点/零宽断言）'
+      case 'invalid':
+        return `正则语法错误: ${err.message}`
+    }
+  }
+
+  /** 就地更新某条规则（产生新数组，保证 settings 更新触发装饰层重画） */
+  function updateRule(i: number, patch: Partial<HighlightRule>) {
+    onUpdate({ highlightRules: settings.highlightRules.map((r, idx) => (idx === i ? { ...r, ...patch } : r)) })
+  }
+
+  function deleteRule(i: number) {
+    if (ruleEdit?.index === i) setRuleEdit(null)
+    onUpdate({ highlightRules: settings.highlightRules.filter((_, idx) => idx !== i) })
+  }
+
+  function startEditRule(i: number) {
+    setRuleError(null)
+    setRuleEdit({ index: i, draft: { ...settings.highlightRules[i] } })
+  }
+
+  function startAddRule() {
+    setRuleError(null)
+    setRuleEdit({ index: -1, draft: { keyword: '', name: '', color: '#FF6B6B', enabled: true, is_case_sensitive: false } })
+  }
+
+  /** 提交新增/编辑的规则：先校验，keyword 与其它规则重复则拒绝（keyword 是身份键） */
+  function commitRuleEdit() {
+    if (!ruleEdit) return
+    if (!ruleEdit.draft.keyword.trim()) return setRuleError('关键字不能为空')
+    const err = validateHighlightRule(ruleEdit.draft)
+    if (err) return setRuleError(ruleErrorText(err))
+    const dup = settings.highlightRules.findIndex((r, i) => i !== ruleEdit.index && r.keyword === ruleEdit.draft.keyword)
+    if (dup >= 0) return setRuleError(`关键字与「${settings.highlightRules[dup].name}」重复（keyword 是规则身份键）`)
+    const rules = settings.highlightRules.slice()
+    if (ruleEdit.index < 0) rules.push(ruleEdit.draft)
+    else rules[ruleEdit.index] = ruleEdit.draft
+    onUpdate({ highlightRules: rules })
+    setRuleEdit(null)
+    setRuleError(null)
+  }
+
+  /** 恢复默认规则（rssh 同款 9 条） */
+  function resetRules() {
+    setRuleEdit(null)
+    setRuleError(null)
+    onUpdate({ highlightRules: DEFAULT_HIGHLIGHT_RULES.map((r) => ({ ...r })) })
+  }
+
   return (
     <div className="modal-overlay show">
       <div className="modal settings-modal">
@@ -129,13 +242,30 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
           <div className="settings-modal-title">本机终端</div>
           <div className="settings-modal-row">
             <label title="左侧「默认终端」条目打开的 shell，也是 SSH 断开后自动进入的 shell">默认 shell</label>
-            <select value={fallbackShell} onChange={(e) => onSetFallbackShell(e.target.value as 'cmd' | 'powershell' | 'pwsh')}>
+            <select value={fallbackShell} onChange={(e) => onSetFallbackShell(e.target.value)}>
               {shellChoices.map((s) => (
                 <option key={s} value={s}>{SHELL_LABELS[s] || s}</option>
               ))}
             </select>
           </div>
-          <div className="settings-modal-hint" title="编辑此文件后重启生效">配置文件：{configFile || '（加载中）'}</div>
+          <div className="settings-modal-row">
+            <label title="SSH 建连（TCP）超时上限；目标不可达时最多等待该时长即报错">连接超时（秒）</label>
+            <input
+              type="number" min={1} max={300} value={timeoutDraft}
+              onChange={(e) => setTimeoutDraft(e.target.value)}
+              onBlur={commitTimeout}
+              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+              style={{ width: 72 }}
+            />
+          </div>
+          {timeoutMsg && <div className="settings-modal-hint">{timeoutMsg}</div>}
+          <div className="settings-modal-hint" title="编辑此文件后重启生效">
+            配置文件：{configFile || '（加载中）'}
+            <button className="btn btn-secondary btn-sm settings-open-dir-btn" onClick={handleOpenConfigDir} title="在文件管理器中打开配置文件所在目录">
+              📂 打开目录
+            </button>
+            {openDirMsg && <div className="settings-open-dir-msg">{openDirMsg}</div>}
+          </div>
         </div>
 
         {/* 命令块：从顶栏收拢到设置弹窗 */}
@@ -154,7 +284,7 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
             </select>
           </div>
           <div className="settings-modal-row">
-            <label title="命令左侧显示色条标记：单击色条折叠/展开输出，双击复制块内容">块标记</label>
+            <label title="命令左侧显示色条标记：单击色条选中块（Shift 范围 / Ctrl 多选），双击复制块内容；折叠/展开走终端右键菜单">块标记</label>
             <input
               type="checkbox" checked={settings.blockBar}
               onChange={(e) => onUpdate({ blockBar: e.target.checked })}
@@ -196,6 +326,74 @@ export function SettingsModal({ settings, onUpdate, fallbackShell, shellChoices,
             ) : (
               <div className="settings-modal-hint">修改后从下一个提示符开始生效，已有块会被重置</div>
             )}
+          </div>
+        </div>
+
+        {/* 关键字高亮：rssh 同款装饰层方案（只叠加显示，不改写终端内容） */}
+        <div className="settings-modal-section">
+          <div className="settings-modal-title">关键字高亮</div>
+          {settings.highlightRules.length === 0 && <div className="settings-modal-hint">暂无规则</div>}
+          {settings.highlightRules.map((r, i) => (
+            <div className="settings-hl-row" key={r.keyword}>
+              <input
+                type="color" className="settings-hl-color" value={r.color} disabled={!r.enabled}
+                onChange={(e) => updateRule(i, { color: e.target.value })}
+                title="匹配文本颜色"
+              />
+              <span className="settings-hl-name" title={r.keyword}>{r.name}</span>
+              <input
+                type="checkbox" checked={r.enabled}
+                onChange={(e) => updateRule(i, { enabled: e.target.checked })}
+                title="启用/停用该规则"
+              />
+              <button className="btn btn-secondary btn-sm" onClick={() => startEditRule(i)}>编辑</button>
+              <button className="btn btn-secondary btn-sm" onClick={() => deleteRule(i)}>删除</button>
+            </div>
+          ))}
+          {ruleEdit && (
+            <div className="settings-hl-edit">
+              <input
+                value={ruleEdit.draft.name}
+                placeholder="规则名称"
+                onChange={(e) => setRuleEdit({ ...ruleEdit, draft: { ...ruleEdit.draft, name: e.target.value } })}
+              />
+              <input
+                value={ruleEdit.draft.keyword}
+                placeholder="正则，例如 \\bERROR\\b"
+                spellCheck={false}
+                onChange={(e) => setRuleEdit({ ...ruleEdit, draft: { ...ruleEdit.draft, keyword: e.target.value } })}
+                onKeyDown={(e) => { if (e.key === 'Enter') commitRuleEdit() }}
+              />
+              <label className="settings-hl-case" title="关闭时按大小写不敏感匹配">
+                <input
+                  type="checkbox" checked={ruleEdit.draft.is_case_sensitive}
+                  onChange={(e) => setRuleEdit({ ...ruleEdit, draft: { ...ruleEdit.draft, is_case_sensitive: e.target.checked } })}
+                />
+                区分大小写
+              </label>
+              <input
+                type="color" className="settings-hl-color" value={ruleEdit.draft.color}
+                onChange={(e) => setRuleEdit({ ...ruleEdit, draft: { ...ruleEdit.draft, color: e.target.value } })}
+                title="匹配文本颜色"
+              />
+              <button className="btn btn-primary btn-sm" onClick={commitRuleEdit}>保存</button>
+              <button className="btn btn-secondary btn-sm" onClick={() => { setRuleEdit(null); setRuleError(null) }}>取消</button>
+            </div>
+          )}
+          {ruleError && <div className="settings-pattern-error">{ruleError}</div>}
+          <div className="settings-hl-actions">
+            <button
+              className="btn btn-secondary btn-sm"
+              disabled={settings.highlightRules.length >= MAX_HIGHLIGHT_RULES || !!ruleEdit}
+              onClick={startAddRule}
+            >
+              ＋ 新增规则
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={resetRules}>恢复默认</button>
+          </div>
+          <div className="settings-modal-hint">
+            keyword 为 JS 正则（即规则身份键）；重叠匹配时列表中先出现的规则优先。
+            高亮只是显示层叠加，不会改写终端内容。
           </div>
         </div>
 

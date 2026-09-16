@@ -6,6 +6,7 @@
   },
   "open_browser": true,
   "fallback_local_shell": "powershell",
+  "connect_timeout": 10,
   "debug": false,
   "ui_settings": {
     "theme": "light",

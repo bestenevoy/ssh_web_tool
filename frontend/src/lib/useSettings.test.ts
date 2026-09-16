@@ -62,6 +62,7 @@ describe('applyUiSettings', () => {
       blockMaxLines: 100,
       blockSplitMode: 'prompt',
       customPromptPatterns: [],
+      highlightRules: DEFAULT_SETTINGS.highlightRules,
     })
   })
 
@@ -118,5 +119,30 @@ describe('applyUiSettings', () => {
     const out = applyUiSettings({ theme: 'dark' }, DEFAULT_SETTINGS)
     expect(out.blockSplitMode).toBe('prompt')
     expect(out.customPromptPatterns).toEqual([])
+  })
+
+  it('highlight_rules 逐项过滤形状 + keyword 去重 + 条数上限', () => {
+    const good = { keyword: 'ERROR', name: '错误', color: '#FF6B6B', enabled: true, is_case_sensitive: false }
+    const out = applyUiSettings(
+      {
+        highlight_rules: [
+          good,
+          good, // 重复 keyword：剔除
+          { ...good, keyword: '' }, // 空 keyword：剔除
+          { ...good, keyword: 'X', name: '' }, // 空 name：剔除
+          { keyword: 'Y', name: 'Y', color: '#00FF00' }, // 缺 bool 字段：剔除
+          'junk' as unknown as typeof good, // 非对象：剔除
+        ],
+      },
+      DEFAULT_SETTINGS
+    )
+    expect(out.highlightRules).toEqual([good])
+    const base = { ...DEFAULT_SETTINGS, highlightRules: [good] }
+    expect(applyUiSettings({ highlight_rules: 'oops' as unknown as typeof good[] }, base).highlightRules).toEqual([good])
+  })
+
+  it('toUiSettingsPayload 映射 highlight_rules', () => {
+    const rule = { keyword: 'A', name: 'a', color: '#112233', enabled: false, is_case_sensitive: true }
+    expect(toUiSettingsPayload({ highlightRules: [rule] })).toEqual({ highlight_rules: [rule] })
   })
 })

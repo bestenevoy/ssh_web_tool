@@ -12,7 +12,12 @@ from ssh_web_tool.api.models import (
     CreateSessionRequest,
     RunCommandRequest,
 )
-from ssh_web_tool.config import get_fallback_local_shell, load_config
+from ssh_web_tool.config import (
+    get_connect_timeout,
+    get_fallback_local_shell,
+    load_config,
+    validate_local_shell_value,
+)
 from ssh_web_tool.deps import get_event_bus, get_history_db, get_session_manager, get_ssh_session_cls, get_storage
 
 router = APIRouter(prefix="/api", tags=["sessions"])
@@ -28,7 +33,7 @@ async def api_create_session(req: CreateSessionRequest):
     assert session is not None
     try:
         # 外层总超时兜底：目标不可达/认证卡住时不至于让前端请求无限挂起
-        async with asyncio.timeout(30):  # type: ignore[attr-defined]
+        async with asyncio.timeout(max(30.0, get_connect_timeout() * 3)):  # type: ignore[attr-defined]
             await session.connect(password=req.password, private_key=req.private_key, passphrase=req.passphrase)
             # 自动启动交互式 shell，使用默认尺寸 120x40
             # 这样通过 API 创建的会话也会显示在 Web UI 中
@@ -61,7 +66,7 @@ async def api_create_raw_session(req: CreateRawSessionRequest):
     assert session is not None
     try:
         # 外层总超时兜底：重连目标不可达时不至于让前端请求无限挂起
-        async with asyncio.timeout(30):  # type: ignore[attr-defined]
+        async with asyncio.timeout(max(30.0, get_connect_timeout() * 3)):  # type: ignore[attr-defined]
             await session.connect(password=req.password or None)
             await session.start_interactive_shell(cols=120, rows=40)
     except Exception as e:
@@ -95,7 +100,7 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
     assert session is not None
     try:
         # 外层总超时兜底：目标不可达/认证卡住时不至于让前端请求无限挂起
-        async with asyncio.timeout(30):  # type: ignore[attr-defined]
+        async with asyncio.timeout(max(30.0, get_connect_timeout() * 3)):  # type: ignore[attr-defined]
             await session.connect(
                 # 密码覆盖：重连时弹窗输入的密码优先于已保存密码（连接成功后由前端保存到主机配置）
                 password=req.password if req.password else (host.get("password") or None),
@@ -136,14 +141,20 @@ async def api_create_local_session(req: dict | None = None):
     session_manager = get_session_manager()
     event_bus = get_event_bus()
     req = req or {}
-    # shell 未指定时使用配置的默认本机终端（默认终端条目与断开后共用同一配置）
+    # shell 未指定时使用配置的默认本机终端（默认终端条目与断开后共用同一配置）；
+    # 取值可为短标识或本机检测到的 shell 完整路径，非法时回退默认
     default_shell = get_fallback_local_shell(load_config())
-    shell = str(req.get("shell") or default_shell).lower()
-    if shell not in ("cmd", "powershell", "pwsh"):
-        shell = default_shell
+    shell = validate_local_shell_value(str(req.get("shell") or default_shell)) or default_shell
     import getpass
 
-    tname = "本机 cmd" if shell == "cmd" else ("本机 PowerShell" if shell == "powershell" else "本机 pwsh")
+    if shell == "cmd":
+        tname = "本机 cmd"
+    elif shell == "powershell":
+        tname = "本机 PowerShell"
+    elif shell == "pwsh":
+        tname = "本机 pwsh"
+    else:
+        tname = f"本机 {Path(shell).stem}"
     session_id = session_manager.create_session(
         host="localhost", port=0, username=getpass.getuser(), terminal_name=tname
     )
