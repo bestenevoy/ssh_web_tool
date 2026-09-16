@@ -4,6 +4,7 @@
 
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
 import type { RefObject, Dispatch, SetStateAction } from 'react'
 import type { TerminalSettings } from './useSettings'
 import type { BlockBarController } from './blockBar'
@@ -13,6 +14,17 @@ import { reflowForCols } from './reflow'
 import { setupTerminalCopy } from './terminalCopy'
 import { createOutputFeeder } from './outputFeeder'
 import { markDisconnected } from './terminalDisconnect'
+
+// 终端回滚行数（单一定义源）：folds.ts 的 savedLines 缓存预算按
+// 5000 − blockMaxLines − 1 计算，保证 visible + cached < scrollback
+export const TERMINAL_SCROLLBACK_LINES = 5000
+
+// 内容搜索装饰（addon-search 0.16 的 decorations 是每次 findNext/findPrevious
+// 的 ISearchOptions，非构造参数）：总览标尺匹配标记，同时启用 onDidChangeResults 计数
+export const SEARCH_DECORATIONS = {
+  matchOverviewRuler: '#8892b0',
+  activeMatchColorOverviewRuler: '#e94560',
+} as const
 
 // 会话内保存的 SSH 连接信息（本地终端拦截 ssh 命令后建立，无已保存主机，
 // 供"重连"按钮直接用原始凭据重建会话——否则重连会报"找不到该主机信息"）
@@ -43,8 +55,10 @@ export interface TerminalInstance {
   local_starting: boolean  // 本机终端创建后等待首批输出（开启启动提示）；收到第一条 output 后变 false
   feeder: ReturnType<typeof createOutputFeeder> | null
   ssh_conn: SshConnInfo | null  // 本地拦截 SSH 会话的连接信息（重连凭据）；已保存主机会话为 null
-  // 命令块渲染层（左侧色条 + 遮罩折叠）：容器挂载（registerContainer → term.open）后创建
+  // 命令块渲染层（左侧色条 + 真折叠）：容器挂载（registerContainer → term.open）后创建
   blockBar: BlockBarController | null
+  // 终端内容搜索（Ctrl+F）：真折叠内容不在 buffer，打开搜索时先 unfoldAll（SearchBar 负责）
+  search: SearchAddon
 }
 
 // 洪水输出内存上限：xterm write 缓冲无上限（超 50MB 抛错），这里限 2MB 积压，
@@ -101,11 +115,14 @@ export interface TerminalInstanceSpec {
   /** 终端输入回调：行编辑 + 发送（handleTerminalInput + sendInput 的宿主实现） */
   onData: (session_id: string, data: string) => void
   copyShortcut: () => void
+  /** 终端内 Ctrl+F：打开内容搜索条（App 经 useTerminals 的 setSearchHandler 接线） */
+  onCtrlF: (session_id: string) => void
   setTerminals: Dispatch<SetStateAction<Map<string, TerminalInstance>>>
   /** 收到 closed 消息后延迟关闭标签/连接（closeTerminal） */
   requestClose: (session_id: string) => Promise<void>
-  /** 容器挂载后重同步终端（resyncTerminal） */
-  resync: (term: Terminal, ws: WebSocket | null, clean: boolean) => void
+  /** 容器挂载后重同步终端（resyncTerminal）。带 session_id：clean 分支需经
+   *  terminalsRef 找到实例调 blockBar.handleTerminalReset（term.reset 后折叠记录全 stale） */
+  resync: (session_id: string, term: Terminal, ws: WebSocket | null, clean: boolean) => void
   /** 写入历史前确保 fit 完成（ensureFit） */
   ensureFit: (session_id: string, term: Terminal, fitAddon: FitAddon, ws: WebSocket | null) => Promise<void>
 }
@@ -131,6 +148,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     containersRef,
     onData,
     copyShortcut,
+    onCtrlF,
     setTerminals,
     requestClose,
     resync,
@@ -146,12 +164,18 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     // 给行高留出余量（1.2）确保 CJK 字形完整显示
     lineHeight: 1.2,
     // 保留足够滚动历史：clear/连接时不丢之前内容（只能滚动回看）
-    scrollback: 5000,
+    scrollback: TERMINAL_SCROLLBACK_LINES,
     // xterm 6.0：自绘滚动条宽度（收窄到 6px；默认 14px）。滑块颜色在 getTerminalTheme
     overviewRuler: { width: 6 },
+    // addon-search 的 decorations（总览标尺匹配标记 + onDidChangeResults 计数）依赖
+    // proposed API（registerDecoration），必须显式开启，否则 findNext 直接抛异常
+    allowProposedApi: true,
   })
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
+  // 内容搜索（Ctrl+F）：装饰选项在每次 find 调用时传入（SEARCH_DECORATIONS）
+  const searchAddon = new SearchAddon()
+  term.loadAddon(searchAddon)
 
   const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const ws = new WebSocket(`${wsProto}//${location.host}/ws/ssh/${session_id}`)
@@ -160,7 +184,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     // 逐字符更新命令历史缓冲（保持 ESC 序列完整）
     onData(session_id, data)
   })
-  setupTerminalCopy(term, copyShortcut)
+  setupTerminalCopy(term, copyShortcut, () => onCtrlF(session_id))
 
   // 采用"先声明后赋值"：handlers 异步执行时 instance 已就绪
   let instance!: TerminalInstance
@@ -176,7 +200,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
         console.log('[Terminal] after fit, size:', term.cols, 'x', term.rows)
         // resyncTerminal 传 false：不清屏不重置（历史加载负责显示 banner/MOTD）
         // 只启用自动换行 + 发送 resize，确保输入到行尾时光标正常换行
-        resync(term, ws, false)
+        resync(session_id, term, ws, false)
       } else {
         console.log('[Terminal] container not found, skip resize')
       }
@@ -306,6 +330,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     }),
     ssh_conn,
     blockBar: null,
+    search: searchAddon,
   }
   return instance
 }

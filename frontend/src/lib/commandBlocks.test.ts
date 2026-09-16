@@ -4,7 +4,7 @@
  * 覆盖：prompt 模式（banner 不误开块 → 首提示符开块 → Enter 后下个提示符切块、
  * 提示符行尾有命令文本不切块、自定义正则命中）、enter 模式回归。
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createCommandBlockTracker } from './commandBlocks'
 import { compilePromptPatterns } from './promptPatterns'
 
@@ -37,6 +37,7 @@ function makeFakeTerm() {
   const handlers = {
     data: [] as ((d: string) => void)[],
     writeParsed: [] as (() => void)[],
+    esc: {} as Record<string, (data: string) => boolean>,
   }
 
   const term = {
@@ -53,7 +54,12 @@ function makeFakeTerm() {
       return { dispose: () => {} }
     },
     onBufferChange: () => ({ dispose: () => {} }),
-    parser: { registerEscHandler: () => ({ dispose: () => {} }) },
+    parser: {
+      registerEscHandler: (ident: { final: string }, fn: (data: string) => boolean) => {
+        handlers.esc[ident.final] = fn
+        return { dispose: () => { delete handlers.esc[ident.final] } }
+      },
+    },
     registerMarker: (cursorOffset = 0) => makeMarker(baseY + cursorY + cursorOffset),
   }
 
@@ -68,6 +74,10 @@ function makeFakeTerm() {
     /** 模拟键盘输入 */
     type(data: string) {
       handlers.data.forEach((fn) => fn(data))
+    },
+    /** 模拟 shell 输出 ESC c（硬重置） */
+    fireEsc() {
+      handlers.esc['c']?.('')
     },
   }
 }
@@ -172,6 +182,37 @@ describe('enter 模式回归', () => {
     expect(tracker.blocks).toHaveLength(3)
     f.feed([{ text: 'mini> ' }]) // writeParsed 在 enter 模式不切块
     expect(tracker.blocks).toHaveLength(3)
+    tracker.dispose()
+  })
+})
+
+describe('resetAll 导出与 onReset 通知', () => {
+  it('resetAll 清空全部块并 dispose marker', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'enter')
+    f.type('a\r\r')
+    expect(tracker.blocks).toHaveLength(2)
+    tracker.resetAll()
+    expect(tracker.blocks).toHaveLength(0)
+  })
+
+  it('ESC c 硬重置触发 onReset 回调（FoldStore discardAll 的通知链）', () => {
+    const f = makeFakeTerm()
+    const onReset = vi.fn()
+    const tracker = createCommandBlockTracker(f.term, 'enter', { onReset })
+    f.type('a\r')
+    f.fireEsc() // 模拟 shell 输出 ESC c（reset）
+    expect(onReset).toHaveBeenCalledTimes(1)
+    expect(tracker.blocks).toHaveLength(0)
+    tracker.dispose()
+  })
+
+  it('手动 resetAll 也触发 onReset（term.reset 路径）', () => {
+    const f = makeFakeTerm()
+    const onReset = vi.fn()
+    const tracker = createCommandBlockTracker(f.term, 'enter', { onReset })
+    tracker.resetAll()
+    expect(onReset).toHaveBeenCalledTimes(1)
     tracker.dispose()
   })
 })

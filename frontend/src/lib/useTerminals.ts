@@ -35,12 +35,16 @@ function getShellTypeLabel(state: any): string {
 export function useTerminals(settings: TerminalSettings) {
   const [terminals, setTerminals] = useState<Map<string, TerminalInstance>>(new Map())
   const [activeId, setActiveId] = useState<string | null>(null)
+  // 终端内内容搜索（Ctrl+F）打开中的会话 id；null = 未打开
+  const [searchOpenId, setSearchOpenId] = useState<string | null>(null)
   // 连接防抖：同一时间只允许一个连接建立中，避免快速点击多个主机并发连接
   const [connecting, setConnecting] = useState(false)
   const connectingRef = useRef(false)
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map())
   // 快捷键处理函数（外部设置，用于打开搜索弹窗等）
   const shortcutHandlerRef = useRef<(() => void) | null>(null)
+  // 终端内 Ctrl+F 处理函数（App 接线：打开内容搜索条）
+  const searchHandlerRef = useRef<((session_id: string) => void) | null>(null)
   // 保存最新的 settings 引用，用于回调中
   const settingsRef = useRef(settings)
   settingsRef.current = settings
@@ -78,10 +82,14 @@ export function useTerminals(settings: TerminalSettings) {
   // 使用官方 FitAddon 自动计算终端尺寸，确保 cols/rows 准确
   // 附加溢出修正：字体放大后渲染行高可能略大于计算值，导致最后一行被容器裁切，
   // 检测到滚动高度溢出时减少一行，保证底部内容完整可见
+  // 真折叠互操作（folds.ts）：savedLines 是旧列宽快照，必须在 fit 触发 reflow
+  // 之前 unfoldAll；fit 完成后 afterFit 按当前阈值重新应用自动折叠
   const fitTerminal = useCallback((inst: TerminalInstance) => {
     if (inst.container) {
       try {
+        inst.blockBar?.unfoldAll()
         inst.fitAddon.fit()
+        inst.blockBar?.afterFit()
         const el = inst.term.element
         if (el && el.scrollHeight > el.clientHeight + 2 && inst.term.rows > 5) {
           inst.term.resize(inst.term.cols, inst.term.rows - 1)
@@ -124,14 +132,17 @@ export function useTerminals(settings: TerminalSettings) {
   // 用于初始连接时，确保 shell 第一帧输出使用正确的终端尺寸
   // （终端复制/粘贴逻辑见 terminalCopy.ts：选中复制、Ctrl+C 复制、Ctrl+V 单次粘贴）
 
-const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_screen: boolean = true) => {
+const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebSocket | null, clean_screen: boolean = true) => {
     if (ws && ws.readyState === WebSocket.OPEN && term) {
       // clean_screen=true（默认）：清除 xterm 缓冲区 + 发送 Ctrl+L 让 shell 清屏重绘
       // 用于恢复/重连场景；首次连接传 false，避免清掉主机 banner/MOTD 等登录信息
       if (clean_screen) {
         // 1. 清除 xterm.js 缓冲区（丢弃可能使用错误尺寸渲染的内容）
         term.reset()
-        // 2. 发送 Ctrl+L（换页符），告诉 shell 清屏并重绘提示符
+        // 2. reset 后 buffer 已清空，折叠 savedLines 全部 stale——经 tracker.onReset
+        //    链触发 foldStore.discardAll（只清记录禁止塞回，塞回会写进别人的行）
+        terminalsRef.current.get(session_id)?.blockBar?.handleTerminalReset()
+        // 3. 发送 Ctrl+L（换页符），告诉 shell 清屏并重绘提示符
         sendClient(ws, { type: 'input', data: '\x0c' })
       }
       // xterm.js 默认已启用自动换行（DECSET 7），不需要显式写入 ESC 序列
@@ -268,6 +279,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           sendInput(sid, data)
         },
         copyShortcut: () => shortcutHandlerRef.current?.(),
+        onCtrlF: (sid) => searchHandlerRef.current?.(sid),
         setTerminals,
         requestClose: (sid) => closeTerminalRef.current!(sid),
         resync: resyncTerminal,
@@ -317,6 +329,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
             sendInput(sid, data)
           },
           copyShortcut: () => shortcutHandlerRef.current?.(),
+          onCtrlF: (sid) => searchHandlerRef.current?.(sid),
           setTerminals,
           requestClose: (sid) => closeTerminalRef.current!(sid),
           resync: resyncTerminal,
@@ -478,6 +491,11 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     shortcutHandlerRef.current = handler
   }, [])
 
+  // 设置终端内 Ctrl+F 处理函数（打开内容搜索条）
+  const setSearchHandler = useCallback((handler: ((session_id: string) => void) | null) => {
+    searchHandlerRef.current = handler
+  }, [])
+
   const registerContainer = useCallback((session_id: string, el: HTMLDivElement | null) => {
     if (el) {
       containersRef.current.set(session_id, el)
@@ -497,7 +515,7 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
           if (inst.container) {
             fitTerminal(inst)
             // 首次打开不清屏不重置：保留主机登录 banner/MOTD 等连接信息
-            resyncTerminal(inst.term, inst.ws, false)
+            resyncTerminal(session_id, inst.term, inst.ws, false)
           }
         })
         // 延迟再次调用，确保字体加载完成
@@ -543,6 +561,8 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     activeId,
     connecting,
     activeSessions,
+    searchOpenId,
+    setSearchOpenId,
     createTerminal,
     // 打开本机终端（cmd / powershell / pwsh，WinPTY，不经过 SSH）
     openLocalTerminal: (shell: 'cmd' | 'powershell' | 'pwsh') =>
@@ -556,5 +576,6 @@ const resyncTerminal = useCallback((term: Terminal, ws: WebSocket | null, clean_
     registerContainer,
     focusActiveTerminal,
     setShortcutHandler,
+    setSearchHandler,
   }
 }

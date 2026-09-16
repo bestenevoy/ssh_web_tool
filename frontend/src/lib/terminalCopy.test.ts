@@ -128,6 +128,27 @@ describe('setupTerminalCopy 粘贴逻辑', () => {
     expect(onAltR).toHaveBeenCalledTimes(1)
   })
 
+  it('Ctrl+F 触发内容搜索回调、preventDefault 并返回 false（不发送 ^F 也不开浏览器查找）', () => {
+    const term = makeFakeTerm()
+    const onCtrlF = vi.fn()
+    setupTerminalCopy(term as any, undefined, onCtrlF)
+    const h = term._keyHandler!
+    const e = { ctrlKey: true, key: 'f', preventDefault: vi.fn() } as any
+    expect(h(e)).toBe(false)
+    expect(e.preventDefault).toHaveBeenCalled()
+    expect(onCtrlF).toHaveBeenCalledTimes(1)
+  })
+
+  it('Cmd+F（macOS metaKey）同样触发内容搜索回调', () => {
+    const term = makeFakeTerm()
+    const onCtrlF = vi.fn()
+    setupTerminalCopy(term as any, undefined, onCtrlF)
+    const h = term._keyHandler!
+    const e = { metaKey: true, key: 'F', preventDefault: vi.fn() } as any
+    expect(h(e)).toBe(false)
+    expect(onCtrlF).toHaveBeenCalledTimes(1)
+  })
+
   it('普通按键返回 true（xterm 正常处理）', () => {
     const term = makeFakeTerm()
     setupTerminalCopy(term as any, () => {})

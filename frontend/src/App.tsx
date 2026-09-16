@@ -20,6 +20,7 @@ import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
 import { PasswordModal } from './components/PasswordModal'
 import { SettingsModal } from './components/SettingsModal'
+import { SearchBar } from './components/SearchBar'
 import HistorySearchModal from './components/HistorySearchModal'
 
 type PanelTab = 'quick' | 'sftp' | 'events' | 'api'
@@ -97,6 +98,15 @@ function App() {
     })
     return () => terminals.setShortcutHandler(null)
   }, [terminals, terminals.activeId])
+
+  // 终端内 Ctrl+F：打开内容搜索条（unfoldAll/暂停自动折叠由 SearchBar 挂载时处理，
+  // App 层不感知折叠）
+  useEffect(() => {
+    terminals.setSearchHandler((session_id) => {
+      terminals.setSearchOpenId(session_id)
+    })
+    return () => terminals.setSearchHandler(null)
+  }, [terminals])
 
   // 全局快捷键监听（备用，终端未获得焦点时也能触发）
   useEffect(() => {
@@ -727,6 +737,17 @@ function App() {
             activeId={terminals.activeId}
             registerContainer={terminals.registerContainer}
           />
+          {/* 终端内容搜索条（Ctrl+F）：浮在活动终端右上角；切换活动终端时跟随显示对应实例 */}
+          {terminals.searchOpenId && (() => {
+            const inst = terminals.terminals.get(terminals.searchOpenId)
+            return inst ? (
+              <SearchBar
+                key={inst.session_id}
+                instance={inst}
+                onClose={() => terminals.setSearchOpenId(null)}
+              />
+            ) : null
+          })()}
         </div>
 
         {/* 右侧面板（宽度可拖拽调整） */}

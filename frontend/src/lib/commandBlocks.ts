@@ -32,6 +32,8 @@ export interface CommandBlockTracker extends IDisposable {
   readonly blocks: ReadonlyArray<CommandBlock>
   /** blocks 数组变化（新增/关闭/GC）时触发。 */
   onChange(fn: () => void): IDisposable
+  /** 一次性清空所有块（term.reset()/硬重置后由外部显式调用或 ESC c 内部触发）。 */
+  resetAll(): void
 }
 
 /** 金色角 HSL 循环取色——无限调色板，相邻块不撞色。 */
@@ -59,6 +61,9 @@ function logicalLineAtCursor(term: Terminal): { text: string; startLine: number;
 export interface CommandBlockTrackerOptions {
   /** 用户自定义提示符正则（已编译，prompt 模式下优先于内置正则匹配）。 */
   extraPromptPatterns?: ReadonlyArray<RegExp>
+  /** 硬重置（ESC c / resetAll）时的外部通知：FoldStore 借此 discardAll
+   *  （不能给 fold 再注册第二个同 ident 的 ESC handler——会覆盖 tracker 的）。 */
+  onReset?: () => void
 }
 
 export function createCommandBlockTracker(
@@ -133,7 +138,9 @@ export function createCommandBlockTracker(
   // 一次性清空所有块。用于硬重置：缓冲区已没了，任何块都不再有意义。
   // 先快照再清空：start.dispose() 触发的 onDispose 会 indexOf/splice blocks，
   // 直接 forEach(blocks) 会跳 index 导致 marker 泄漏。
+  // onReset 先行通知（FoldStore discardAll 等），再清理 marker。
   const resetAll = () => {
+    opts?.onReset?.()
     clearSubmittedLine()
     waitingForPrompt = splitMode === 'prompt'
     if (blocks.length === 0) return
@@ -201,6 +208,7 @@ export function createCommandBlockTracker(
       listeners.add(fn)
       return { dispose: () => listeners.delete(fn) }
     },
+    resetAll,
     dispose() {
       disposables.forEach((d) => d.dispose())
       clearSubmittedLine()
