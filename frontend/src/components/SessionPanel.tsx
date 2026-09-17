@@ -58,13 +58,10 @@ export function SessionPanel({ terminals, hosts, activeId, onSwitch, onClose }: 
 
   return (
     <div className="session-panel-body">
-      {groups.map((g) => (
-        <div key={g.key} className="session-group">
-          <div className="session-group-header" title={`${g.label}${g.ip !== g.label ? ` · ${g.ip}` : ''}`}>
-            <span className="session-group-name">{g.label}</span>
-            {g.items.length > 1 && <span className="session-group-count">{g.items.length}</span>}
-          </div>
-          {g.items.map((t) => (
+      {groups.map((g) =>
+        g.items.length <= 1 ? (
+          // 单会话主机：不组织成树，直接一行显示 ip 会话（无组头层级）
+          g.items.map((t) => (
             <div
               key={t.session_id}
               className={`session-item${t.session_id === activeId ? ' active' : ''}`}
@@ -72,16 +69,40 @@ export function SessionPanel({ terminals, hosts, activeId, onSwitch, onClose }: 
               title={`${t.host_name} · ${t.terminal_name}${t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
             >
               <span className={`status-dot${t.disconnected ? ' disconnected' : t.reconnecting ? ' reconnecting' : ''}`} />
-              <span className="sess-name">{t.terminal_name}</span>
+              <span className="sess-name">{g.label} · {t.terminal_name}</span>
               <span
                 className="sess-close"
                 title="关闭会话（同时关闭连接）"
                 onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}
               >✕</span>
             </div>
-          ))}
-        </div>
-      ))}
+          ))
+        ) : (
+          // 多会话主机：组头（主机名/ip + 会话数）+ 组内会话条目（树形）
+          <div key={g.key} className="session-group">
+            <div className="session-group-header" title={`${g.label}${g.ip !== g.label ? ` · ${g.ip}` : ''}`}>
+              <span className="session-group-name">{g.label}</span>
+              {g.items.length > 1 && <span className="session-group-count">{g.items.length}</span>}
+            </div>
+            {g.items.map((t) => (
+              <div
+                key={t.session_id}
+                className={`session-item${t.session_id === activeId ? ' active' : ''}`}
+                onClick={() => onSwitch(t.session_id)}
+                title={`${t.host_name} · ${t.terminal_name}${t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
+              >
+                <span className={`status-dot${t.disconnected ? ' disconnected' : t.reconnecting ? ' reconnecting' : ''}`} />
+                <span className="sess-name">{t.terminal_name}</span>
+                <span
+                  className="sess-close"
+                  title="关闭会话（同时关闭连接）"
+                  onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}
+                >✕</span>
+              </div>
+            ))}
+          </div>
+        )
+      )}
     </div>
   )
 }

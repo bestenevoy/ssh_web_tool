@@ -825,12 +825,14 @@ function App() {
           className={`btn btn-sm ${splitMode === 'h' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => (splitMode === 'h' ? exitSplit() : enterSplit('h'))}
           title="左右分屏（均分两栏，再次点击退出）"
-        >◫ 左右分屏</button>
+          style={{ whiteSpace: 'nowrap' }}
+        >◫ 左右</button>
         <button
           className={`btn btn-sm ${splitMode === 'v' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => (splitMode === 'v' ? exitSplit() : enterSplit('v'))}
           title="上下分屏（均分两行，再次点击退出）"
-        >⬒ 上下分屏</button>
+          style={{ whiteSpace: 'nowrap' }}
+        >⬒ 上下</button>
         <div style={{ flex: 1 }} />
         {/* 终端设置 */}
         <div className="topbar-divider" />
@@ -874,7 +876,7 @@ function App() {
         <button className="btn btn-secondary btn-sm" onClick={() => setSessionPanelCollapsed(!sessionPanelCollapsed)} title="显示/折叠右侧会话列表">
           🗂 会话
         </button>
-        <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(!panelCollapsed)}>
+        <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(!panelCollapsed)} title="显示/折叠右侧工具面板（快速指令/SFTP）">
           📋 面板
         </button>
         <button
