@@ -11,20 +11,106 @@
 import re
 import time
 
-# 提示符正则：匹配 bash/zsh/sh (user@host:path$ / #)、python (>>>)、
-# mysql/sqlite/redis/mongo/postgres 等交互式程序的提示符。
+# ---------- 已知提示符模式（按优先级排列，行首匹配） ----------
+# 每个模式匹配"提示符 + 其后空白"，match.end() 即命令开始位置。
+# 覆盖：bash/debian 默认、python、mysql/sqlite/redis/mongo 等交互程序、
+# zsh %（macOS 默认，过程式匹配见 _match_zsh_percent）、oh-my-zsh ➜、
+# starship/纯箭头 ❯、fish、Windows PowerShell/cmd。
 # 不匹配单独的 ">"（node 提示符，太通用容易误判普通输出行）。
-_ECHO_PROMPT_RE = re.compile(
-    r"^(?:"
-    r"[\w.-]+@[\w.-]+:[^#$\n]*[#$]"  # shell: user@host:path$ 或 user@host:path#
-    r"|>>>"  # python
-    r"|\.\.\."  # python 续行（跳过）
-    r"|mysql>"  # mysql
-    r"|sqlite>"  # sqlite
-    r"|[\d.]+:\d+>"  # redis: 127.0.0.1:6379>
-    r"|[a-zA-Z_][\w.-]*>"  # 通用: xxx> (mongo, postgres 等)
-    r")\s*"
-)
+_PROMPT_PATTERNS: list[re.Pattern[str]] = [
+    # shell: user@host:path$ 或 user@host:path#（bash/debian 默认）
+    re.compile(r"[\w.-]+@[\w.-]+:[^#$\n]*[#$]\s*"),
+    re.compile(r">>>\s*"),  # python
+    re.compile(r"\.\.\.\s*"),  # python 续行（跳过，不作为独立命令）
+    re.compile(r"mysql>\s*"),  # mysql
+    re.compile(r"sqlite>\s*"),  # sqlite
+    re.compile(r"[\d.]+:\d+>\s*"),  # redis: 127.0.0.1:6379>
+    re.compile(r"[a-zA-Z_][\w.-]*>\s*"),  # 通用: xxx> (mongo, postgres, mini 等)
+    # fish 默认提示符：user@host ~/path> （含全路径 user@host /a/b>）
+    re.compile(r"[\w.-]+@[\w.-]+[ ]+[^\s>]*>\s*"),
+    # Windows PowerShell：PS C:\Users\x>（续行提示符 >> 一并吃掉）
+    re.compile(r"PS [^>\n]*>+\s*"),
+    # Windows cmd：C:\Users\x>
+    re.compile(r"[A-Za-z]:\\[^>\n]*>+\s*"),
+    # oh-my-zsh：➜  dir [git:(branch)] [✗/✘]；路径段允许 ~ / \ 等路径字符；
+    # 段间空白用 \s*（提示符独占行时无尾随空格）
+    re.compile(r"➜\s+(?:[\w~./@\\-]+\s*)?(?:git:(?:\([^)]*\)|[\w-]+)\s*)?(?:[✗✘]\s*)?"),
+    # starship / 纯箭头提示符：❯ cmd（p10k 两行式第二行也命中）
+    re.compile(r"❯\s*"),
+    # starship / p10k 两行式第一行（提示符独占一行）：~/repo ❯ ——要求路径段
+    # 含 ~ / @（纯单词+❯ 的输出行如 "error ❯ fail" 不算提示符）
+    re.compile(r"[\[\]~\w@. \-/\\]*[~/@][\[\]~\w@. \-/\\]*❯\s*"),
+]
+
+# zsh % 提示符段长度上限（超过视为普通输出行）
+_ZSH_MAX_PROMPT_LEN = 120
+
+
+def _match_zsh_percent(s: str, prompt_only: bool = False) -> int | None:
+    """zsh 风格 % 提示符匹配（macOS 默认 user@host ~ %、zsh 默认 hostname%、~/path %）
+
+    误报防线（普通输出行大量含百分比）：
+    - 提示符段（% 之前）必须含字母且长度受限
+    - 提示符段最后一个空白分隔 token 非纯数字
+      （"50% done"、"100% packet loss"、"/dev/sda 45% used"、"[ 50%] Building"
+       等输出行均被拒绝）
+    - % 之后必须紧跟空白或行尾（"50%of" 不算）
+    - 仅提示符行（prompt_only）额外要求提示符段含 @ 或路径字符：裸 hostname%
+      空回车不触发"下一行是命令"捕获，避免把后续输出误记为命令
+    返回提示符结束位置（含其后空白）；非提示符返回 None
+    """
+    i = s.find("%")
+    if i <= 0:
+        return None  # 无 % 或 % 在行首（空提示符段，太宽松不识别）
+    head = s[:i].rstrip()
+    if len(head) > _ZSH_MAX_PROMPT_LEN or not re.search(r"[A-Za-z]", head):
+        return None
+    tokens = head.split()
+    if tokens and tokens[-1].isdigit():
+        return None
+    rest = s[i + 1 :]
+    if rest and not rest[0].isspace():
+        return None
+    if prompt_only and not re.search(r"[@~/\\]", head):
+        return None
+    end = i + 1
+    while end < len(s) and s[end] in " \t":
+        end += 1
+    return end
+
+
+def _strip_one_prompt(s: str, prompt_only: bool = False) -> int | None:
+    """若 s 以一个已知提示符开头，返回提示符（含其后空白）结束位置；否则 None
+
+    供 extract_echo_command（循环剥离）与 is_prompt_only（整行判断）共用。
+    边界校验：提示符与后续文本之间必须有空白（提示符独占行时允许直接到行尾），
+    防止输出行被误剥（如 vite/nuxi 输出 "➜  Local:   http://..." 不算提示符）。
+    """
+    for pat in _PROMPT_PATTERNS:
+        m = pat.match(s)
+        if m:
+            end = m.end()
+            if end >= len(s) or s[end] in " \t" or s[end - 1] in " \t":
+                return end
+    return _match_zsh_percent(s, prompt_only=prompt_only)
+
+
+def _arms_next_line_capture(s: str) -> bool:
+    """提示符独占整行时，是否武装"下一行是命令回显"捕获
+
+    仅自研/简易 shell 需要该机制：通用 xxx> 提示符（mini 等）与只能靠宽松
+    PS1 兜底识别的自定义提示符（[myshell]$ 等）。
+    标准 shell（bash/zsh %、fish、PS/cmd、箭头）虽也可能 fullmatch 宽松 PS1
+    正则（如 root@host:~#），但它们能被精确模式识别 → 同行回显，不武装
+    （防误记空回车后的输出）。
+    """
+    if _PROMPT_PATTERNS[6].fullmatch(s):  # 通用 xxx>（mongo/postgres/mini 等同形态）
+        return True
+    if re.fullmatch(r"[\[\]~\w@.\- :/\\]*?[#$]\s*", s):  # 宽松 PS1 兜底形态
+        # 能被精确提示符模式识别 = 标准 shell，不武装
+        return _strip_one_prompt(s, prompt_only=True) is None
+    return False
+
 
 # 清 ANSI 但保留 \r\n（回显解析需要 \r 判断行内覆盖）
 _ANSI_KEEP_CR_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
@@ -93,7 +179,8 @@ class EchoParser:
         # python 续行提示符不是新命令的起点（其后无独立命令回显行）
         if s.startswith("..."):
             return False
-        if _ECHO_PROMPT_RE.fullmatch(s):
+        n = _strip_one_prompt(s, prompt_only=True)
+        if n is not None and not s[n:].strip():
             return True
         # 宽松兜底与 extract_echo_command 保持一致（[user@host ~]$ 等）
         return bool(re.fullmatch(r"[\[\]~\w@.\- :/\\]*?[#$]\s*", s))
@@ -103,6 +190,7 @@ class EchoParser:
         """从一行输出中提取提示符之后的命令文本；非提示符行返回空串
         - 已知提示符**循环剥离**：阿里云等 shell 每次 readline 重绘都会清屏重写，
           一行内可能出现多个连续提示符（root@host:~# root@host:~# cmd）
+        - zsh % 提示符（macOS 默认等）由 _match_zsh_percent 处理（带误报防线）
         - 自定义 PS1 宽松兜底（仅当未识别出已知提示符时）：行首到第一个 $/# 之间
           为提示符标识（如 root@host#、[user@host ~]$），其后是命令；
           宽松匹配失败 = 普通输出行，不记录
@@ -119,11 +207,11 @@ class EchoParser:
         stripped = False
         cmd = s
         while True:
-            m = _ECHO_PROMPT_RE.match(cmd)
-            if not m:
+            n = _strip_one_prompt(cmd)
+            if n is None:
                 break
             stripped = True
-            rest = cmd[m.end() :]
+            rest = cmd[n:]
             if not rest.strip():
                 return ""  # 只剩提示符（空命令回车）
             cmd = rest
@@ -165,9 +253,11 @@ class EchoParser:
                     self._await_cmd = False
                     self._dedup_append(cmds, cmd)
                     continue
-                # 无命令的行：提示符独立成行（mini> 等自研 shell）时，下一个非空行
-                # 是该提示符的命令回显（否则这类 shell 完全无法从回显记录命令）
-                if self.is_prompt_only(line):
+                # 无命令的行：仅自研/简易 shell（通用 xxx>、宽松 PS1 兜底）的提示符
+                # 独立成行时，下一个非空行是该提示符的命令回显；标准 shell
+                # （bash/zsh/fish/PS/cmd/箭头/python）均同行回显，提示符独占行只会
+                # 出现在空回车场景，武装捕获只会把后续输出误记为命令
+                if self.is_prompt_only(line) and _arms_next_line_capture(line.strip()):
                     self._await_cmd = True
                 elif self._await_cmd and line.strip():
                     self._await_cmd = False

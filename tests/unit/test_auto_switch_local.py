@@ -48,6 +48,7 @@ def _read_log(s: SSHSession) -> str:
 def test_auto_switch_uses_configured_shell_and_broadcasts(tmp_path, monkeypatch):
     """自动切换：使用 fallback_local_shell 配置；提示进入终端输出与会话日志"""
     s = _mk_session()
+    s.set_logging(True)  # 默认不记录：断言读日志，先显式开启
     started = []
 
     async def _fake_start_local_shell(shell, cols=120, rows=40):
@@ -219,6 +220,7 @@ def test_is_transport_alive_variants():
 def test_switch_keeps_same_session_log_file(monkeypatch):
     """SSH → 本机切换后日志延续同一份文件（以会话为主，不拆分新文件）"""
     s = _mk_session()
+    s.set_logging(True)  # 默认不记录：本测试验证记录行为，先显式开启
     log_before = s._log_file
 
     async def _fake_start_local_shell(shell, cols=120, rows=40):
@@ -269,6 +271,7 @@ def test_eof_auto_switch_to_real_cmd(tmp_path, monkeypatch):
     """端到端：SSH stdout EOF → 自动切换到真实本机 cmd（ConPTY），同一会话日志延续"""
     monkeypatch.setattr(sessions_mod, "_fallback_shell", lambda: "cmd")
     s = _mk_session("eof12345")
+    s.set_logging(True)  # 默认不记录：断言读日志，先显式开启
     s.process = type("P", (), {"stdout": _FakeStdout(["remote$ exit\r\n"]), "stdin": None})()  # type: ignore[assignment]
     s._has_shell = True
     s._connected = True

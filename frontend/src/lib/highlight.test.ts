@@ -6,6 +6,7 @@
  * HighlightDecorator（xterm 装饰注册）依赖真实渲染环境，不在单测范围。
  */
 import { describe, expect, it } from 'vitest'
+import type { IBufferCell, IBufferLine } from '@xterm/xterm'
 import {
   compileHighlightRules,
   findMatches,
@@ -104,11 +105,12 @@ describe('readLineCells / planLine', () => {
     w: number
     chars: string
   }
-  function fakeLine(cells: FakeCell[]) {
+  function fakeLine(cells: FakeCell[]): Pick<IBufferLine, 'length' | 'getCell'> {
     return {
       length: cells.length,
-      getCell: (x: number) =>
-        x < cells.length ? { getWidth: () => cells[x].w, getChars: () => cells[x].chars } : null,
+      // 测试桩只实现 readLineCells 用到的 getWidth/getChars，其余 IBufferCell 成员不参与
+      getCell: (x: number): IBufferCell | undefined =>
+        (x < cells.length ? { getWidth: () => cells[x].w, getChars: () => cells[x].chars } : undefined) as IBufferCell,
     }
   }
 

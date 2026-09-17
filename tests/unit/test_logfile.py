@@ -53,6 +53,7 @@ def test_log_file_sanitizes_host():
 
 def test_finalize_log_file_replaces_running_with_end(tmp_path):
     s = _mk_session()
+    s.set_logging(True)  # 默认不记录，写入类行为先显式开启
     assert "_running_" in s._log_file
     # 真实场景：先写入内容（FileHandler 打开句柄），再 finalize 应能成功 rename
     s._feed_log("hello finalize\r\n")
@@ -116,6 +117,7 @@ def test_collapse_cr_lines_keeps_crlf_lines():
 def test_feed_log_flush_writes_cleaned_single_block(tmp_path):
     """聚合 flush：ANSI 清洗 + \r 合并，日志文件只含最终显示内容"""
     s = _mk_session()
+    s.set_logging(True)
 
     async def _run():
         s._feed_log("\x1b[31m进度\x1b[0m 10%\r\x1b[31m进度\x1b[0m 100%\n完成\r\n")
@@ -136,6 +138,7 @@ def test_feed_log_flush_writes_cleaned_single_block(tmp_path):
 def test_feed_log_flush_schedules_async(tmp_path):
     """异步静默 flush：等待超过 LOG_FLUSH_DELAY 后自动落盘"""
     s = _mk_session()
+    s.set_logging(True)
 
     async def _run():
         s._feed_log("hello world\r\n")
@@ -151,6 +154,7 @@ def test_feed_log_flush_schedules_async(tmp_path):
 def test_feed_log_flush_threshold(tmp_path):
     """超过阈值立即 flush（不等待静默期）"""
     s = _mk_session()
+    s.set_logging(True)
     big = "x" * (s.LOG_FLUSH_MAX + 100)
     s._feed_log(big)
     assert s._log_buf == ""  # 已同步 flush
@@ -163,6 +167,7 @@ def test_get_history_logs_flushes_before_read(tmp_path):
     """历史日志读取前先 flush 聚合缓冲（回归：banner/MOTD 刚产生未到静默期
     时直接读文件会漏掉，导致"连接后的主机信息没有显示"）"""
     s = _mk_session()
+    s.set_logging(True)
     s._feed_log("Welcome to Ubuntu 26.04\r\nroot@host:~# ")
     # 不等待 0.6s 静默期，直接读历史日志（内部应 flush）
     content = s.get_history_logs(offset=0, limit=5000)
@@ -174,6 +179,7 @@ def test_get_history_logs_flushes_before_read(tmp_path):
 def test_close_flushes_remaining_log(tmp_path):
     """关闭会话：剩余缓冲落盘 + 日志文件名补全结束时间"""
     s = _mk_session()
+    s.set_logging(True)
 
     async def _run():
         s._feed_log("tail data\r\n")
@@ -201,3 +207,72 @@ def test_cleanup_old_logs_removes_stale_only(tmp_path):
     assert n == 1
     assert not os.path.exists(old)
     assert os.path.exists(new)
+
+
+# ---------- 默认不记录 / 开启时选目录 ----------
+
+
+def test_default_no_recording_until_enabled(tmp_path):
+    """默认不记录：建会话不产生日志文件，feed 输出也不落盘；显式开启后才开始"""
+    s = _mk_session()
+    assert not s.is_logging()
+    s._feed_log("should not be recorded\r\n")
+    s._flush_log_now()
+    assert glob.glob(os.path.join(tmp_path, "*.log")) == []  # 从未创建日志文件
+    # 显式开启后才落盘
+    s.set_logging(True)
+    assert s.is_logging()
+    s._feed_log("now recording\r\n")
+    s._flush_log_now()
+    with open(s._log_file, encoding="utf-8") as f:
+        content = f.read()
+    assert "now recording" in content
+    assert "should not be recorded" not in content  # 开启前的输出从未进入缓冲
+
+
+def test_set_logging_custom_dir(tmp_path):
+    """开启记录时指定目录：日志写到该目录；未指定则用默认 LOG_DIR"""
+    s = _mk_session()
+    custom_dir = os.path.join(str(tmp_path), "mylogs")
+    s.set_logging(True, custom_dir)
+    assert os.path.dirname(s._log_file) == custom_dir
+    s._feed_log("into custom dir\r\n")
+    s._flush_log_now()
+    files = glob.glob(os.path.join(custom_dir, "*.log"))
+    assert len(files) == 1
+    with open(files[0], encoding="utf-8") as f:
+        assert "into custom dir" in f.read()
+    # 未指定目录时用默认 LOG_DIR（新文件）
+    s.set_logging(False)
+    s.set_logging(True)
+    assert os.path.normcase(os.path.dirname(s._log_file)) == os.path.normcase(str(tmp_path))
+
+
+def test_set_logging_reuses_file_in_same_dir(tmp_path):
+    """同目录暂停后恢复：沿用同一文件（同一终端 = 同一份记录）"""
+    s = _mk_session()
+    s.set_logging(True)
+    first = s._log_file
+    s._feed_log("part one\r\n")
+    s._flush_log_now()
+    s.set_logging(False)
+    s._feed_log("paused, dropped\r\n")
+    s.set_logging(True)
+    assert s._log_file == first  # 恢复沿用原文件
+    s._feed_log("part two\r\n")
+    s._flush_log_now()
+    with open(s._log_file, encoding="utf-8") as f:
+        content = f.read()
+    assert "part one" in content
+    assert "part two" in content
+    assert "paused, dropped" not in content  # 暂停期间的输出被丢弃
+
+
+def test_set_logging_invalid_dir_raises(tmp_path):
+    """目录不可创建（路径命中文件）→ OSError 上抛（API 层转 400 提示用户）"""
+    s = _mk_session()
+    blocked = os.path.join(str(tmp_path), "blocked")
+    open(blocked, "w").close()  # 文件占位：以其为目录必然创建失败
+    with pytest.raises(OSError):
+        s.set_logging(True, blocked)
+    assert not s.is_logging()  # 开启失败保持未记录状态

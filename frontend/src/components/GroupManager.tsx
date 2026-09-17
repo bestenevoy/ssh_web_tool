@@ -169,7 +169,7 @@ export function GroupManager({ open, groups, onClose, onAdd, onRename, onDelete,
             </div>
           ))}
         </div>
-        <div style={{ fontSize: 10, color: '#5a6a8a', marginTop: 6 }}>
+        <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: '#5a6a8a', marginTop: 6 }}>
           拖动 ⠿ 可调整分组顺序 · 复制分组会一并复制组内主机
         </div>
 

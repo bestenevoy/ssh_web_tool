@@ -23,7 +23,7 @@ const endpoints = [
 export function ApiDocs() {
   return (
     <div>
-      <div style={{ fontSize: 11, color: '#6b7a99', marginBottom: 10 }}>
+      <div style={{ fontSize: 'calc(11px * var(--ui-fs-scale))', color: 'var(--text-tertiary)', marginBottom: 10 }}>
         AI/Python可通过以下HTTP API调用SSH
       </div>
       {endpoints.map((ep, i) => {

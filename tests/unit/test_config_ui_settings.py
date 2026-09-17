@@ -54,6 +54,21 @@ def test_validate_block_split_mode():
     assert v("block_split_mode", 123) is None
 
 
+def test_validate_ui_font_scale():
+    """界面字号倍率：有限数字 0.8-1.6，保留两位小数；非法回退 None"""
+    v = cfg_mod._validate_ui_setting
+    assert v("ui_font_scale", 1.0) == 1.0
+    assert v("ui_font_scale", 1.15) == 1.15
+    assert v("ui_font_scale", 1.2) == 1.2
+    assert v("ui_font_scale", 0.8) == 0.8  # 下界
+    assert v("ui_font_scale", 1.6) == 1.6  # 上界
+    assert v("ui_font_scale", 0.79) is None
+    assert v("ui_font_scale", 1.61) is None
+    assert v("ui_font_scale", True) is None  # bool 不是合法数字
+    assert v("ui_font_scale", "1.2") is None
+    assert v("ui_font_scale", None) is None
+
+
 def test_validate_custom_prompt_patterns_filters_items():
     """自定义正则列表：逐项过滤非法条目（非整键回退），截断到上限"""
     v = cfg_mod._validate_ui_setting
@@ -176,6 +191,35 @@ def test_validate_highlight_rules_bool_fields_required():
     v = cfg_mod._validate_ui_setting
     assert v("highlight_rules", [_rule(enabled="yes")]) == []
     assert v("highlight_rules", [_rule(case=1)]) == []
+
+
+# ============ 日志记录（log_record_dir / log_record_no_ask） ============
+
+
+def test_log_record_keys_defaults(tmp_app_dir):
+    """旧配置无日志记录键时回退默认：目录空串（= 程序默认 logs 目录）、不再询问关闭"""
+    (tmp_app_dir / "config.json").write_text(json.dumps({"ui_settings": {"theme": "dark"}}), encoding="utf-8")
+    got = cfg_mod.get_ui_settings()
+    assert got["log_record_dir"] == ""
+    assert got["log_record_no_ask"] is False
+
+
+def test_validate_log_record_dir():
+    """目录字符串：trim 规范化；空串合法（= 默认目录）；非字符串回退 None"""
+    v = cfg_mod._validate_ui_setting
+    assert v("log_record_dir", "  D:\\logs  ") == "D:\\logs"
+    assert v("log_record_dir", "") == ""
+    assert v("log_record_dir", 42) is None
+    assert v("log_record_dir", None) is None
+
+
+def test_validate_log_record_no_ask():
+    """不再询问必须是 bool"""
+    v = cfg_mod._validate_ui_setting
+    assert v("log_record_no_ask", True) is True
+    assert v("log_record_no_ask", False) is False
+    assert v("log_record_no_ask", 1) is None
+    assert v("log_record_no_ask", "yes") is None
 
 
 def test_validate_highlight_rules_not_list_falls_back():

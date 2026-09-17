@@ -7,12 +7,56 @@ export interface UiSettingsPayload {
   theme: 'dark' | 'light'
   font_family: string
   font_size: number
+  ui_font_scale: number
   block_bar: boolean
   block_auto_fold: boolean
   block_max_lines: number
   block_split_mode: 'enter' | 'prompt'
   custom_prompt_patterns: string[]
   highlight_rules: HighlightRule[]
+  editor_recent_paths: string[]
+  log_record_dir: string
+  log_record_no_ask: boolean
+}
+
+// ---- 编辑器文件接口 ----
+export interface FileReadResult {
+  path: string
+  size: number
+  readonly: boolean
+  encoding: string
+  content: string
+  start_line: number
+  lines_returned: number
+  has_more: boolean
+}
+
+export interface FileListEntry {
+  name: string
+  is_dir: boolean
+  size: number
+  mtime: number
+}
+
+export interface FileListResult {
+  dir: string
+  parent: string | null
+  entries: FileListEntry[]
+}
+
+export interface EditorDefaults {
+  scripts_dir: string
+  logs_dir: string
+}
+
+/** 编辑器广播目标会话条目（App 从终端实例列表派生） */
+export interface EditorSessionInfo {
+  session_id: string
+  /** 显示名（终端名，如「终端1」/「本机 PowerShell」） */
+  label: string
+  /** 主机名（user@host 或 localhost） */
+  host: string
+  disconnected: boolean
 }
 
 const BASE = ''
@@ -145,6 +189,27 @@ export const api = {
     request<{ session_id: string; content: string }>(
       `/api/logs/${session_id}?offset=${offset}&limit=${limit}`
     ),
+  // 会话日志记录开关（默认不记录；开启记录时可指定保存目录，省略用后端默认目录）
+  getSessionRecord: (session_id: string) =>
+    request<{ session_id: string; recording: boolean }>(`/api/sessions/${session_id}/record`),
+  setSessionRecord: (session_id: string, enabled: boolean, log_dir?: string) =>
+    request<{ session_id: string; recording: boolean }>(`/api/sessions/${session_id}/record`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled, log_dir: log_dir || null }),
+    }),
+
+  // ---- 编辑器：本地文件读写/目录浏览 ----
+  readFile: (path: string, start_line = 0, max_lines = 2000000) =>
+    request<FileReadResult>(
+      `/api/files/read?path=${encodeURIComponent(path)}&start_line=${start_line}&max_lines=${max_lines}`
+    ),
+  writeFile: (path: string, content: string, encoding: string) =>
+    request<{ path: string; size: number; encoding: string }>('/api/files/write', {
+      method: 'POST',
+      body: JSON.stringify({ path, content, encoding }),
+    }),
+  listDir: (dir: string) => request<FileListResult>(`/api/files/list?dir=${encodeURIComponent(dir)}`),
+  editorDefaults: () => request<EditorDefaults>('/api/files/defaults'),
 
   // 持久化终端（会话ID复用）
   listSavedTerminals: () => request<{ terminals: SavedTerminal[] }>('/api/terminals/saved'),

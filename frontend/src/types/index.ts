@@ -93,6 +93,8 @@ export interface QuickCommand {
   // 指令类型：direct 直接执行 / param 带参数（点击后输入到终端，替换命令中的 {args} 占位符）
   type?: 'direct' | 'param'
   pre_ops?: QuickPreOp[]
+  // 可选短标识（唯一，大小写不敏感），用于 .zs 脚本 @ 调用
+  key?: string
 }
 
 export interface SftpItem {

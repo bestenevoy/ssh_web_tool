@@ -218,12 +218,12 @@ class SSHSession:
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
-        # 恢复已有会话时沿用旧文件（同一终端 = 同一份记录）
+        # 默认不记录：这里只预生成路径（恢复会话沿用旧文件），不创建文件与
+        # FileHandler；用户右键「开始记录」时才按所选目录惰性落盘（set_logging）
         log_file = resolve_existing_log(self.session_id, self.LOG_DIR) or build_log_file(
             self.session_id, self.host, self.created_at, self.LOG_DIR
         )
-        self._logger = self._get_or_create_logger(session_id, log_file)
-        self._session_log = SessionLog(session_id, log_file, self._logger, self.LOG_FLUSH_DELAY, self.LOG_FLUSH_MAX)
+        self._session_log = SessionLog(session_id, log_file, None, self.LOG_FLUSH_DELAY, self.LOG_FLUSH_MAX)
         self._reader_task: asyncio.Task | None = None
         # 本地 shell（WinPTY 后端，本机 cmd/powershell；SSH 断开后可自动切换）
         self._local_proc: Any = None  # winpty.PtyProcess（backend=1 WinPTY，动态导入，类型标注为 Any）
@@ -271,7 +271,7 @@ class SSHSession:
 
     @property
     def _log_file(self) -> str:
-        """当前日志文件路径（单一数据源：SessionLog.log_file，finalize 后自动反映新路径）"""
+        """当前日志文件路径（单一数据源：SessionLog.log_file，构造时预生成，finalize 后自动反映新路径）"""
         return self._session_log.log_file
 
     def _resolve_existing_log(self) -> str | None:
@@ -474,6 +474,31 @@ class SSHSession:
             "password": self._password,
         }
 
+    def is_logging(self) -> bool:
+        """当前会话日志是否正在记录（会话级暂停/恢复开关状态）"""
+        return self._session_log.enabled
+
+    def set_logging(self, enabled: bool, log_dir: str | None = None) -> None:
+        """开启/暂停当前会话日志记录（默认不记录）
+
+        - enabled=True：按 log_dir 开启记录（省略时用默认 LOG_DIR）。目标目录
+          与当前文件同目录则沿用（同会话暂停后恢复/重连续写），否则在该目录
+          新建文件；目录无法创建/不可写时抛 OSError，由调用方提示用户。
+        - enabled=False：暂停记录（丢弃未落盘缓冲；已落盘内容保留）。
+        """
+        if not enabled:
+            self._session_log.set_enabled(False)
+            return
+        target_dir = log_dir or self.LOG_DIR
+        current = self._log_file
+        if current and os.path.normcase(os.path.dirname(current)) == os.path.normcase(target_dir):
+            log_file = current  # 同目录沿用（同一终端 = 同一份记录）
+        else:
+            log_file = resolve_existing_log(self.session_id, target_dir) or build_log_file(
+                self.session_id, self.host, self.created_at, target_dir
+            )
+        self._session_log.enable_with(log_file, target_dir, self._logger_cache)
+
     def note_local_command(self, typed: str) -> None:
         """本地 shell 回车成行（未被 SSH 拦截）时调用：交给 PSReadLine 采集器
 
@@ -596,11 +621,6 @@ class SSHSession:
                 pass
         finally:
             self._ssh_switch_task = None
-
-    @classmethod
-    def _get_or_create_logger(cls, session_id: str, log_file: str | None = None) -> logging.Logger:
-        """获取或创建会话专属 logger（逻辑在 SessionLog.get_or_create_logger）"""
-        return SessionLog.get_or_create_logger(session_id, log_file, cls.LOG_DIR, cls._logger_cache)
 
     # 日志聚合写入（逻辑在 SessionLog 组件）：静默期（LOG_FLUSH_DELAY）或缓冲超阈值时一次性清洗写入
     LOG_FLUSH_DELAY = 0.6  # 秒：无新输出多久后 flush
@@ -959,6 +979,8 @@ class SSHSession:
 
     def resize_local(self, cols: int, rows: int):
         """调整本地 shell 窗口尺寸（setwinsize 参数顺序 (rows, cols)）"""
+        # 终端镜像同步尺寸（日志转录与终端显示一致的前提；未开启记录也同步）
+        self._session_log.resize(cols, rows)
         if self._local_proc is not None:
             try:
                 self._local_proc.setwinsize(rows, cols)
@@ -1305,6 +1327,8 @@ class SSHSession:
     async def resize_pty(self, cols: int, rows: int):
         """调整终端大小"""
         print(f"[SSHSystem] resize_pty: cols={cols}, rows={rows}, has_process={self.process is not None}")
+        # 终端镜像同步尺寸（日志转录与终端显示一致的前提；未开启记录也同步）
+        self._session_log.resize(cols, rows)
         if self.process:
             try:
                 # 注意：asyncssh 的 change_terminal_size 参数顺序是 (cols, rows)，不是 (rows, cols)！

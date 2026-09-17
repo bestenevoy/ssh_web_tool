@@ -11,6 +11,7 @@ from ssh_web_tool.api.models import (
     CreateSessionFromHostRequest,
     CreateSessionRequest,
     RunCommandRequest,
+    SessionRecordRequest,
 )
 from ssh_web_tool.config import (
     get_connect_timeout,
@@ -398,6 +399,30 @@ async def api_get_session_logs(session_id: str, offset: int = 0, limit: int = 20
         raise HTTPException(status_code=404, detail="会话不存在")
     logs = session.get_history_logs(offset=offset, limit=limit)
     return {"session_id": session_id, "offset": offset, "limit": limit, "content": logs}
+
+
+@router.get("/sessions/{session_id}/record")
+async def api_get_session_record(session_id: str):
+    """获取当前会话日志记录开关状态"""
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"session_id": session_id, "recording": session.is_logging()}
+
+
+@router.post("/sessions/{session_id}/record")
+async def api_set_session_record(session_id: str, req: SessionRecordRequest):
+    """开启/暂停当前会话日志记录（默认不记录；开启时可指定保存目录，省略用默认目录）"""
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        session.set_logging(req.enabled, req.log_dir)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"日志保存目录不可用: {e}")
+    return {"session_id": session_id, "recording": session.is_logging()}
 
 
 @router.get("/logs/{session_id}")

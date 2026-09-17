@@ -17,6 +17,7 @@
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -178,12 +179,16 @@ UI_SETTINGS_DEFAULTS: dict = {
     "theme": "light",  # light / dark
     "font_family": 'Consolas, "Microsoft YaHei", monospace',  # 终端字体栈
     "font_size": 13,  # 终端字号（8-32）
+    "ui_font_scale": 1.0,  # 界面字号倍率（UI 文本等比缩放；不影响终端字号）
     "block_bar": True,  # 命令块左侧色条标记
     "block_auto_fold": False,  # 命令输出超长时自动折叠（默认关）
     "block_max_lines": 30,  # 自动折叠保留的输出行数
     "block_split_mode": "prompt",  # 命令块切块方式：按提示符出现 / 按 Enter
     "custom_prompt_patterns": [],  # 自定义提示符正则（prompt 模式下优先于内置匹配）
     "highlight_rules": _DEFAULT_HIGHLIGHT_RULES,  # 关键字高亮规则（keyword=正则源）
+    "editor_recent_paths": [],  # 编辑器最近打开的文件路径（新路径插到最前，最多 20 条）
+    "log_record_dir": "",  # 终端日志默认保存目录（空 = 程序默认 logs 目录）
+    "log_record_no_ask": False,  # 开启记录时不再询问保存目录（直接用默认目录）
 }
 
 # ui_settings 各键的合法值校验器（返回规范化后的值；非法返回 None 表示回退默认）
@@ -230,6 +235,11 @@ def _validate_ui_setting(key: str, value) -> object | None:
         return value if isinstance(value, str) and value.strip() else None
     if key == "font_size":
         return value if isinstance(value, int) and not isinstance(value, bool) and 8 <= value <= 32 else None
+    if key == "ui_font_scale":
+        # 界面字号倍率：有限数字，范围 0.8-1.6，保留两位小数
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        return round(float(value), 2) if 0.8 <= value <= 1.6 else None
     if key in ("block_bar", "block_auto_fold"):
         return value if isinstance(value, bool) else None
     if key == "block_max_lines":
@@ -256,6 +266,19 @@ def _validate_ui_setting(key: str, value) -> object | None:
                 seen_keywords.add(rule["keyword"])
                 cleaned_rules.append(rule)
         return cleaned_rules[:_MAX_HIGHLIGHT_COUNT]
+    if key == "editor_recent_paths":
+        # 列表逐项过滤：只保留非空且长度有限的路径字符串（去重交由前端维护顺序）
+        if not isinstance(value, list):
+            return None
+        cleaned = [v for v in value if isinstance(v, str) and v.strip() and len(v) <= 500]
+        return cleaned[:20]
+    if key == "log_record_dir":
+        # 目录路径：允许空串（= 程序默认 logs 目录）；非空时限制长度
+        if not isinstance(value, str):
+            return None
+        return value.strip()[:500]
+    if key == "log_record_no_ask":
+        return value if isinstance(value, bool) else None
     return None  # 未知键一律忽略
 
 

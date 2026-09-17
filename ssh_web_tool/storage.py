@@ -6,6 +6,7 @@
 
 import json
 import os
+import re
 import time
 import uuid
 
@@ -333,22 +334,53 @@ class Storage:
     # ============ 快速指令管理 ============
 
     def list_quick_commands(self) -> list[dict]:
-        """获取所有快速指令（兼容旧数据：自动补全 type/pre_ops 字段）"""
+        """获取所有快速指令（兼容旧数据：自动补全 type/pre_ops/key 字段）"""
         commands = self._data.get("quick_commands", [])
         for qc in commands:
             qc.setdefault("type", "direct")
             qc.setdefault("pre_ops", [])
+            qc.setdefault("key", "")
         return commands
 
+    @staticmethod
+    def _normalize_qc_key(qc_key: str) -> str:
+        """规范快捷指令 key：空值允许；非空时仅限字母/数字/下划线/连字符（≤50），用于 .zs 脚本 @ 调用"""
+        k = (qc_key or "").strip()
+        if not k:
+            return ""
+        if len(k) > 50 or not re.fullmatch(r"[A-Za-z0-9_-]+", k):
+            raise ValueError("key 仅限字母/数字/下划线/连字符，最长 50 字符")
+        return k
+
+    def _ensure_qc_key_free(self, key: str, exclude_id: str | None = None) -> None:
+        """校验 key 唯一性（大小写不敏感）；冲突抛 ValueError"""
+        if not key:
+            return
+        lowered = key.lower()
+        for qc in self._data.get("quick_commands", []):
+            if exclude_id and qc.get("id") == exclude_id:
+                continue
+            if (qc.get("key") or "").lower() == lowered:
+                raise ValueError(f"key「{key}」已被快捷指令「{qc.get('name')}」占用")
+
     def add_quick_command(
-        self, name: str, command: str, description: str = "", cmd_type: str = "direct", pre_ops: list | None = None
+        self,
+        name: str,
+        command: str,
+        description: str = "",
+        cmd_type: str = "direct",
+        pre_ops: list | None = None,
+        qc_key: str = "",
     ) -> dict:
         """新增快速指令
 
         Args:
             cmd_type: "direct" 直接执行 / "param" 带参数（输入后不执行，命令含 {args} 供编辑）
             pre_ops: 预操作列表 [{"type": "upload"|"chmod"|"env", ...}]
+            qc_key: 可选短标识（唯一），用于 .zs 脚本 @ 调用
         """
+        key = self._normalize_qc_key(qc_key)
+        self._ensure_qc_key_free(key)
         qc = {
             "id": "qc_" + str(uuid.uuid4())[:8],
             "name": name,
@@ -356,6 +388,7 @@ class Storage:
             "description": description,
             "type": cmd_type if cmd_type in ("direct", "param") else "direct",
             "pre_ops": pre_ops or [],
+            "key": key,
         }
         self._data["quick_commands"].append(qc)
         self._save()
@@ -369,8 +402,11 @@ class Storage:
         description: str = "",
         cmd_type: str = "direct",
         pre_ops: list | None = None,
+        qc_key: str = "",
     ) -> dict | None:
         """更新快速指令"""
+        key = self._normalize_qc_key(qc_key)
+        self._ensure_qc_key_free(key, exclude_id=qc_id)
         for qc in self._data["quick_commands"]:
             if qc["id"] == qc_id:
                 qc["name"] = name
@@ -378,6 +414,7 @@ class Storage:
                 qc["description"] = description
                 qc["type"] = cmd_type if cmd_type in ("direct", "param") else "direct"
                 qc["pre_ops"] = pre_ops or []
+                qc["key"] = key
                 self._save()
                 return qc
         return None

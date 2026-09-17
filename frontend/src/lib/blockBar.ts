@@ -3,8 +3,8 @@
  *
  * 折叠本体在 folds.ts（FoldStore）：直接 splice xterm buffer 抽出 body 行，
  * 折叠后 buffer 实际行数减少（滚动条变短）；本文件只负责渲染与交互——
- *   - 色条：每块一条左侧色条，折叠态降透明度、选中态加描边光环；
- *   - 徽标：折叠块在提示符行上叠加「⋯ 已折叠 N 行，点击展开」；
+ *   - 色条：每块一条左侧色条，折叠态虚线描边（rssh 同款）、选中态加描边光环；
+ *   - 徽标：折叠块在命令行右端叠加行末角标「⋯ 已折叠 N 行」（rssh 同款）；
  *   - 交互：单击色条选中块（rssh Finder 风格：Shift 范围 / Ctrl 切换）、
  *     点徽标展开、双击色条复制块内容（折叠块复制走 fold.savedLines）、
  *     折叠/展开走终端右键菜单（hitTest + toggleFold 供 App 层菜单使用）。
@@ -245,7 +245,6 @@ export function attachBlockBar(
   interface BarGeometry {
     rowHeight: number
     originTop: number
-    originLeft: number
     viewportY: number
     visBot: number
   }
@@ -255,24 +254,23 @@ export function attachBlockBar(
     const active = term.buffer.active
     // 备用缓冲区（vim/top/less）：行号坐标系完全不同，无法换算
     if (active.type !== 'normal') return null
-    // 行高测量：优先实测 .xterm-rows（渲染器会内联设置其高度），
-    // .xterm-screen 作退路（部分渲染器盒高为 0）
-    const rowsEl = term.element?.querySelector('.xterm-rows') as HTMLElement | null
+    // 行高/原点测量：rssh 同款用 .xterm-screen（rows × cellHeight，canvas/DOM 渲染器都准）；
+    // .xterm-rows 只在 DOM 渲染器下可靠（xterm 6 canvas 渲染器下测量有偏差导致色条错位），仅作退路
     const screen = term.element?.querySelector('.xterm-screen') as HTMLElement | null
-    if (!rowsEl && !screen) return null
-    const rowsRect = rowsEl?.getBoundingClientRect()
+    const rowsEl = term.element?.querySelector('.xterm-rows') as HTMLElement | null
+    if (!screen && !rowsEl) return null
     const screenRect = screen?.getBoundingClientRect()
-    const originRect = rowsRect && rowsRect.height > 0 ? rowsRect : (screenRect && screenRect.height > 0 ? screenRect : null)
+    const rowsRect = rowsEl?.getBoundingClientRect()
+    const originRect = screenRect && screenRect.height > 0 ? screenRect : (rowsRect && rowsRect.height > 0 ? rowsRect : null)
     let rowHeight = 0
-    if (rowsRect && rowsRect.height > 0) rowHeight = rowsRect.height / term.rows
-    else if (screenRect && screenRect.height > 0) rowHeight = screenRect.height / term.rows
+    if (screenRect && screenRect.height > 0) rowHeight = screenRect.height / term.rows
+    else if (rowsRect && rowsRect.height > 0) rowHeight = rowsRect.height / term.rows
     if (!originRect || rowHeight <= 0 || term.rows <= 0) return null
     const containerRect = container.getBoundingClientRect()
     const viewportY = active.viewportY
     return {
       rowHeight,
       originTop: originRect.top - containerRect.top,
-      originLeft: originRect.left - containerRect.left,
       viewportY,
       visBot: viewportY + term.rows - 1,
     }
@@ -294,7 +292,7 @@ export function attachBlockBar(
       return
     }
     overlay.style.display = 'block'
-    const { rowHeight, originTop, originLeft, viewportY, visBot } = g
+    const { rowHeight, originTop, viewportY, visBot } = g
     const cursorAbs = active.baseY + active.cursorY
 
     const bars: string[] = []
@@ -316,17 +314,22 @@ export function attachBlockBar(
       if (btm >= t) {
         const top = originTop + (t - viewportY) * rowHeight
         const h = (btm - t + 1) * rowHeight
+        // 折叠态：虚线描边（rssh 同款，fill 透明透出背景）；正常态实心填充
+        const barAttrs = folded
+          ? `fill="none" stroke="${b.color}" stroke-width="1" stroke-dasharray="2,2"`
+          : `fill="${b.color}"`
         bars.push(
           `<rect class="block-hit" data-block="${b.id}" x="0" y="${top.toFixed(1)}" width="${HIT_WIDTH}" height="${h.toFixed(1)}" fill="transparent"></rect>` +
-          `<rect class="block-bar${folded ? ' folded' : ''}${selected ? ' selected' : ''}" x="${((BAR_ZONE_PX - BAR_WIDTH) / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${BAR_WIDTH}" height="${h.toFixed(1)}" rx="1.5" fill="${b.color}"></rect>`,
+          `<rect class="block-bar${folded ? ' folded' : ''}${selected ? ' selected' : ''}" x="${((BAR_ZONE_PX - BAR_WIDTH) / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${BAR_WIDTH}" height="${h.toFixed(1)}" rx="1.5" ${barAttrs}></rect>`,
         )
         sig += `${b.id}:${t}-${btm}${folded ? 'F' : ''}${selected ? 'S' : ''};`
       }
-      // 折叠徽标：定位在提示符行，仅可见时绘制
+      // 折叠徽标：rssh 同款行末角标——与命令行同一行、贴容器右缘（不遮挡任何文本），
+      // 仅命令行在视口内时绘制
       if (f && b.start.line >= viewportY && b.start.line <= visBot) {
         const top = originTop + (b.start.line - viewportY) * rowHeight
         badges.push(
-          `<div class="block-fold-badge" data-block="${b.id}" style="left:${originLeft.toFixed(1)}px;top:${top.toFixed(1)}px;--block-color:${b.color}">⋯ 已折叠 ${f.count} 行，点击展开</div>`,
+          `<div class="block-fold-badge" data-block="${b.id}" title="点击展开" style="top:${top.toFixed(1)}px">⋯ 已折叠 ${f.count} 行</div>`,
         )
         sig += `B${b.id}:${b.start.line};`
       }

@@ -8,6 +8,8 @@ export interface TerminalSettings {
   theme: Theme
   fontFamily: string
   fontSize: number
+  // 界面字号倍率（UI 文本等比缩放；不影响终端字号）
+  uiFontScale: number
   // 命令块（借鉴 rssh）：左侧色条标记 / 自动折叠 / 折叠保留行数
   blockBar: boolean
   blockAutoFold: boolean
@@ -18,12 +20,18 @@ export interface TerminalSettings {
   customPromptPatterns: string[]
   // 关键字高亮规则（借鉴 rssh；keyword 即正则源，也是规则身份键）
   highlightRules: HighlightRule[]
+  // 编辑器最近打开的文件路径（新路径插到最前，最多 20 条）
+  editorRecentPaths: string[]
+  // 日志记录：默认保存目录（空 = 程序默认 logs 目录）/ 开启记录时不再询问
+  logRecordDir: string
+  logRecordNoAsk: boolean
 }
 
 export const DEFAULT_SETTINGS: TerminalSettings = {
   theme: 'light',
   fontFamily: 'Consolas, "Microsoft YaHei", monospace',
   fontSize: 13,
+  uiFontScale: 1,
   blockBar: true,
   blockAutoFold: false, // 折叠默认关闭（可在设置弹窗开启）
   blockMaxLines: 30,
@@ -31,6 +39,9 @@ export const DEFAULT_SETTINGS: TerminalSettings = {
   customPromptPatterns: [],
   // 深拷贝默认规则：SettingsModal 的编辑都产生新数组，此处防御共享引用被就地改
   highlightRules: DEFAULT_HIGHLIGHT_RULES.map((r) => ({ ...r })),
+  editorRecentPaths: [],
+  logRecordDir: '',
+  logRecordNoAsk: false,
 }
 
 // 可选字体列表
@@ -49,18 +60,29 @@ function clampFontSize(size: number): number {
   return Math.max(8, Math.min(32, Math.round(size)))
 }
 
+/** 界面字号倍率范围（与后端 config.py 校验一致） */
+const UI_FONT_SCALE_RANGE = { min: 0.8, max: 1.6 }
+
+function clampUiFontScale(scale: number): number {
+  return Math.max(UI_FONT_SCALE_RANGE.min, Math.min(UI_FONT_SCALE_RANGE.max, Math.round(scale * 100) / 100))
+}
+
 /** 前端 camelCase 设置 → 后端 snake_case ui_settings 负载（只映射传入的键，用于部分更新） */
 export function toUiSettingsPayload(partial: Partial<TerminalSettings>): Partial<UiSettingsPayload> {
   const out: Partial<UiSettingsPayload> = {}
   if (partial.theme !== undefined) out.theme = partial.theme
   if (partial.fontFamily !== undefined) out.font_family = partial.fontFamily
   if (partial.fontSize !== undefined) out.font_size = partial.fontSize
+  if (partial.uiFontScale !== undefined) out.ui_font_scale = partial.uiFontScale
   if (partial.blockBar !== undefined) out.block_bar = partial.blockBar
   if (partial.blockAutoFold !== undefined) out.block_auto_fold = partial.blockAutoFold
   if (partial.blockMaxLines !== undefined) out.block_max_lines = partial.blockMaxLines
   if (partial.blockSplitMode !== undefined) out.block_split_mode = partial.blockSplitMode
   if (partial.customPromptPatterns !== undefined) out.custom_prompt_patterns = partial.customPromptPatterns
   if (partial.highlightRules !== undefined) out.highlight_rules = partial.highlightRules
+  if (partial.editorRecentPaths !== undefined) out.editor_recent_paths = partial.editorRecentPaths
+  if (partial.logRecordDir !== undefined) out.log_record_dir = partial.logRecordDir
+  if (partial.logRecordNoAsk !== undefined) out.log_record_no_ask = partial.logRecordNoAsk
   return out
 }
 
@@ -91,6 +113,9 @@ export function applyUiSettings(
   if (typeof payload.font_size === 'number' && Number.isFinite(payload.font_size)) {
     next.fontSize = clampFontSize(payload.font_size)
   }
+  if (typeof payload.ui_font_scale === 'number' && Number.isFinite(payload.ui_font_scale)) {
+    next.uiFontScale = clampUiFontScale(payload.ui_font_scale)
+  }
   if (typeof payload.block_bar === 'boolean') next.blockBar = payload.block_bar
   if (typeof payload.block_auto_fold === 'boolean') next.blockAutoFold = payload.block_auto_fold
   if (typeof payload.block_max_lines === 'number' && Number.isFinite(payload.block_max_lines)) {
@@ -119,6 +144,15 @@ export function applyUiSettings(
     }
     next.highlightRules = cleaned
   }
+  if (Array.isArray(payload.editor_recent_paths)) {
+    next.editorRecentPaths = payload.editor_recent_paths.filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+  }
+  if (typeof payload.log_record_dir === 'string') {
+    next.logRecordDir = payload.log_record_dir.trim()
+  }
+  if (typeof payload.log_record_no_ask === 'boolean') {
+    next.logRecordNoAsk = payload.log_record_no_ask
+  }
   return next
 }
 
@@ -143,6 +177,11 @@ export function useSettings() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', settings.theme)
   }, [settings.theme])
+
+  // 应用界面字号倍率到 CSS 变量（所有 UI font-size 均为 calc(Npx * var(--ui-fs-scale))）
+  useEffect(() => {
+    document.documentElement.style.setProperty('--ui-fs-scale', String(settings.uiFontScale))
+  }, [settings.uiFontScale])
 
   const updateSettings = useCallback((partial: Partial<TerminalSettings>) => {
     setSettings((prev) => ({ ...prev, ...partial }))

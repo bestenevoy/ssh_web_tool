@@ -472,24 +472,43 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     })
   }, [])
 
+  // 定向发送命令到指定会话（sendCommand 的多会话版本）：返回是否发送成功。
+  // focus=false 用于 .zs 广播播放——编辑器打开时光标应留在编辑器，不能抢焦点
+  const sendCommandTo = useCallback((session_id: string, command: string, execute: boolean = true, focus: boolean = true): boolean => {
+    const inst = terminalsRef.current.get(session_id)
+    if (!inst || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) return false
+    if (execute) {
+      sendClient(inst.ws, { type: 'input', data: command + '\n' })
+      api.recordCommand(command).catch(() => {})
+      inst.input_buffer = ''
+    } else {
+      // 只输入命令文本，不发送换行，用户可以编辑后手动执行
+      sendClient(inst.ws, { type: 'input', data: command })
+      inst.input_buffer = command
+      inst.input_cursor = command.length
+    }
+    if (focus) inst.term.focus()
+    return true
+  }, [])
+
   const sendCommand = useCallback((command: string, execute: boolean = true) => {
     if (!activeId) return
-    const inst = terminals.get(activeId)
-    if (inst && inst.ws && inst.ws.readyState === WebSocket.OPEN) {
-      if (execute) {
-        sendClient(inst.ws, { type: 'input', data: command + '\n' })
-        api.recordCommand(command).catch(() => {})
-        inst.input_buffer = ''
-      } else {
-        // 只输入命令文本，不发送换行，用户可以编辑后手动执行
-        sendClient(inst.ws, { type: 'input', data: command })
-        inst.input_buffer = command
-        inst.input_cursor = command.length
-      }
-      // 输入/执行后光标聚焦到终端，方便直接继续输入
-      inst.term.focus()
-    }
-  }, [activeId, terminals])
+    sendCommandTo(activeId, command, execute)
+  }, [activeId, sendCommandTo])
+
+  // 读取指定会话 xterm buffer 的最后 N 行纯文本（监控抽屉 / hover 预览用，
+  // 一期零后端改动）。会话不存在返回 null；尾部的空行会被裁掉。
+  const readBufferTail = useCallback((session_id: string, lines: number): string | null => {
+    const inst = terminalsRef.current.get(session_id)
+    if (!inst) return null
+    const buf = inst.term.buffer.active
+    let end = buf.length - 1
+    while (end >= 0 && !(buf.getLine(end)?.translateToString(true) ?? '').trim()) end--
+    const start = Math.max(0, end - lines + 1)
+    const out: string[] = []
+    for (let i = start; i <= end; i++) out.push(buf.getLine(i)?.translateToString(true) ?? '')
+    return out.join('\n')
+  }, [])
 
   // 设置快捷键处理函数（Alt+R 打开搜索弹窗）
   const setShortcutHandler = useCallback((handler: (() => void) | null) => {
@@ -583,6 +602,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     disconnectTerminal,
     setReconnecting,
     sendCommand,
+    sendCommandTo,
+    readBufferTail,
     registerContainer,
     focusActiveTerminal,
     setShortcutHandler,

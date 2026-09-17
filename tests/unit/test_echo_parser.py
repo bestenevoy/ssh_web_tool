@@ -106,6 +106,135 @@ def test_python_continuation_not_prompt_own_line():
     assert p.feed("0\n") == []  # 多行输出不被误记为命令
 
 
+# ---------- zsh % 提示符（macOS 默认 / 纯 zsh / 带路径） ----------
+
+
+def test_zsh_percent_prompt_macos():
+    assert extract("user@host ~ % systemctl status nginx") == "systemctl status nginx"
+
+
+def test_zsh_percent_prompt_plain_and_path():
+    assert extract("myserver% ls -la") == "ls -la"
+    assert extract("~/repo % make build") == "make build"
+
+
+def test_zsh_percent_feed_tab_completion():
+    """zsh % 提示符下 Tab 补全 \\r 重写整行：保留补全后的最终命令（核心回归）"""
+    p = EchoParser()
+    assert p.feed("user@host ~ % cd /va\ruser@host ~ % cd /var\n") == ["cd /var"]
+
+
+def test_zsh_percent_prompt_only_empty_enter():
+    p = EchoParser()
+    assert p.feed("user@host ~ %\r\n") == []
+    assert p.feed("user@host ~ % ls\r\n") == ["ls"]
+
+
+def test_zsh_percent_prompt_only_detection():
+    assert EchoParser.is_prompt_only("user@host ~ %")
+    assert EchoParser.is_prompt_only("~/repo %")
+    # 裸 hostname% 不算"仅提示符"行（防误报防线）
+    assert not EchoParser.is_prompt_only("myserver%")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "50% done",
+        "100% packet loss",
+        "/dev/sda 45% used",
+        "[ 50%] Building C object foo.o",
+        "wget 10% |====     | 12.3M",
+        "Progress 99%of100%",
+    ],
+)
+def test_zsh_percent_negatives(line):
+    """含百分比的输出行不得被误记为命令"""
+    assert extract(line) == ""
+
+
+# ---------- oh-my-zsh / starship / 箭头提示符 ----------
+
+
+def test_oh_my_zsh_prompt():
+    assert extract("➜  repo git:(main) ✗ cd /var") == "cd /var"
+    assert extract("➜  repo git:(main) cd /var") == "cd /var"
+    assert extract("➜  ~ ls") == "ls"
+    assert extract("➜  repo git:(main) ✘ git status") == "git status"
+
+
+def test_oh_my_zsh_prompt_only():
+    """omz 提示符独占行（空回车）：不产生命令，也不误记后续输出"""
+    p = EchoParser()
+    assert p.feed("➜  repo\r\n") == []
+    assert p.feed("➜  repo git:(main) ✗\r\n") == []
+    assert p.feed("background output\r\n") == []
+
+
+def test_oh_my_zsh_feed_tab_completion():
+    p = EchoParser()
+    assert p.feed("➜  repo git:(main) ✗ cd /va\r➜  repo git:(main) ✗ cd /var\n") == ["cd /var"]
+
+
+def test_starship_prompt():
+    assert extract("❯ docker ps") == "docker ps"
+    assert EchoParser.is_prompt_only("❯")
+    # 两行式第一行（路径 + ❯）
+    assert EchoParser.is_prompt_only("~/repo ❯")
+    assert EchoParser.is_prompt_only("user@host ❯")
+    assert extract("~/repo ❯ pytest") == "pytest"
+
+
+def test_arrow_glyph_output_not_recorded():
+    """输出行含箭头字形但不构成提示符：不记录（含 vite/nuxi 输出）"""
+    assert extract("error ❯ fail") == ""
+    assert extract("✗ important notice") == ""
+    assert extract("➜  Local:   http://localhost:5173/") == ""
+    assert extract("➜  Network: use --host to expose") == ""
+
+
+# ---------- fish ----------
+
+
+def test_fish_prompt():
+    assert extract("user@host ~/repo> ls") == "ls"
+    assert extract("user@host /etc/nginx> cat nginx.conf") == "cat nginx.conf"
+
+
+# ---------- Windows PowerShell / cmd ----------
+
+
+def test_powershell_prompt():
+    assert extract("PS C:\\Users\\admin> Get-ChildItem") == "Get-ChildItem"
+    assert extract("PS C:\\> dir") == "dir"
+
+
+def test_powershell_continuation_prompt():
+    assert extract('PS C:\\Users\\a>> "text"') == '"text"'
+
+
+def test_cmd_prompt():
+    assert extract("C:\\Users\\admin> dir /w") == "dir /w"
+
+
+# ---------- 提示符独占行的"下一行命令"捕获收紧 ----------
+
+
+def test_standard_prompt_own_line_does_not_await():
+    """标准 shell 空回车（提示符独占行）后跟输出行：不误记为命令"""
+    p = EchoParser()
+    assert p.feed("root@host:~#\r\n") == []
+    assert p.feed("some random output\r\n") == []
+    assert p.feed("more output\r\n") == []
+
+
+def test_mini_style_prompt_still_awaits():
+    """自研 shell（宽松 PS1）提示符独占行：下一行命令仍被捕获"""
+    p = EchoParser()
+    assert p.feed("[myshell]$\r\n") == []
+    assert p.feed("run_task\r\n") == ["run_task"]
+
+
 # ---------- 退格擦除重放（↑ 召回/退格编辑） ----------
 
 

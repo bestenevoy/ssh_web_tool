@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from ssh_web_tool.api.routers import (
     config,
     external,
+    files,
     groups,
     history,
     hosts,
@@ -17,5 +18,5 @@ from ssh_web_tool.api.routers import (
 
 router = APIRouter()
 
-for _mod in (config, sessions, hosts, groups, quick_commands, history, sftp, storage_auto, external, ws):
+for _mod in (config, sessions, hosts, groups, quick_commands, history, sftp, storage_auto, external, ws, files):
     router.include_router(_mod.router)

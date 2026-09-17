@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import type { QuickCommand } from '../types'
+import { ContextMenu, type ContextMenuPosition } from './ContextMenu'
 
 interface Props {
   commands: QuickCommand[]
   onExecute: (cmd: QuickCommand) => void  // 直接执行（direct 类型）
   onEditExecute: (cmd: QuickCommand) => void  // 输入到终端（可编辑后手动执行）
-  onEdit: (cmd: QuickCommand) => void  // 点击编辑按钮：打开编辑弹窗
+  onEdit: (cmd: QuickCommand) => void  // 右键菜单「编辑」：打开编辑弹窗
   onDelete: (id: string) => void
   onOpenAddModal: () => void
   onReorder: (ids: string[]) => void  // 拖拽排序后保存
@@ -21,6 +22,7 @@ const PRE_OP_ICONS: Record<string, string> = {
 export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDelete, onOpenAddModal, onReorder, disabled }: Props) {
   const [dragId, setDragId] = useState<string | null>(null)
   const [overId, setOverId] = useState<string | null>(null)
+  const [menu, setMenu] = useState<{ pos: ContextMenuPosition; qc: QuickCommand } | null>(null)
 
   // ---- 拖拽排序（与主机/分组一致）----
   const moveQc = (fromId: string, toId: string) => {
@@ -49,6 +51,17 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
     setOverId(null)
   }
 
+  // 右键菜单（操作全部收进菜单，条目不显示悬浮按钮）
+  const openMenu = (e: React.MouseEvent, qc: QuickCommand) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenu({ pos: { x: e.clientX, y: e.clientY }, qc })
+  }
+
+  const copyCommand = (qc: QuickCommand) => {
+    navigator.clipboard.writeText(qc.command).catch(() => {})
+  }
+
   return (
     <div className="qc-container">
       <div className="qc-header">
@@ -64,7 +77,7 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
 
       <div className="qc-list">
         {commands.length === 0 && (
-          <div style={{ textAlign: 'center', color: '#5a6a8a', padding: '20px 10px', fontSize: 11 }}>
+          <div style={{ textAlign: 'center', color: '#5a6a8a', padding: '20px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
             暂无快捷指令，点击右上角"添加"创建
           </div>
         )}
@@ -80,10 +93,11 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
               onDragOver={(e) => handleDragOver(e, qc)}
               onDrop={() => handleDrop(qc)}
               onDragEnd={handleDragEnd}
+              onContextMenu={(e) => openMenu(e, qc)}
               style={{ opacity: disabled ? 0.5 : 1, cursor: disabled ? 'not-allowed' : 'grab' }}
               title={isParam
-                ? '带参数指令：点击输入到终端（含 {args} 占位），编辑后回车执行；按住可拖拽排序'
-                : '点击立即执行；按住可拖拽排序'}
+                ? '带参数指令：点击输入到终端（含 {args} 占位），编辑后回车执行；右键更多操作；按住可拖拽排序'
+                : '点击立即执行；右键更多操作；按住可拖拽排序'}
               onClick={() => {
                 if (disabled) return
                 if (isParam) onEditExecute(qc)  // 带参数指令：输入到终端，用户自行编辑 {args} 后执行
@@ -96,35 +110,19 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
                     {isParam ? '⌨️' : '⚡'}
                   </span>
                   {qc.name}
+                  {qc.key && (
+                    <span
+                      className="qc-key-badge"
+                      title={`调用 key：.zs 脚本中 @${qc.key} 引用`}
+                    >
+                      @{qc.key}
+                    </span>
+                  )}
                   {(qc.pre_ops?.length || 0) > 0 && (
                     <span className="qc-preop-badge" title={qc.pre_ops!.map((o) => `预操作: ${o.type}`).join('，')}>
                       {qc.pre_ops!.map((o) => PRE_OP_ICONS[o.type] || '').join('')}
                     </span>
                   )}
-                </div>
-                <div className="qc-item-actions" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    className="qc-icon-btn qc-icon-exec"
-                    onClick={() => !disabled && onEditExecute(qc)}
-                    disabled={disabled}
-                    title="编辑后执行（输入到终端，可编辑）"
-                  >
-                    ▶
-                  </button>
-                  <button
-                    className="qc-icon-btn qc-icon-edit"
-                    onClick={() => onEdit(qc)}
-                    title="编辑指令"
-                  >
-                    ✎
-                  </button>
-                  <button
-                    className="qc-icon-btn qc-icon-delete"
-                    onClick={() => onDelete(qc.id)}
-                    title="删除"
-                  >
-                    ✕
-                  </button>
                 </div>
               </div>
               {qc.description && (
@@ -135,11 +133,34 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
         })}
 
         {disabled && commands.length > 0 && (
-          <div style={{ textAlign: 'center', color: '#666', padding: '10px', fontSize: 11 }}>
+          <div style={{ textAlign: 'center', color: '#666', padding: '10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
             请先连接 SSH 终端
           </div>
         )}
       </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.pos.x}
+          y={menu.pos.y}
+          onClose={() => setMenu(null)}
+          sections={[
+            [
+              {
+                label: menu.qc.type === 'param' ? '输入到终端（可编辑）' : '立即执行',
+                onClick: () => { if (!disabled) (menu.qc.type === 'param' ? onEditExecute : onExecute)(menu.qc) },
+                disabled,
+              },
+              { label: '编辑后执行（输入到终端）', onClick: () => { if (!disabled) onEditExecute(menu.qc) }, disabled },
+              { label: '复制命令', onClick: () => copyCommand(menu.qc) },
+            ],
+            [
+              { label: '编辑', onClick: () => onEdit(menu.qc) },
+              { label: '删除', danger: true, onClick: () => onDelete(menu.qc.id) },
+            ],
+          ]}
+        />
+      )}
     </div>
   )
 }

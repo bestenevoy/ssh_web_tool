@@ -2,8 +2,11 @@
 
 命名 {host}_{start}_running_{session_id}.log，会话关闭时补全结束时间
 （同一终端 = 同一份记录）。
-flush 策略：静默期（flush_delay）或缓冲超阈值（flush_max）时清洗一次性写入，
-只记录最终显示内容（清 ANSI + \r 覆盖合并），不逐块落盘。
+flush 策略：静默期（flush_delay）或缓冲超阈值（flush_max）时一次性写入，
+只记录最终显示内容——输出流由 TerminalMirror（pyte 终端镜像）回放到虚拟
+屏幕，flush 时提取屏幕上新显示的行（与终端显示构造性一致：退格/\\r 覆盖/
+光标重绘自然收敛，bell 等控制字符不进入文本，滚出行与 clear 被擦内容先转录，
+alt-screen 全屏应用内容不混入）。
 
 逻辑原为 SSHSession 中的日志一节；SSHSession 保留 LOG_DIR/_logger_cache 等
 兼容属性并在 __init__ 装配本组件（测试隔离依赖这些类属性）。
@@ -16,7 +19,7 @@ import os
 import re
 import time
 
-from .echo_parser import EchoParser
+from .terminal_mirror import TerminalMirror
 
 _LOG_NAME_SAFE_RE = re.compile(r"[^\w.\-]")
 _LOG_TIME_FMT = "%Y%m%d-%H%M%S"
@@ -60,23 +63,45 @@ def build_log_file(session_id: str, host: str, created_at: float, log_dir: str) 
 
 
 class SessionLog:
-    """单个会话的日志持久化（每个会话一个实例）"""
+    """单个会话的日志持久化（每个会话一个实例）
+
+    默认不记录（enabled=False）：仅在用户显式开启（enable_with）后才创建
+    日志文件与 FileHandler；开启时可指定保存目录。
+    """
 
     def __init__(
         self,
         session_id: str,
         log_file: str,
-        logger: logging.Logger,
+        logger: logging.Logger | None = None,
         flush_delay: float = 0.6,
         flush_max: int = 65536,
     ) -> None:
         self._session_id = session_id
+        # log_file 恒为预生成路径（构造时确定，恢复会话沿用旧文件）；logger 惰性：
+        # 默认不记录时为 None，首次 enable_with 才创建 FileHandler（文件随之落盘）
         self.log_file = log_file
         self._logger = logger
         self.flush_delay = flush_delay  # 秒：无新输出多久后 flush
         self.flush_max = flush_max  # 字符：缓冲超过该阈值立即 flush
-        self.buffer = ""  # 聚合缓冲（未落盘内容）
+        self.buffer = ""  # 聚合缓冲（未落盘内容的 pending 指示与 flush 触发）
+        self.enabled = False  # 记录开关：默认不记录，右键「开始记录」才开启
         self._flush_task: asyncio.Task | None = None
+        # 终端镜像：输出流回放到虚拟屏幕，flush 时提取"新显示"的行
+        # （仅在开启记录后 feed，未开启记录零开销）
+        self._mirror = TerminalMirror()
+
+    def enable_with(self, log_file: str, log_dir: str, cache: dict[str, logging.Logger]) -> None:
+        """开启记录并落到指定文件（惰性创建文件与 FileHandler；路径变化时重建 handler）
+
+        - log_file 与当前一致（同会话暂停后恢复/重连沿用）→ 直接复用；
+        - 变化（换目录）→ 更新路径并重建 handler（get_or_create_logger 内处理）。
+        抛出 OSError（目录不可创建/文件不可写）时调用方决定如何提示。
+        """
+        self._mirror.reset()  # 开启点之前的屏幕状态不转录，从当前显示重新开始
+        self.log_file = log_file
+        self._logger = self.get_or_create_logger(self._session_id, log_file, log_dir, cache)
+        self.enabled = True
 
     # ---------- logger 工厂（dir 与 cache 由调用方传入，便于测试隔离） ----------
 
@@ -147,8 +172,31 @@ class SessionLog:
 
     # ---------- 聚合写入 ----------
 
+    def set_enabled(self, enabled: bool) -> None:
+        """暂停/恢复当前会话记录（已落盘内容保留）
+
+        - 暂停：先落盘暂停前的尾部内容，再停止记录；暂停期间的输出被丢弃
+        - 恢复：重建镜像（暂停期间屏幕持续变化，旧镜像状态已失真），
+          从恢复时刻的显示重新开始转录
+        """
+        if enabled == self.enabled:
+            return
+        if enabled:
+            self.enabled = True
+            self._mirror.reset()
+        else:
+            self.flush_now()  # 先落盘暂停前的尾部，再停
+            self.enabled = False
+            self.buffer = ""
+
     def feed(self, data: str) -> None:
-        """输出进入日志聚合缓冲（替代逐块落盘，减少刷新回显碎片）"""
+        """输出进入日志管道：镜像屏幕回放 + 聚合缓冲触发（替代逐块落盘）"""
+        if not self.enabled:
+            return
+        try:
+            self._mirror.feed(data)
+        except Exception:
+            pass  # 镜像回放失败不影响主流程（输出仍会广播给前端）
         self.buffer += data
         if len(self.buffer) >= self.flush_max:
             self.flush_now()
@@ -177,17 +225,15 @@ class SessionLog:
         self.flush_now()
 
     def flush_now(self) -> None:
-        """把日志缓冲清洗后一次性写入（幂等；会话关闭前必须调用以落盘剩余内容）"""
-        if not self.buffer:
-            return
-        text = self.buffer
+        """把镜像屏幕中新显示的内容一次性写入（幂等；会话关闭前必须调用以落盘剩余内容）"""
         self.buffer = ""
+        if self._logger is None:
+            return
         try:
-            # 只记录最终显示：清洗 ANSI + 行内 \r 覆盖合并（进度条等只留最后状态）
-            text = EchoParser.clean_ansi_keep_cr(text)
-            text = self.collapse_cr_lines(text)
-            if text.strip():
-                self._logger.info(text)
+            # 提取镜像屏幕上"新显示"的行（终端显示一致的转录，见 TerminalMirror）
+            lines = self._mirror.drain()
+            if lines:
+                self._logger.info("\n".join(lines))
         except Exception:
             pass  # 日志写入失败不影响主流程
 
@@ -198,6 +244,9 @@ class SessionLog:
 
         注意：先把 CRLF 归一化为 LF，避免把 \r\n 换行误判为进度条覆盖
         而丢掉整行内容。
+
+        旧版正则清洗路径的遗留工具（flush 已改走 TerminalMirror 镜像），
+        保留供 SSHSession._collapse_cr_lines 与测试使用。
         """
         lines = text.replace("\r\n", "\n").split("\n")
         out = []
@@ -208,6 +257,13 @@ class SessionLog:
         return "\n".join(out)
 
     # ---------- 历史读取 ----------
+
+    def resize(self, cols: int, rows: int) -> None:
+        """终端尺寸变化时同步镜像屏幕（未开启记录也同步，保证镜像就绪）"""
+        try:
+            self._mirror.resize(cols, rows)
+        except Exception:
+            pass  # 镜像尺寸同步失败不影响主流程
 
     def read_history(self, offset: int = 0, limit: int = 2000) -> str:
         """
@@ -220,13 +276,14 @@ class SessionLog:
             # 先落盘聚合缓冲：banner/MOTD 等刚产生（未到静默期）的输出
             # 若直接读文件会漏掉，导致"连接后的主机信息没有显示"
             self.flush_now()
-            if not os.path.exists(self.log_file):
-                return ""
-            file_size = os.path.getsize(self.log_file)
+            path = self.log_file
+            if not os.path.exists(path):
+                return ""  # 从未开启记录（文件未创建）或已被清理
+            file_size = os.path.getsize(path)
             # 计算读取起始位置（从文件末尾倒数）
             start_pos = max(0, file_size - offset - limit)
             read_size = min(limit, file_size - start_pos)
-            with open(self.log_file, encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 f.seek(start_pos)
                 content = f.read(read_size)
             # 清理 ANSI 并格式化
@@ -280,6 +337,7 @@ class SessionLog:
         文件存在则重命名；不存在（会话无任何输出）也更新路径保持一致
         """
         try:
+            self.flush_now()  # 落盘镜像中剩余的新显示内容
             if not self.log_file or "_running_" not in self.log_file:
                 return
             end = fmt_time(time.time())
@@ -299,6 +357,8 @@ class SessionLog:
 
     def _close_handler(self) -> None:
         """关闭并移除当前 logger 的 FileHandler（释放文件句柄，供 rename/清理）"""
+        if self._logger is None:
+            return
         for h in self._logger.handlers[:]:
             try:
                 h.close()

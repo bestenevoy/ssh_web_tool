@@ -87,6 +87,8 @@ class QuickCommandRequest(BaseModel):
     type: str = "direct"
     # 预操作（执行命令前依次执行）：[{"type": "upload", "remote": "/path"}, {"type": "chmod", "mode": "+x", "path": "/path"}, {"type": "env", "key": "VAR", "value": "x"}]
     pre_ops: list = []
+    # 可选短标识（唯一，大小写不敏感），用于 .zs 脚本 @ 调用
+    key: str = ""
 
 
 class ReorderQuickCommandsRequest(BaseModel):
@@ -124,6 +126,13 @@ class ConnectTimeoutRequest(BaseModel):
     seconds: int = Field(ge=1, le=300)
 
 
+class SessionRecordRequest(BaseModel):
+    """设置当前会话日志记录开关（默认不记录；开启时可指定保存目录）"""
+
+    enabled: bool
+    log_dir: str | None = None  # 开启记录时的保存目录；None 用默认目录
+
+
 class HighlightRuleItem(BaseModel):
     """关键字高亮规则（keyword 即正则源，前端按 RegExp 编译；keyword 为规则身份键）"""
 
@@ -146,6 +155,8 @@ class UiSettingsRequest(BaseModel):
     block_split_mode: str | None = None
     custom_prompt_patterns: list[str] | None = None
     highlight_rules: list[HighlightRuleItem] | None = None
+    log_record_dir: str | None = None  # 终端日志默认保存目录（空 = 程序默认 logs 目录）
+    log_record_no_ask: bool | None = None  # 开启记录时不再询问保存目录
 
 
 class RecordCommandRequest(BaseModel):
@@ -161,3 +172,11 @@ class PreopUploadRequest(BaseModel):
     source: str  # 源文件：本机绝对路径，或 scripts 目录下的文件名
     source_type: str = "path"  # path=本机绝对路径 / script=scripts 目录文件
     remote: str  # 远端目标路径
+
+
+class FileWriteRequest(BaseModel):
+    """编辑器保存文件（encoding 与读取探测到的编码一致）"""
+
+    path: str
+    content: str
+    encoding: str = "utf-8"

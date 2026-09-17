@@ -142,7 +142,7 @@ export function SftpPanel({ sessionId }: Props) {
   }
 
   if (!sessionId) {
-    return <div style={{ textAlign: 'center', color: '#555', padding: '30px 10px', fontSize: 12 }}>请先连接 SSH</div>
+    return <div style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: '30px 10px', fontSize: 'calc(12px * var(--ui-fs-scale))' }}>请先连接 SSH</div>
   }
 
   return (
@@ -190,7 +190,7 @@ export function SftpPanel({ sessionId }: Props) {
           </div>
         ))}
         {items.length === 0 && !loading && (
-          <div style={{ textAlign: 'center', color: '#555', padding: '25px 10px', fontSize: 11 }}>
+          <div style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: '25px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
             空目录<br />拖拽文件到此处上传
           </div>
         )}

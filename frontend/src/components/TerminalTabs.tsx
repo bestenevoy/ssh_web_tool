@@ -68,7 +68,7 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, on
                 style={{
                   color: shellStyle.color,
                   background: shellStyle.bg,
-                  fontSize: 10,
+                  fontSize: 'calc(10px * var(--ui-fs-scale))',
                   padding: '1px 5px',
                   borderRadius: 3,
                   fontWeight: 600,

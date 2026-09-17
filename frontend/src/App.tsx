@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import '@xterm/xterm/css/xterm.css'
 import './App.css'
 import type { Host, HostType, QuickCommand } from './types'
 import type { SshConnInfo, TerminalInstance } from './lib/useTerminals'
 import { api } from './lib/api'
+import type { EditorSessionInfo } from './lib/api'
 import { ContextMenu } from './components/ContextMenu'
 import type { CtxMenuItem } from './components/ContextMenu'
 import { useTerminals } from './lib/useTerminals'
@@ -22,10 +23,12 @@ import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
 import { PasswordModal } from './components/PasswordModal'
 import { SettingsModal } from './components/SettingsModal'
+import { DirPickerModal } from './components/DirPickerModal'
 import { SearchBar } from './components/SearchBar'
+import { FileEditor } from './components/FileEditor'
 import HistorySearchModal from './components/HistorySearchModal'
 
-type PanelTab = 'quick' | 'sftp' | 'events' | 'api'
+type PanelTab = 'quick' | 'sftp' | 'logs'
 
 // ---- 布局宽度持久化 ----
 const LAYOUT_KEY_PREFIX = 'ssh-web-tool-layout-'
@@ -58,17 +61,35 @@ function App() {
   const [status, setStatus] = useState('就绪')
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 编辑器页：打开后替换中间终端区（终端实例保持挂载，仅隐藏容器）
+  const [editorOpen, setEditorOpen] = useState(false)
   const [quickCommandModalOpen, setQuickCommandModalOpen] = useState(false)
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null)
   // 终端窗口右键菜单（与主机列表右键菜单各自独立）：坐标 + 会话 + 命中的色块 id
   const [terminalMenu, setTerminalMenu] = useState<{
     x: number; y: number; sessionId: string; blockId: number | null
   } | null>(null)
+  // 右键菜单打开时异步拉取的当前会话日志记录状态（null=加载中）
+  const [terminalRecording, setTerminalRecording] = useState<boolean | null>(null)
+  // 开启日志记录时的目录选择弹窗（默认关闭询问 + 未勾选「不再询问」时弹出）
+  const [recordDirModal, setRecordDirModal] = useState<{ sessionId: string } | null>(null)
 
   const { settings, toggleTheme, setFontFamily, setFontSize, updateSettings } = useSettings()
   const terminals = useTerminals(settings)
   const { focusActiveTerminal } = terminals
   const events = useEvents()
+
+  // 编辑器广播目标候选会话（终端实例 Map → 精简列表；Map 状态变化即重新派生）
+  const editorSessions: EditorSessionInfo[] = useMemo(
+    () =>
+      Array.from(terminals.terminals.values()).map((t) => ({
+        session_id: t.session_id,
+        label: t.terminal_name || t.host_name,
+        host: t.type === 'local' ? 'localhost' : t.host_name,
+        disconnected: t.disconnected,
+      })),
+    [terminals.terminals]
+  )
 
   // 拖拽调宽：sidebar 向右拖变宽，panel 向左拖变宽；松开时持久化
   const startResize = useCallback((side: 'sidebar' | 'panel') => (e: React.MouseEvent) => {
@@ -275,6 +296,25 @@ function App() {
     navigator.clipboard.readText()
       .then((text) => { if (text) inst.term.paste(text) })
       .catch(() => alert('读取剪贴板失败，请在终端中直接按 Ctrl+V 粘贴'))
+  }, [])
+
+  // 右键菜单打开时拉取该会话的日志记录状态（决定「暂停/恢复记录」菜单项文案）
+  useEffect(() => {
+    if (!terminalMenu) return
+    setTerminalRecording(null)
+    api.getSessionRecord(terminalMenu.sessionId)
+      .then((r) => setTerminalRecording(r.recording))
+      .catch(() => setTerminalRecording(null))
+  }, [terminalMenu])
+
+  /** 开启指定会话的日志记录：dir 为空时用后端默认目录（~/.ai4one/sshtool/logs） */
+  const startRecording = useCallback((sessionId: string, dir: string) => {
+    api.setSessionRecord(sessionId, true, dir || undefined)
+      .then(() => {
+        setTerminalRecording(true)
+        setStatus(dir ? `已开始记录本会话日志到 ${dir}` : '已开始记录本会话日志（默认日志目录）')
+      })
+      .catch((e) => setStatus('开启日志记录失败: ' + (e as Error).message))
   }, [])
 
   // ---- 重连密码弹窗（Promise 化：askPassword().then(pw => ...)）----
@@ -494,12 +534,13 @@ function App() {
 
 
   // 依次执行预操作（上传 → chmod → env），返回是否全部成功；
-  // direct 直接执行 与 param/编辑后执行 共用：先完成预操作再发送命令
-  const runPreOps = useCallback(async (qc: QuickCommand): Promise<boolean> => {
-    if (!terminals.activeId) return false
-    const inst = terminals.terminals.get(terminals.activeId)
+  // direct 直接执行 与 param/编辑后执行 共用：先完成预操作再发送命令。
+  // session_id 显式传入（默认当前活动终端），供非活动会话定向执行
+  const runPreOps = useCallback(async (qc: QuickCommand, session_id?: string): Promise<boolean> => {
+    const sid = session_id ?? terminals.activeId
+    if (!sid) return false
+    const inst = terminals.terminals.get(sid)
     if (!inst || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) return false
-    const session_id = inst.session_id
     for (const op of qc.pre_ops || []) {
       if (op.type === 'upload') {
         const remote = (op.remote || '').trim()
@@ -508,7 +549,7 @@ function App() {
         if (!remote || !source) continue
         setStatus(`上传中 ${source} -> ${remote}...`)
         try {
-          await api.preopUpload(session_id, source, sourceType, remote)
+          await api.preopUpload(sid, source, sourceType, remote)
           setStatus(`已上传 ${source} -> ${remote}`)
         } catch (e) {
           setStatus('上传失败，命令未执行')
@@ -517,19 +558,20 @@ function App() {
         }
       } else if (op.type === 'chmod') {
         if (!op.mode || !op.path) continue
-        terminals.sendCommand(`chmod ${op.mode} ${op.path}`, true)
+        terminals.sendCommandTo(sid, `chmod ${op.mode} ${op.path}`, true)
       } else if (op.type === 'env') {
         if (!op.key) continue
-        terminals.sendCommand(`export ${op.key}=${op.value ?? ''}`, true)
+        terminals.sendCommandTo(sid, `export ${op.key}=${op.value ?? ''}`, true)
       }
     }
     return true
   }, [terminals, setStatus])
 
 
-  // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）
-  const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null) => {
-    if (!(await runPreOps(qc))) return
+  // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）。
+  // session_id 显式传入（默认当前活动终端）
+  const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null, session_id?: string) => {
+    if (!(await runPreOps(qc, session_id))) return
 
     // 参数替换：{args} 占位符替换，无占位符则追加到末尾
     let cmd = qc.command
@@ -539,7 +581,7 @@ function App() {
         : (cmd + ' ' + param).trim()
     }
 
-    terminals.sendCommand(cmd, true)
+    terminals.sendCommandTo(session_id ?? terminals.activeId ?? '', cmd, true)
     setStatus(`已执行: ${cmd.slice(0, 60)}`)
   }, [runPreOps, terminals, setStatus])
 
@@ -628,10 +670,16 @@ function App() {
         )
       case 'sftp':
         return <SftpPanel sessionId={terminals.activeId} />
-      case 'events':
-        return <EventLog events={events.events} onClear={events.clearEvents} />
-      case 'api':
-        return <ApiDocs />
+      case 'logs':
+        // 日志 tab：活动日志 + API 文档两个分区上下排布
+        return (
+          <div>
+            <div className="logs-section-title">📊 活动日志</div>
+            <EventLog events={events.events} onClear={events.clearEvents} />
+            <div className="logs-section-title">🔌 API 文档</div>
+            <ApiDocs />
+          </div>
+        )
     }
   }
 
@@ -705,20 +753,26 @@ function App() {
           >
             {settings.theme === 'dark' ? '☀️' : '🌙'}
           </button>
-          <button
-            className="btn btn-secondary btn-sm settings-btn"
-            onClick={() => setSettingsOpen(true)}
-            title="设置（本机终端 / 命令块 / 缓存清理等）"
-          >
-            ⚙️
-          </button>
         </div>
         <div className="topbar-divider" />
         <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(!panelCollapsed)}>
           📋 面板
         </button>
-        <button className="btn btn-secondary btn-sm" onClick={handleReloadConfig} title="扫描配置文件与 scripts 脚本目录并刷新">
-          🔄 检查配置
+        <button
+          className={`btn btn-sm ${editorOpen ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => { setEditorOpen(!editorOpen); if (editorOpen) focusActiveTerminal() }}
+          title="文本编辑器：查看/编辑本地文件（日志、.zs 脚本），支持关键字高亮"
+        >
+          📝 编辑器
+        </button>
+        {/* 检查配置入口已移入设置页「本机终端」分区 */}
+        {/* 设置入口：顶栏最右上角，打开整页设置 */}
+        <button
+          className="btn btn-secondary btn-sm settings-btn"
+          onClick={() => setSettingsOpen(true)}
+          title="设置（本机终端 / 命令块 / 关键字高亮 / 缓存清理等）"
+        >
+          ⚙️
         </button>
       </div>
 
@@ -762,7 +816,7 @@ function App() {
           />
         </div>
 
-        {/* 中间终端区域 */}
+        {/* 中间终端区域（编辑器页以覆盖层形式呈现：终端实例保持挂载，避免 xterm 重建） */}
         <div className="terminal-area">
           <TerminalTabs
             terminals={terminals.terminals}
@@ -791,6 +845,24 @@ function App() {
               />
             ) : null
           })()}
+          {/* 编辑器覆盖层：盖住终端区（终端保持挂载，切回时无需重建 xterm） */}
+          {editorOpen && (
+            <div className="editor-overlay">
+              <FileEditor
+                fontFamily={settings.fontFamily}
+                fontSize={settings.fontSize}
+                highlightRules={settings.highlightRules}
+                quickCommands={quickCommands}
+                sessions={editorSessions}
+                sendToSession={(sid, cmd, exec) => terminals.sendCommandTo(sid, cmd, exec, false)}
+                readBufferTail={terminals.readBufferTail}
+                recentPaths={settings.editorRecentPaths}
+                onUpdateRecentPaths={(paths) => updateSettings({ editorRecentPaths: paths })}
+                onStatus={setStatus}
+                onClose={() => { setEditorOpen(false); focusActiveTerminal() }}
+              />
+            </div>
+          )}
         </div>
 
         {/* 右侧面板（宽度可拖拽调整） */}
@@ -804,8 +876,7 @@ function App() {
             <div className="panel-tabs">
               <div className={`panel-tab${panelTab === 'quick' ? ' active' : ''}`} onClick={() => setPanelTab('quick')}>⚡ 快速指令</div>
               <div className={`panel-tab${panelTab === 'sftp' ? ' active' : ''}`} onClick={() => setPanelTab('sftp')}>📁 SFTP</div>
-              <div className={`panel-tab${panelTab === 'events' ? ' active' : ''}`} onClick={() => setPanelTab('events')}>📊 活动日志</div>
-              <div className={`panel-tab${panelTab === 'api' ? ' active' : ''}`} onClick={() => setPanelTab('api')}>🔌 API</div>
+              <div className={`panel-tab${panelTab === 'logs' ? ' active' : ''}`} onClick={() => setPanelTab('logs')}>🗒 日志</div>
             </div>
             <div className="panel-body">{renderPanelContent()}</div>
           </div>
@@ -862,7 +933,20 @@ function App() {
         <PasswordModal title={pwPromptTitle} onSubmit={handlePwSubmit} onCancel={handlePwCancel} />
       )}
 
-      {/* 设置弹窗：本机终端 / 命令块 / 字体主题 / 缓存清理 */}
+      {/* 开启日志记录的目录选择弹窗：未勾选「不再询问」时右键「开始记录日志」先选目录 */}
+      {recordDirModal && (
+        <DirPickerModal
+          title="选择日志保存目录"
+          initialDir={settings.logRecordDir}
+          onConfirm={(dir) => {
+            setRecordDirModal(null)
+            startRecording(recordDirModal.sessionId, dir)
+          }}
+          onCancel={() => setRecordDirModal(null)}
+        />
+      )}
+
+      {/* 设置页（整页覆盖）：本机终端 / 命令块 / 字体主题 / 关键字高亮 / 缓存清理 */}
       {settingsOpen && (
         <SettingsModal
           settings={settings}
@@ -873,6 +957,7 @@ function App() {
           connectTimeout={connectTimeout}
           onSetConnectTimeout={handleSetConnectTimeout}
           configFile={configFile}
+          onReloadConfig={handleReloadConfig}
           onClose={() => { setSettingsOpen(false); focusActiveTerminal() }}
         />
       )}
@@ -895,6 +980,30 @@ function App() {
             { label: `复制块内容${nTag}`, onClick: () => bb.copyBlocks(ids) },
           ])
         }
+        sections.push([
+          {
+            label: terminalRecording === false ? '开始记录日志' : '暂停记录日志',
+            onClick: () => {
+              const recording = terminalRecording !== false // 加载中未知状态时按"正在记录"处理
+              if (recording) {
+                // 暂停：丢弃未落盘缓冲，已落盘内容保留
+                api.setSessionRecord(terminalMenu.sessionId, false)
+                  .then(() => {
+                    setTerminalRecording(false)
+                    setStatus('已暂停本会话日志记录（已落盘内容保留）')
+                  })
+                  .catch((e) => setStatus('设置日志记录失败: ' + (e as Error).message))
+                return
+              }
+              // 开始记录：勾选「不再询问」直接用默认目录，否则先弹目录选择
+              if (settings.logRecordNoAsk) {
+                startRecording(terminalMenu.sessionId, settings.logRecordDir)
+              } else {
+                setRecordDirModal({ sessionId: terminalMenu.sessionId })
+              }
+            },
+          },
+        ])
         sections.push([
           {
             label: '复制',

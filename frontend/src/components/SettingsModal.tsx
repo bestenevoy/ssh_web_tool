@@ -11,6 +11,7 @@ import {
   type HighlightValidationError,
 } from '../lib/highlight'
 import { api } from '../lib/api'
+import { DirPickerModal } from './DirPickerModal'
 
 interface Props {
   settings: TerminalSettings
@@ -21,6 +22,7 @@ interface Props {
   connectTimeout: number
   onSetConnectTimeout: (seconds: number) => Promise<void>
   configFile: string
+  onReloadConfig: () => Promise<void>
   onClose: () => void
 }
 
@@ -32,6 +34,18 @@ const SHELL_LABELS: Record<string, string> = {
   powershell: 'PowerShell',
   pwsh: 'PowerShell 7 (pwsh)',
 }
+
+/** 设置页分区（左侧导航） */
+type SectionId = 'appearance' | 'terminal' | 'blocks' | 'logging' | 'highlight' | 'cache'
+
+const SECTIONS: { id: SectionId; label: string }[] = [
+  { id: 'appearance', label: '字体与主题' },
+  { id: 'terminal', label: '本机终端' },
+  { id: 'blocks', label: '命令块' },
+  { id: 'logging', label: '日志记录' },
+  { id: 'highlight', label: '关键字高亮' },
+  { id: 'cache', label: '缓存' },
+]
 
 /** 清理前端临时缓存（ssh-web-tool- 前缀的 localStorage 键），返回清理数量 */
 export function clearFrontendCache(): number {
@@ -45,8 +59,9 @@ export function clearFrontendCache(): number {
 }
 
 /**
- * 设置弹窗：本机终端 / 命令块 / 字体主题 / 缓存清理。
- * 除字体与主题外，其余配置项统一收拢到本弹窗（不再占顶栏）；
+ * 设置页（整页覆盖层，非弹窗）：左侧分区导航 + 右侧内容区（rssh 式侧边栏布局）。
+ * 分区：字体与主题 / 本机终端 / 命令块 / 关键字高亮 / 缓存清理。
+ * 仅关闭按钮/完成/Esc 可关闭（遵循 AGENTS.md UI 规范）；
  * 所有持久化配置写入后端 config.json，localStorage 只保留临时内容。
  */
 export function SettingsModal({
@@ -58,11 +73,15 @@ export function SettingsModal({
   connectTimeout,
   onSetConnectTimeout,
   configFile,
+  onReloadConfig,
   onClose,
 }: Props) {
   const [cacheMsg, setCacheMsg] = useState('')
   const [openDirMsg, setOpenDirMsg] = useState('')
+  const [reloadMsg, setReloadMsg] = useState('')
   const doneBtnRef = useRef<HTMLButtonElement>(null)
+  // 当前分区（左侧导航；切换不丢草稿 state）
+  const [section, setSection] = useState<SectionId>('appearance')
   // 自定义提示符正则：本地草稿 + 失焦/关闭时提交（逐键提交会频繁 POST 并重建 tracker）
   const [patternDraft, setPatternDraft] = useState(settings.customPromptPatterns.join('\n'))
   const [patternError, setPatternError] = useState<string | null>(null)
@@ -72,13 +91,21 @@ export function SettingsModal({
   // 关键字高亮：编辑态（index=-1 表示新增草稿；null 表示未在编辑）
   const [ruleEdit, setRuleEdit] = useState<{ index: number; draft: HighlightRule } | null>(null)
   const [ruleError, setRuleError] = useState<string | null>(null)
+  // 日志记录：默认目录草稿（失焦提交）+ 目录选择弹窗开关
+  const [logDirDraft, setLogDirDraft] = useState(settings.logRecordDir)
+  const [logDirPickerOpen, setLogDirPickerOpen] = useState(false)
+
+  // 外部设置变化（App 层 onUpdate 回写）时同步日志目录草稿
+  useEffect(() => {
+    setLogDirDraft(settings.logRecordDir)
+  }, [settings.logRecordDir])
 
   // 外部超时变化（保存成功后 App 回传）时同步草稿
   useEffect(() => {
     setTimeoutDraft(String(connectTimeout))
   }, [connectTimeout])
 
-  // 打开后聚焦「完成」按钮：Esc 从弹窗内元素冒泡到 window 才能触发关闭
+  // 打开后聚焦页头「返回」按钮：Esc 从页内元素冒泡到 window 才能触发关闭
   // （否则焦点留在 xterm textarea，Esc 被终端截获）
   useEffect(() => {
     doneBtnRef.current?.focus()
@@ -129,6 +156,14 @@ export function SettingsModal({
       .catch((e) => setOpenDirMsg('打开目录失败: ' + (e as Error).message))
   }
 
+  /** 检查配置/脚本更新：扫描 config/data/scripts 后刷新主机与快捷指令（原顶栏按钮，移入设置页） */
+  const handleReloadConfig = () => {
+    setReloadMsg('正在扫描配置与脚本...')
+    onReloadConfig()
+      .then(() => setReloadMsg(''))
+      .catch((e) => setReloadMsg('刷新失败: ' + (e as Error).message))
+  }
+
   /** 提交连接超时草稿：1-300 秒，失焦生效 */
   function commitTimeout() {
     const n = Math.round(Number(timeoutDraft))
@@ -141,6 +176,13 @@ export function SettingsModal({
         setTimeoutDraft(String(connectTimeout)) // 保存失败回退显示
         setTimeoutMsg('保存失败: ' + (e as Error).message)
       })
+  }
+
+  /** 提交日志默认目录草稿：清空 = 恢复程序默认目录 */
+  function commitLogDir() {
+    const dir = logDirDraft.trim()
+    if (dir === settings.logRecordDir) return
+    onUpdate({ logRecordDir: dir })
   }
 
   /** 校验错误 → 中文提示 */
@@ -203,11 +245,37 @@ export function SettingsModal({
   }
 
   return (
-    <div className="modal-overlay show">
-      <div className="modal settings-modal">
-        <h3>⚙️ 设置</h3>
+    <div className="settings-overlay">
+      <div className="settings-page">
+        {/* 页头：标题 + 右上角返回按钮（打开时聚焦此处，保证 Esc 能冒泡关闭） */}
+        <div className="settings-page-header">
+          <span className="settings-page-title">⚙️ 设置</span>
+          <button
+            ref={doneBtnRef}
+            className="btn btn-secondary btn-sm"
+            onClick={handleClose}
+            title="返回主界面（Esc）"
+          >
+            ← 返回
+          </button>
+        </div>
+        <div className="settings-page-layout">
+          {/* 左侧分区导航 */}
+          <nav className="settings-page-nav">
+            {SECTIONS.map((s) => (
+              <button
+                key={s.id}
+                className={`settings-nav-item${section === s.id ? ' active' : ''}`}
+                onClick={() => setSection(s.id)}
+              >
+                {s.label}
+              </button>
+            ))}
+          </nav>
+          {/* 右侧内容区：只渲染当前分区；命令块分区让自定义提示符输入框占满剩余空间 */}
+          <div className={`settings-page-content${section === 'blocks' ? ' settings-content-fill' : ''}`}>
 
-        {/* 字体与主题：保留在顶栏快捷操作，这里提供完整设置 */}
+        {section === 'appearance' && (
         <div className="settings-modal-section">
           <div className="settings-modal-title">字体与主题</div>
           <div className="settings-modal-row">
@@ -235,9 +303,24 @@ export function SettingsModal({
               <option value="dark">暗色</option>
             </select>
           </div>
+          <div className="settings-modal-row">
+            <label title="整个应用界面文本的字号倍率（终端字号由上方终端字体/字号单独控制）">
+              界面字号
+            </label>
+            <select
+              value={settings.uiFontScale}
+              onChange={(e) => onUpdate({ uiFontScale: Number(e.target.value) })}
+            >
+              <option value="0.9">小（90%）</option>
+              <option value="1">标准（100%）</option>
+              <option value="1.15">大（115%）</option>
+              <option value="1.3">特大（130%）</option>
+            </select>
+          </div>
         </div>
+        )}
 
-        {/* 本机终端：默认 shell 与 SSH 断开后共用同一配置 */}
+        {section === 'terminal' && (
         <div className="settings-modal-section">
           <div className="settings-modal-title">本机终端</div>
           <div className="settings-modal-row">
@@ -264,11 +347,16 @@ export function SettingsModal({
             <button className="btn btn-secondary btn-sm settings-open-dir-btn" onClick={handleOpenConfigDir} title="在文件管理器中打开配置文件所在目录">
               📂 打开目录
             </button>
+            <button className="btn btn-secondary btn-sm settings-open-dir-btn" onClick={handleReloadConfig} title="扫描配置文件与 scripts 脚本目录并刷新主机/快捷指令列表">
+              🔄 检查配置
+            </button>
+            {reloadMsg && <div className="settings-open-dir-msg">{reloadMsg}</div>}
             {openDirMsg && <div className="settings-open-dir-msg">{openDirMsg}</div>}
           </div>
         </div>
+        )}
 
-        {/* 命令块：从顶栏收拢到设置弹窗 */}
+        {section === 'blocks' && (
         <div className="settings-modal-section">
           <div className="settings-modal-title">命令块</div>
           <div className="settings-modal-row">
@@ -328,8 +416,63 @@ export function SettingsModal({
             )}
           </div>
         </div>
+        )}
 
-        {/* 关键字高亮：rssh 同款装饰层方案（只叠加显示，不改写终端内容） */}
+        {section === 'logging' && (
+        <div className="settings-modal-section">
+          <div className="settings-modal-title">日志记录</div>
+          <div className="settings-modal-hint">
+            终端默认不记录日志；在终端右键菜单选择「开始记录日志」后才开始写入。
+          </div>
+          <div className="settings-modal-row-column">
+            <label title="右键「开始记录日志」时若勾选了「不再询问」，将直接使用此目录（留空 = 程序默认目录 ~/.ai4one/sshtool/logs）">
+              默认保存目录
+            </label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                type="text"
+                value={logDirDraft}
+                placeholder="留空使用程序默认目录"
+                spellCheck={false}
+                onChange={(e) => setLogDirDraft(e.target.value)}
+                onBlur={commitLogDir}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                style={{ flex: 1 }}
+              />
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setLogDirPickerOpen(true)}
+                title="浏览并选择默认保存目录"
+              >
+                浏览…
+              </button>
+            </div>
+          </div>
+          <div className="settings-modal-row">
+            <label title="勾选后右键「开始记录日志」不再弹目录选择，直接用上方默认目录">
+              开启记录时不再询问目录
+            </label>
+            <input
+              type="checkbox" checked={settings.logRecordNoAsk}
+              onChange={(e) => onUpdate({ logRecordNoAsk: e.target.checked })}
+            />
+          </div>
+          {logDirPickerOpen && (
+            <DirPickerModal
+              title="选择日志默认保存目录"
+              initialDir={logDirDraft}
+              onConfirm={(dir) => {
+                setLogDirPickerOpen(false)
+                setLogDirDraft(dir)
+                onUpdate({ logRecordDir: dir })
+              }}
+              onCancel={() => setLogDirPickerOpen(false)}
+            />
+          )}
+        </div>
+        )}
+
+        {section === 'highlight' && (
         <div className="settings-modal-section">
           <div className="settings-modal-title">关键字高亮</div>
           {settings.highlightRules.length === 0 && <div className="settings-modal-hint">暂无规则</div>}
@@ -396,8 +539,9 @@ export function SettingsModal({
             高亮只是显示层叠加，不会改写终端内容。
           </div>
         </div>
+        )}
 
-        {/* 缓存清理：localStorage 只存临时内容（布局宽度等），可一键清空 */}
+        {section === 'cache' && (
         <div className="settings-modal-section">
           <div className="settings-modal-title">缓存</div>
           <div className="settings-modal-row">
@@ -406,9 +550,14 @@ export function SettingsModal({
           </div>
           {cacheMsg && <div className="settings-modal-hint">{cacheMsg}</div>}
         </div>
+        )}
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-          <button ref={doneBtnRef} className="btn btn-primary" onClick={handleClose}>完成</button>
+          </div>
+        </div>
+
+        {/* 页脚：完成按钮（与页头 ✕ 均可关闭） */}
+        <div className="settings-page-footer">
+          <button className="btn btn-primary" onClick={handleClose}>完成</button>
         </div>
       </div>
     </div>

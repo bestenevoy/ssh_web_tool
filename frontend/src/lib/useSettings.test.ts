@@ -19,6 +19,7 @@ describe('toUiSettingsPayload', () => {
   })
 
   it('全部键一一对应', () => {
+    const rule = { keyword: 'A', name: 'a', color: '#112233', enabled: true, is_case_sensitive: false }
     const out = toUiSettingsPayload({
       theme: 'light',
       fontFamily: 'Fira Code',
@@ -28,6 +29,10 @@ describe('toUiSettingsPayload', () => {
       blockMaxLines: 50,
       blockSplitMode: 'prompt',
       customPromptPatterns: ['mini>', 'db \\d+ =>'],
+      highlightRules: [rule],
+      editorRecentPaths: ['C:\\a.zs'],
+      logRecordDir: 'D:\\logs',
+      logRecordNoAsk: true,
     })
     expect(out).toEqual({
       theme: 'light',
@@ -38,6 +43,10 @@ describe('toUiSettingsPayload', () => {
       block_max_lines: 50,
       block_split_mode: 'prompt',
       custom_prompt_patterns: ['mini>', 'db \\d+ =>'],
+      highlight_rules: [rule],
+      editor_recent_paths: ['C:\\a.zs'],
+      log_record_dir: 'D:\\logs',
+      log_record_no_ask: true,
     })
   })
 
@@ -57,12 +66,16 @@ describe('applyUiSettings', () => {
       theme: 'dark',
       fontFamily: 'Menlo',
       fontSize: 18,
+      uiFontScale: 1,
       blockBar: false,
       blockAutoFold: true,
       blockMaxLines: 100,
       blockSplitMode: 'prompt',
       customPromptPatterns: [],
       highlightRules: DEFAULT_SETTINGS.highlightRules,
+      editorRecentPaths: [],
+      logRecordDir: '',
+      logRecordNoAsk: false,
     })
   })
 
@@ -97,6 +110,21 @@ describe('applyUiSettings', () => {
     expect(applyUiSettings({ font_size: 2 }, DEFAULT_SETTINGS).fontSize).toBe(8)
   })
 
+  it('ui_font_scale 映射 / 超界钳制到 0.8-1.6 / 非法值保留 base', () => {
+    expect(toUiSettingsPayload({ uiFontScale: 1.15 })).toEqual({ ui_font_scale: 1.15 })
+    expect(applyUiSettings({ ui_font_scale: 1.3 }, DEFAULT_SETTINGS).uiFontScale).toBe(1.3)
+    // 超界钳制
+    expect(applyUiSettings({ ui_font_scale: 2 }, DEFAULT_SETTINGS).uiFontScale).toBe(1.6)
+    expect(applyUiSettings({ ui_font_scale: 0.5 }, DEFAULT_SETTINGS).uiFontScale).toBe(0.8)
+    // 非法类型不污染 base
+    const base = { ...DEFAULT_SETTINGS, uiFontScale: 1.15 }
+    const bad = applyUiSettings(
+      { ui_font_scale: Number.NaN, ui_font_scale2: undefined } as unknown as { ui_font_scale: number },
+      base
+    )
+    expect(bad.uiFontScale).toBe(1.15)
+  })
+
   it('block_split_mode 合法值生效、非法值保留 base', () => {
     const base = { ...DEFAULT_SETTINGS, blockSplitMode: 'enter' as const }
     expect(applyUiSettings({ block_split_mode: 'prompt' }, base).blockSplitMode).toBe('prompt')
@@ -119,6 +147,28 @@ describe('applyUiSettings', () => {
     const out = applyUiSettings({ theme: 'dark' }, DEFAULT_SETTINGS)
     expect(out.blockSplitMode).toBe('prompt')
     expect(out.customPromptPatterns).toEqual([])
+    expect(out.logRecordDir).toBe('')
+    expect(out.logRecordNoAsk).toBe(false)
+  })
+
+  it('log_record_dir / log_record_no_ask 映射与非法值兜底', () => {
+    expect(toUiSettingsPayload({ logRecordDir: 'D:\\x', logRecordNoAsk: true })).toEqual({
+      log_record_dir: 'D:\\x',
+      log_record_no_ask: true,
+    })
+    const out = applyUiSettings(
+      { log_record_dir: '  D:\\logs  ', log_record_no_ask: true },
+      DEFAULT_SETTINGS
+    )
+    expect(out.logRecordDir).toBe('D:\\logs')
+    expect(out.logRecordNoAsk).toBe(true)
+    // 非法类型不污染 base
+    const bad = applyUiSettings(
+      { log_record_dir: 42 as unknown as string, log_record_no_ask: 'yes' as unknown as boolean },
+      { ...DEFAULT_SETTINGS, logRecordDir: 'keep' }
+    )
+    expect(bad.logRecordDir).toBe('keep')
+    expect(bad.logRecordNoAsk).toBe(false)
   })
 
   it('highlight_rules 逐项过滤形状 + keyword 去重 + 条数上限', () => {
@@ -130,7 +180,7 @@ describe('applyUiSettings', () => {
           good, // 重复 keyword：剔除
           { ...good, keyword: '' }, // 空 keyword：剔除
           { ...good, keyword: 'X', name: '' }, // 空 name：剔除
-          { keyword: 'Y', name: 'Y', color: '#00FF00' }, // 缺 bool 字段：剔除
+          { keyword: 'Y', name: 'Y', color: '#00FF00' } as unknown as typeof good, // 缺 bool 字段：剔除
           'junk' as unknown as typeof good, // 非对象：剔除
         ],
       },

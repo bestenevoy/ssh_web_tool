@@ -273,7 +273,7 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
         )
       })}
       {hosts.length === 0 && (
-        <div style={{ textAlign: 'center', color: '#3a4a6a', padding: '30px 10px', fontSize: 11 }}>
+        <div style={{ textAlign: 'center', color: '#3a4a6a', padding: '30px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
           暂无主机<br />点击左侧「＋」新建主机
         </div>
       )}

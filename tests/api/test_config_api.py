@@ -7,6 +7,7 @@ save_config 被 monkeypatch，避免测试写入真实 ~/.ai4one/sshtool/config.
 from fastapi.testclient import TestClient
 
 import main
+from ssh_web_tool import config as config_module
 from ssh_web_tool.api.routers import config as config_router
 
 # 路由在模块级绑定 save_config（from ssh_web_tool.config import save_config），
@@ -67,7 +68,9 @@ def test_set_fallback_shell_case_insensitive(monkeypatch):
 # ============ ui_settings：前端 UI 设置持久化到 config.json ============
 
 
-def test_get_config_returns_ui_settings():
+def test_get_config_returns_ui_settings(monkeypatch, tmp_path):
+    # 隔离真实 ~/.ai4one/sshtool/config.json：断言的是默认值，不能被用户本机配置影响
+    monkeypatch.setattr(config_module, "get_app_dir", lambda: tmp_path)
     c = TestClient(main.app)
     r = c.get("/api/config")
     assert r.status_code == 200

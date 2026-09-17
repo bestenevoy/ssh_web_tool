@@ -13,7 +13,7 @@ export function EventLog({ events, onClear }: Props) {
         <button className="clear-btn" onClick={onClear}>清空</button>
       </div>
       {events.length === 0 ? (
-        <div style={{ textAlign: 'center', color: '#555', padding: '30px 10px', fontSize: 11 }}>
+        <div style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: '30px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
           暂无事件<br />CLI/SDK/前端操作会实时显示在这里
         </div>
       ) : (
@@ -26,7 +26,7 @@ export function EventLog({ events, onClear }: Props) {
         ))
       )}
       {events.length > 100 && (
-        <div style={{ textAlign: 'center', color: '#555', padding: 8, fontSize: 10 }}>
+        <div style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: 8, fontSize: 'calc(10px * var(--ui-fs-scale))' }}>
           仅显示最近100条，共{events.length}条
         </div>
       )}
