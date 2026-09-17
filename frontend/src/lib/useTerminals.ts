@@ -418,6 +418,17 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     }, 50)
   }, [terminals, fitTerminal, sendResize])
 
+  // 重新 fit 指定会话（分屏布局/窗口尺寸变化后调用；仅处理已挂载容器的会话）
+  const refitTerminals = useCallback((session_ids: string[]) => {
+    for (const id of session_ids) {
+      const inst = terminalsRef.current.get(id)
+      if (inst?.container) {
+        fitTerminal(inst)
+        sendResize(inst.term, inst.ws)
+      }
+    }
+  }, [fitTerminal, sendResize])
+
   // 弹窗/面板关闭后把光标还给当前终端
   const focusActiveTerminal = useCallback(() => {
     const inst = activeId ? terminals.get(activeId) : undefined
@@ -610,6 +621,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     openLocalTerminal: (shell: string) => createTerminal({} as Host, undefined, 'local', shell),
     restoreTerminals,
     switchTerminal,
+    setActiveId,
+    refitTerminals,
     closeTerminal,
     disconnectTerminal,
     setReconnecting,

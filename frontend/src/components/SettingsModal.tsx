@@ -12,6 +12,9 @@ import {
 } from '../lib/highlight'
 import { api } from '../lib/api'
 import { DirPickerModal } from './DirPickerModal'
+import { EventLog } from './EventLog'
+import { ApiDocs } from './ApiDocs'
+import type { EventLogItem } from '../types'
 
 interface Props {
   settings: TerminalSettings
@@ -23,6 +26,9 @@ interface Props {
   onSetConnectTimeout: (seconds: number) => Promise<void>
   configFile: string
   onReloadConfig: () => Promise<void>
+  /** 活动日志（从右侧面板迁入设置页）：App 持续采集，弹窗只负责展示 */
+  events: EventLogItem[]
+  onClearEvents: () => void
   onClose: () => void
 }
 
@@ -36,13 +42,14 @@ const SHELL_LABELS: Record<string, string> = {
 }
 
 /** 设置页分区（左侧导航） */
-type SectionId = 'appearance' | 'blocks' | 'highlight' | 'shortcuts' | 'cache'
+type SectionId = 'appearance' | 'blocks' | 'highlight' | 'shortcuts' | 'logs' | 'cache'
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'appearance', label: '基本设置' },
   { id: 'blocks', label: '命令块' },
   { id: 'highlight', label: '关键字高亮' },
   { id: 'shortcuts', label: '快捷键' },
+  { id: 'logs', label: '日志与 API' },
   { id: 'cache', label: '缓存' },
 ]
 
@@ -84,6 +91,8 @@ export function SettingsModal({
   onSetConnectTimeout,
   configFile,
   onReloadConfig,
+  events,
+  onClearEvents,
   onClose,
 }: Props) {
   const [cacheMsg, setCacheMsg] = useState('')
@@ -562,6 +571,16 @@ export function SettingsModal({
             终端聚焦时 Ctrl+B / Ctrl+F / Alt+R 由终端拦截处理，不会发送到远端。
             Ctrl+B 会占用 bash 的「后退字符」与 tmux 前缀键。
           </div>
+        </div>
+        )}
+
+        {/* 日志与 API：活动日志 + API 文档（原右侧面板「日志」tab 迁入） */}
+        {section === 'logs' && (
+        <div className="settings-modal-section">
+          <div className="settings-modal-title">活动日志</div>
+          <EventLog events={events} onClear={onClearEvents} />
+          <div className="settings-modal-title" style={{ marginTop: 14 }}>API 文档</div>
+          <ApiDocs />
         </div>
         )}
 

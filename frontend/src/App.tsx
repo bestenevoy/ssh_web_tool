@@ -15,10 +15,10 @@ import { HostList } from './components/HostList'
 import { GroupManager } from './components/GroupManager'
 import { TerminalTabs } from './components/TerminalTabs'
 import { TerminalView } from './components/TerminalView'
+import type { SplitMode, PaneIndex } from './components/TerminalView'
+import { SessionPanel } from './components/SessionPanel'
 import { QuickCommands } from './components/QuickCommands'
 import { SftpPanel } from './components/SftpPanel'
-import { EventLog } from './components/EventLog'
-import { ApiDocs } from './components/ApiDocs'
 import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
 import { PasswordModal } from './components/PasswordModal'
@@ -28,7 +28,7 @@ import { SearchBar } from './components/SearchBar'
 import { FileEditor } from './components/FileEditor'
 import HistorySearchModal from './components/HistorySearchModal'
 
-type PanelTab = 'quick' | 'sftp' | 'logs'
+type PanelTab = 'quick' | 'sftp'
 
 // ---- 布局宽度持久化 ----
 const LAYOUT_KEY_PREFIX = 'ssh-web-tool-layout-'
@@ -52,9 +52,17 @@ function App() {
   const [configFile, setConfigFile] = useState('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
+  // 分屏：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗格）；
+  // panes 为各窗格显示的会话 id（null=空窗格占位），activeId 始终等于焦点窗格的会话
+  const [splitMode, setSplitMode] = useState<SplitMode>('none')
+  const [panes, setPanes] = useState<[string | null, string | null]>([null, null])
+  const [focusedPane, setFocusedPane] = useState<PaneIndex>(0)
+  // 右侧会话列表面板（按主机 ip 聚合分组，与顶部标签栏并存）
+  const [sessionPanelCollapsed, setSessionPanelCollapsed] = useState(false)
   // 布局宽度（侧栏/右面板可拖拽调宽，localStorage 持久化；终端是核心区，宽度自适应）
   const [sidebarWidth, setSidebarWidth] = useState(() => loadLayoutWidth('sidebar', 240, 180, 440))
   const [panelWidth, setPanelWidth] = useState(() => loadLayoutWidth('panel', 320, 260, 600))
+  const [sessionPanelWidth, setSessionPanelWidth] = useState(() => loadLayoutWidth('sessionPanel', 240, 200, 480))
   const [panelTab, setPanelTab] = useState<PanelTab>('quick')
   const [modalOpen, setModalOpen] = useState(false)
   const [editingHost, setEditingHost] = useState<Host | null>(null)
@@ -91,19 +99,21 @@ function App() {
     [terminals.terminals]
   )
 
-  // 拖拽调宽：sidebar 向右拖变宽，panel 向左拖变宽；松开时持久化
-  const startResize = useCallback((side: 'sidebar' | 'panel') => (e: React.MouseEvent) => {
+  // 拖拽调宽：sidebar 向右拖变宽，panel/sessionPanel 向左拖变宽；松开时持久化
+  const startResize = useCallback((side: 'sidebar' | 'panel' | 'sessionPanel') => (e: React.MouseEvent) => {
     e.preventDefault()
     const isSidebar = side === 'sidebar'
+    const isSession = side === 'sessionPanel'
     const startX = e.clientX
-    const startW = isSidebar ? sidebarWidth : panelWidth
-    const min = isSidebar ? 180 : 260
-    const max = isSidebar ? 440 : 600
+    const startW = isSidebar ? sidebarWidth : isSession ? sessionPanelWidth : panelWidth
+    const min = isSidebar ? 180 : isSession ? 200 : 260
+    const max = isSidebar ? 440 : isSession ? 480 : 600
     const dir = isSidebar ? 1 : -1
     let last = startW
     const onMove = (ev: MouseEvent) => {
       last = Math.min(max, Math.max(min, startW + dir * (ev.clientX - startX)))
       if (isSidebar) setSidebarWidth(last)
+      else if (isSession) setSessionPanelWidth(last)
       else setPanelWidth(last)
     }
     const onUp = () => {
@@ -115,7 +125,7 @@ function App() {
     document.body.style.cursor = 'col-resize'
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [sidebarWidth, panelWidth])
+  }, [sidebarWidth, panelWidth, sessionPanelWidth])
 
   // 设置快捷键处理函数（Alt+R 打开历史搜索）
   useEffect(() => {
@@ -259,11 +269,13 @@ function App() {
   }, [terminals, loadHosts])
 
   const handleNewTerminal = useCallback(() => {
-    if (terminals.activeId) {
-      const inst = terminals.terminals.get(terminals.activeId)
-      if (inst) {
-        const host = hosts.find((h) => h.id === inst.host_id)
-        if (host) {
+    // 分屏焦点是空窗格（activeId=null）时回退：取任一存活会话的主机
+    const inst = (terminals.activeId ? terminals.terminals.get(terminals.activeId) : null)
+      ?? Array.from(terminals.terminals.values()).find((t) => !t.disconnected)
+      ?? null
+    if (inst) {
+      const host = hosts.find((h) => h.id === inst.host_id)
+      if (host) {
         terminals.createTerminal(host)
           .then(() => {
             loadHosts()
@@ -271,11 +283,99 @@ function App() {
           })
           .catch((e) => alert('创建终端失败: ' + (e as Error).message))
       }
-      }
     } else {
       alert('请先选择一个主机')
     }
   }, [terminals, hosts, loadHosts])
+
+  // 分屏窗格中的会话集合（顶部 tab 分屏标记用）
+  const splitSessions = useMemo(() => new Set(panes.filter((id): id is string => !!id)), [panes])
+
+  // 分屏模式下的会话切换（顶部 tab / 右侧会话列表共用）：
+  // 目标已在某窗格 → 聚焦该窗格；否则放进焦点窗格显示。单屏 = 普通切换
+  const handleSwitchTerminal = useCallback((id: string) => {
+    if (splitMode === 'none') {
+      terminals.switchTerminal(id)
+      return
+    }
+    const idx = panes.indexOf(id)
+    if (idx >= 0) {
+      setFocusedPane(idx as PaneIndex)
+      return
+    }
+    setPanes((prev) => {
+      const next: [string | null, string | null] = [prev[0], prev[1]]
+      next[focusedPane] = id
+      return next
+    })
+  }, [splitMode, panes, focusedPane, terminals])
+
+  // 进入分屏：窗格0 = 当前会话，窗格1 = 另一个会话（无则空窗格占位，之后点标签填入）
+  const enterSplit = useCallback((mode: 'h' | 'v') => {
+    if (terminals.terminals.size === 0) { setStatus('请先打开一个终端会话'); return }
+    if (window.innerWidth < 800) { setStatus('窗口太窄，无法分屏'); return }
+    const ids = Array.from(terminals.terminals.keys())
+    const first = terminals.activeId && ids.includes(terminals.activeId) ? terminals.activeId : ids[0]
+    const second = ids.find((id) => id !== first) ?? null
+    setSplitMode(mode)
+    setPanes([first, second])
+    setFocusedPane(0)
+    if (terminals.activeId !== first) terminals.switchTerminal(first)
+  }, [terminals])
+
+  // 退出分屏：回到单屏，显示退出前焦点窗格的会话
+  const exitSplit = useCallback(() => {
+    const sid = panes[focusedPane] ?? panes[0] ?? panes[1]
+    setSplitMode('none')
+    setPanes([null, null])
+    setFocusedPane(0)
+    if (sid && terminals.terminals.has(sid)) terminals.switchTerminal(sid)
+  }, [panes, focusedPane, terminals])
+
+  // 分屏状态自愈（每次渲染收敛检查，守卫保证只跑一次有效分支）：
+  // ① 清理窗格里已被关闭的会话；② 两窗格全空则退出分屏；
+  // ③ activeId 指向的新会话（新建/重连/自动恢复）进入焦点窗格；
+  // ④ 焦点窗格会话与 activeId 不一致时同步（点击窗格/空占位切换焦点的收尾）
+  useEffect(() => {
+    if (splitMode === 'none') return
+    const liveOf = (sid: string | null): string | null =>
+      sid && terminals.terminals.has(sid) ? sid : null
+    const l0 = liveOf(panes[0])
+    const l1 = liveOf(panes[1])
+    if (l0 !== panes[0] || l1 !== panes[1]) { setPanes([l0, l1]); return }
+    if (!l0 && !l1) { setSplitMode('none'); return }
+    const aid = terminals.activeId
+    if (aid && aid !== l0 && aid !== l1) {
+      setPanes((prev) => {
+        const next: [string | null, string | null] = [prev[0], prev[1]]
+        next[focusedPane] = aid
+        return next
+      })
+      return
+    }
+    const focusedLive = focusedPane === 0 ? l0 : l1
+    if (focusedLive !== aid) {
+      if (focusedLive) terminals.switchTerminal(focusedLive)
+      else terminals.setActiveId(null)
+    }
+  }, [splitMode, focusedPane, panes, terminals])
+
+  // 分屏布局变化后重新 fit 可见窗格（等 grid 生效后的下一帧再量尺寸）
+  const refitSplit = terminals.refitTerminals
+  useEffect(() => {
+    if (splitMode === 'none') return
+    const ids = panes.filter((id): id is string => !!id)
+    const raf = requestAnimationFrame(() => refitSplit(ids))
+    return () => cancelAnimationFrame(raf)
+  }, [splitMode, panes, refitSplit])
+
+  // 分屏模式下窗口尺寸变化：两个窗格都要重新 fit（单屏场景由 useTerminals 内部处理 activeId）
+  useEffect(() => {
+    if (splitMode === 'none') return
+    const handler = () => refitSplit(panes.filter((id): id is string => !!id))
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [splitMode, panes, refitSplit])
 
   const handleCloseTerminal = useCallback((session_id: string) => {
     const ok = confirm('关闭终端标签？\n\n将同时关闭后端 SSH 连接，重开页面不会恢复该会话。')
@@ -684,16 +784,6 @@ function App() {
         )
       case 'sftp':
         return <SftpPanel sessionId={terminals.activeId} />
-      case 'logs':
-        // 日志 tab：活动日志 + API 文档两个分区上下排布
-        return (
-          <div>
-            <div className="logs-section-title">📊 活动日志</div>
-            <EventLog events={events.events} onClear={events.clearEvents} />
-            <div className="logs-section-title">🔌 API 文档</div>
-            <ApiDocs />
-          </div>
-        )
     }
   }
 
@@ -729,6 +819,18 @@ function App() {
             >⛓️‍💥 断开</button>
           )
         })()}
+        {/* 分屏：左右/上下固定均分两窗格；再次点击当前模式按钮退出 */}
+        <div className="topbar-divider" />
+        <button
+          className={`btn btn-sm ${splitMode === 'h' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => (splitMode === 'h' ? exitSplit() : enterSplit('h'))}
+          title="左右分屏（均分两栏，再次点击退出）"
+        >◫ 左右分屏</button>
+        <button
+          className={`btn btn-sm ${splitMode === 'v' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => (splitMode === 'v' ? exitSplit() : enterSplit('v'))}
+          title="上下分屏（均分两行，再次点击退出）"
+        >⬒ 上下分屏</button>
         <div style={{ flex: 1 }} />
         {/* 终端设置 */}
         <div className="topbar-divider" />
@@ -769,6 +871,9 @@ function App() {
           </button>
         </div>
         <div className="topbar-divider" />
+        <button className="btn btn-secondary btn-sm" onClick={() => setSessionPanelCollapsed(!sessionPanelCollapsed)} title="显示/折叠右侧会话列表">
+          🗂 会话
+        </button>
         <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(!panelCollapsed)}>
           📋 面板
         </button>
@@ -838,15 +943,20 @@ function App() {
             hostTypes={hostTypes}
             hosts={hosts}
             groups={groups}
-            onSwitch={terminals.switchTerminal}
+            splitSessions={splitSessions}
+            onSwitch={handleSwitchTerminal}
             onClose={handleCloseTerminal}
             onNew={handleNewTerminal}
           />
           <TerminalView
             terminals={terminals.terminals}
             activeId={terminals.activeId}
+            splitMode={splitMode}
+            panes={panes}
+            focusedPane={focusedPane}
             registerContainer={terminals.registerContainer}
             onTerminalContextMenu={handleTerminalContextMenu}
+            onPaneClick={(idx) => setFocusedPane(idx)}
           />
           {/* 终端内容搜索条（Ctrl+F）：浮在活动终端右上角；切换活动终端时跟随显示对应实例 */}
           {terminals.searchOpenId && (() => {
@@ -879,6 +989,24 @@ function App() {
           )}
         </div>
 
+        {/* 右侧会话列表（按主机 ip 聚合分组，宽度可拖拽调整） */}
+        {!sessionPanelCollapsed && (
+          <div className="session-panel" style={{ width: sessionPanelWidth }}>
+            <div className="resizer session-panel-resizer" onMouseDown={startResize('sessionPanel')} title="拖拽调整宽度" />
+            <div className="session-panel-header">
+              <span className="title">会话列表</span>
+              <button className="btn btn-secondary btn-sm" onClick={() => setSessionPanelCollapsed(true)}>✕</button>
+            </div>
+            <SessionPanel
+              terminals={terminals.terminals}
+              hosts={hosts}
+              activeId={terminals.activeId}
+              onSwitch={handleSwitchTerminal}
+              onClose={handleCloseTerminal}
+            />
+          </div>
+        )}
+
         {/* 右侧面板（宽度可拖拽调整） */}
         {!panelCollapsed && (
           <div className="panel" style={{ width: panelWidth }}>
@@ -890,7 +1018,6 @@ function App() {
             <div className="panel-tabs">
               <div className={`panel-tab${panelTab === 'quick' ? ' active' : ''}`} onClick={() => setPanelTab('quick')}>⚡ 快速指令</div>
               <div className={`panel-tab${panelTab === 'sftp' ? ' active' : ''}`} onClick={() => setPanelTab('sftp')}>📁 SFTP</div>
-              <div className={`panel-tab${panelTab === 'logs' ? ' active' : ''}`} onClick={() => setPanelTab('logs')}>🗒 日志</div>
             </div>
             <div className="panel-body">{renderPanelContent()}</div>
           </div>
@@ -972,6 +1099,8 @@ function App() {
           onSetConnectTimeout={handleSetConnectTimeout}
           configFile={configFile}
           onReloadConfig={handleReloadConfig}
+          events={events.events}
+          onClearEvents={events.clearEvents}
           onClose={() => { setSettingsOpen(false); focusActiveTerminal() }}
         />
       )}

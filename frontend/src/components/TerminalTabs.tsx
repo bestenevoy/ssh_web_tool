@@ -8,6 +8,8 @@ interface Props {
   hostTypes: HostType[]
   hosts: Host[]  // 用于按分组/主机筛选
   groups: string[]
+  /** 分屏窗格中的会话集合（tab 加分屏标记） */
+  splitSessions?: Set<string>
   onSwitch: (id: string) => void
   onClose: (id: string) => void
   onNew: () => void
@@ -22,7 +24,7 @@ const SHELL_TYPE_STYLES: Record<string, { label: string; color: string; bg: stri
   other: { label: '··', color: '#999', bg: 'rgba(153,153,153,0.15)' },
 }
 
-export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, onSwitch, onClose, onNew }: Props) {
+export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, splitSessions, onSwitch, onClose, onNew }: Props) {
   const [groupFilter, setGroupFilter] = useState('')
   const [hostFilter, setHostFilter] = useState('')
 
@@ -87,6 +89,9 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, on
                 >
                   <span className="type-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: getTypeColor(t.type), display: 'inline-block' }} />
                   <span className="tab-title">{t.terminal_name}</span>
+                  {splitSessions?.has(t.session_id) && (
+                    <span className="tab-split-badge" title="该会话正在分屏中显示">◫</span>
+                  )}
                   <span
                     className="shell-type-badge"
                     style={{
