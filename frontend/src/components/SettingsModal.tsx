@@ -36,13 +36,12 @@ const SHELL_LABELS: Record<string, string> = {
 }
 
 /** 设置页分区（左侧导航） */
-type SectionId = 'appearance' | 'terminal' | 'blocks' | 'logging' | 'highlight' | 'cache'
+type SectionId = 'appearance' | 'terminal' | 'blocks' | 'highlight' | 'cache'
 
 const SECTIONS: { id: SectionId; label: string }[] = [
-  { id: 'appearance', label: '字体与主题' },
+  { id: 'appearance', label: '基本设置' },
   { id: 'terminal', label: '本机终端' },
   { id: 'blocks', label: '命令块' },
-  { id: 'logging', label: '日志记录' },
   { id: 'highlight', label: '关键字高亮' },
   { id: 'cache', label: '缓存' },
 ]
@@ -60,7 +59,7 @@ export function clearFrontendCache(): number {
 
 /**
  * 设置页（整页覆盖层，非弹窗）：左侧分区导航 + 右侧内容区（rssh 式侧边栏布局）。
- * 分区：字体与主题 / 本机终端 / 命令块 / 关键字高亮 / 缓存清理。
+ * 分区：基本设置（字体/主题/日志记录）/ 本机终端 / 命令块 / 关键字高亮 / 缓存清理。
  * 仅关闭按钮/完成/Esc 可关闭（遵循 AGENTS.md UI 规范）；
  * 所有持久化配置写入后端 config.json，localStorage 只保留临时内容。
  */
@@ -277,7 +276,7 @@ export function SettingsModal({
 
         {section === 'appearance' && (
         <div className="settings-modal-section">
-          <div className="settings-modal-title">字体与主题</div>
+          <div className="settings-modal-title">基本设置</div>
           <div className="settings-modal-row">
             <label>终端字体</label>
             <select value={settings.fontFamily} onChange={(e) => onUpdate({ fontFamily: e.target.value })}>
@@ -317,6 +316,57 @@ export function SettingsModal({
               <option value="1.3">特大（130%）</option>
             </select>
           </div>
+
+          {/* 日志记录：归属基本设置（开关入口在终端右键菜单，这里只放默认行为配置） */}
+          <div className="settings-modal-title" style={{ marginTop: 14 }}>日志记录</div>
+          <div className="settings-modal-hint">
+            终端默认不记录日志；在终端右键菜单选择「开始记录日志」后才开始写入。
+          </div>
+          <div className="settings-modal-row-column">
+            <label title="右键「开始记录日志」时若勾选了「不再询问」，将直接使用此目录（留空 = 程序默认目录 ~/.ai4one/sshtool/logs）">
+              默认保存目录
+            </label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                type="text"
+                value={logDirDraft}
+                placeholder="留空使用程序默认目录"
+                spellCheck={false}
+                onChange={(e) => setLogDirDraft(e.target.value)}
+                onBlur={commitLogDir}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                style={{ flex: 1 }}
+              />
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setLogDirPickerOpen(true)}
+                title="浏览并选择默认保存目录"
+              >
+                浏览…
+              </button>
+            </div>
+          </div>
+          <div className="settings-modal-row">
+            <label title="勾选后右键「开始记录日志」不再弹目录选择，直接用上方默认目录">
+              开启记录时不再询问目录
+            </label>
+            <input
+              type="checkbox" checked={settings.logRecordNoAsk}
+              onChange={(e) => onUpdate({ logRecordNoAsk: e.target.checked })}
+            />
+          </div>
+          {logDirPickerOpen && (
+            <DirPickerModal
+              title="选择日志默认保存目录"
+              initialDir={logDirDraft}
+              onConfirm={(dir) => {
+                setLogDirPickerOpen(false)
+                setLogDirDraft(dir)
+                onUpdate({ logRecordDir: dir })
+              }}
+              onCancel={() => setLogDirPickerOpen(false)}
+            />
+          )}
         </div>
         )}
 
@@ -415,60 +465,6 @@ export function SettingsModal({
               <div className="settings-modal-hint">修改后从下一个提示符开始生效，已有块会被重置</div>
             )}
           </div>
-        </div>
-        )}
-
-        {section === 'logging' && (
-        <div className="settings-modal-section">
-          <div className="settings-modal-title">日志记录</div>
-          <div className="settings-modal-hint">
-            终端默认不记录日志；在终端右键菜单选择「开始记录日志」后才开始写入。
-          </div>
-          <div className="settings-modal-row-column">
-            <label title="右键「开始记录日志」时若勾选了「不再询问」，将直接使用此目录（留空 = 程序默认目录 ~/.ai4one/sshtool/logs）">
-              默认保存目录
-            </label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <input
-                type="text"
-                value={logDirDraft}
-                placeholder="留空使用程序默认目录"
-                spellCheck={false}
-                onChange={(e) => setLogDirDraft(e.target.value)}
-                onBlur={commitLogDir}
-                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-                style={{ flex: 1 }}
-              />
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={() => setLogDirPickerOpen(true)}
-                title="浏览并选择默认保存目录"
-              >
-                浏览…
-              </button>
-            </div>
-          </div>
-          <div className="settings-modal-row">
-            <label title="勾选后右键「开始记录日志」不再弹目录选择，直接用上方默认目录">
-              开启记录时不再询问目录
-            </label>
-            <input
-              type="checkbox" checked={settings.logRecordNoAsk}
-              onChange={(e) => onUpdate({ logRecordNoAsk: e.target.checked })}
-            />
-          </div>
-          {logDirPickerOpen && (
-            <DirPickerModal
-              title="选择日志默认保存目录"
-              initialDir={logDirDraft}
-              onConfirm={(dir) => {
-                setLogDirPickerOpen(false)
-                setLogDirDraft(dir)
-                onUpdate({ logRecordDir: dir })
-              }}
-              onCancel={() => setLogDirPickerOpen(false)}
-            />
-          )}
         </div>
         )}
 

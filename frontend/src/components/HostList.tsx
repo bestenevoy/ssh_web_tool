@@ -23,13 +23,6 @@ interface Props {
 // 默认终端条目右侧的 shell 显示名
 const SHELL_LABELS: Record<string, string> = { cmd: 'cmd', powershell: 'PowerShell', pwsh: 'pwsh' }
 
-// 格式化连接时长：xx秒 / xx分钟 / xx小时
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${Math.max(1, seconds)}秒`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`
-  return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
-}
-
 export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
@@ -255,11 +248,6 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                       <div className="host-ip">
                         {h.host}
                         {h.device_type === 'storage' ? ' · 存储阵列' : ' · 主机'}
-                        {h.is_connected && h.connected_duration != null && (
-                          <span className="host-conn-info" title={`已连接 ${formatDuration(h.connected_duration)}`}>
-                            {' '}· <span className="conn-dot-mini online" /> 已连 {formatDuration(h.connected_duration)}
-                          </span>
-                        )}
                       </div>
                     </div>
                     {h.terminal_count && h.terminal_count > 0 && (
@@ -273,7 +261,7 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
         )
       })}
       {hosts.length === 0 && (
-        <div style={{ textAlign: 'center', color: '#3a4a6a', padding: '30px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
+        <div style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: '30px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
           暂无主机<br />点击左侧「＋」新建主机
         </div>
       )}

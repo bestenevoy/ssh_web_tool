@@ -94,6 +94,23 @@ def test_quick_command_has_no_param_hint(tmp_path):
     assert "param_hint" not in updated
 
 
+def test_quick_command_legacy_env_preop_converted_to_exec(tmp_path):
+    """兼容：旧版 env 预操作（key/value）读取时自动转换为 exec 自由命令"""
+    s = make_storage(tmp_path)
+    q = s.add_quick_command("部署", "deploy.sh")
+    # 直接写入旧格式数据（模拟历史配置）
+    qc = next(x for x in s._data["quick_commands"] if x["id"] == q["id"])
+    qc["pre_ops"] = [
+        {"type": "env", "key": "TAG", "value": "v1.2"},
+        {"type": "env", "key": "", "value": "orphan"},  # 无变量名：转为空 cmd
+    ]
+    s._save()
+
+    listed = next(x for x in s.list_quick_commands() if x["id"] == q["id"])
+    assert listed["pre_ops"][0] == {"type": "exec", "cmd": "export TAG=v1.2"}
+    assert listed["pre_ops"][1] == {"type": "exec"}  # 无 key → 空 cmd（前端会过滤）
+
+
 # ---------- 原子写（回归 Bug4） ----------
 
 

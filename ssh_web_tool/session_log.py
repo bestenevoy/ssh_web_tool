@@ -86,9 +86,11 @@ class SessionLog:
         self.flush_max = flush_max  # 字符：缓冲超过该阈值立即 flush
         self.buffer = ""  # 聚合缓冲（未落盘内容的 pending 指示与 flush 触发）
         self.enabled = False  # 记录开关：默认不记录，右键「开始记录」才开启
+        self._ever_enabled = False  # 是否开启过记录（区分首次开启与暂停后恢复）
         self._flush_task: asyncio.Task | None = None
-        # 终端镜像：输出流回放到虚拟屏幕，flush 时提取"新显示"的行
-        # （仅在开启记录后 feed，未开启记录零开销）
+        # 终端镜像：输出流回放到虚拟屏幕，flush 时提取"新显示"的行。
+        # 会话创建起就持续 feed（不依赖 enabled）：开启记录晚于连接时，连接
+        # 信息 banner 等早期输出随首次 flush 进入日志（用户明确要求保留）
         self._mirror = TerminalMirror()
 
     def enable_with(self, log_file: str, log_dir: str, cache: dict[str, logging.Logger]) -> None:
@@ -98,10 +100,17 @@ class SessionLog:
         - 变化（换目录）→ 更新路径并重建 handler（get_or_create_logger 内处理）。
         抛出 OSError（目录不可创建/文件不可写）时调用方决定如何提示。
         """
-        self._mirror.reset()  # 开启点之前的屏幕状态不转录，从当前显示重新开始
+        if self._ever_enabled:
+            # 暂停后恢复：暂停期间累积的镜像行不转录（与"暂停期输出被丢弃"一致），
+            # drain 丢弃返回值即可——屏幕快照保留，恢复后只记录新行不重复
+            self._mirror.drain()
+        self._ever_enabled = True
         self.log_file = log_file
         self._logger = self.get_or_create_logger(self._session_id, log_file, log_dir, cache)
         self.enabled = True
+        # 立即转录一次：首次开启时把连接以来的滚出行（banner/MOTD）与当前屏幕
+        # 内容落盘，用户打开日志面板马上能看到连接信息，不必等下一波输出
+        self.flush_now()
 
     # ---------- logger 工厂（dir 与 cache 由调用方传入，便于测试隔离） ----------
 
@@ -176,27 +185,31 @@ class SessionLog:
         """暂停/恢复当前会话记录（已落盘内容保留）
 
         - 暂停：先落盘暂停前的尾部内容，再停止记录；暂停期间的输出被丢弃
-        - 恢复：重建镜像（暂停期间屏幕持续变化，旧镜像状态已失真），
-          从恢复时刻的显示重新开始转录
+        - 恢复：丢弃暂停期间累积的镜像行（暂停期输出不转录），屏幕快照保留，
+          恢复后只记录新行
         """
         if enabled == self.enabled:
             return
         if enabled:
             self.enabled = True
-            self._mirror.reset()
+            self._mirror.drain()  # 丢弃暂停期间累积的行（快照保留，新行才转录）
         else:
             self.flush_now()  # 先落盘暂停前的尾部，再停
             self.enabled = False
             self.buffer = ""
 
     def feed(self, data: str) -> None:
-        """输出进入日志管道：镜像屏幕回放 + 聚合缓冲触发（替代逐块落盘）"""
-        if not self.enabled:
-            return
+        """输出进入日志管道：镜像屏幕回放 + 聚合缓冲触发（替代逐块落盘）
+
+        镜像始终 feed（与是否开启记录无关）：连接信息等早期输出在开启记录时
+        也能进入日志；未开启时只累积不落盘、不触发 flush 调度。
+        """
         try:
             self._mirror.feed(data)
         except Exception:
             pass  # 镜像回放失败不影响主流程（输出仍会广播给前端）
+        if not self.enabled:
+            return
         self.buffer += data
         if len(self.buffer) >= self.flush_max:
             self.flush_now()

@@ -213,21 +213,23 @@ def test_cleanup_old_logs_removes_stale_only(tmp_path):
 
 
 def test_default_no_recording_until_enabled(tmp_path):
-    """默认不记录：建会话不产生日志文件，feed 输出也不落盘；显式开启后才开始"""
+    """默认不记录：建会话不产生日志文件；显式开启后开始落盘，
+    且开启前的输出（连接信息 banner 语义）一并进入日志"""
     s = _mk_session()
     assert not s.is_logging()
-    s._feed_log("should not be recorded\r\n")
+    s._feed_log("banner info\r\n")
     s._flush_log_now()
     assert glob.glob(os.path.join(tmp_path, "*.log")) == []  # 从未创建日志文件
-    # 显式开启后才落盘
+    # 显式开启后才落盘（开启动作本身立即转录一次，含之前的输出）
     s.set_logging(True)
     assert s.is_logging()
+    assert os.path.exists(s._log_file)  # enable_with 内立即 flush，无需等下一波输出
     s._feed_log("now recording\r\n")
     s._flush_log_now()
     with open(s._log_file, encoding="utf-8") as f:
         content = f.read()
     assert "now recording" in content
-    assert "should not be recorded" not in content  # 开启前的输出从未进入缓冲
+    assert "banner info" in content  # 镜像自会话创建起持续 feed，连接信息保留
 
 
 def test_set_logging_custom_dir(tmp_path):

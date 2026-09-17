@@ -6,8 +6,8 @@
  *   - 色条：每块一条左侧色条，折叠态虚线描边（rssh 同款）、选中态加描边光环；
  *   - 徽标：折叠块在命令行右端叠加行末角标「⋯ 已折叠 N 行」（rssh 同款）；
  *   - 交互：单击色条选中块（rssh Finder 风格：Shift 范围 / Ctrl 切换）、
- *     点徽标展开、双击色条复制块内容（折叠块复制走 fold.savedLines）、
- *     折叠/展开走终端右键菜单（hitTest + toggleFold 供 App 层菜单使用）。
+ *     点徽标展开、双击色条切换折叠/展开（复制走单击选中 + Ctrl+C 或右键菜单）、
+ *     折叠/展开也可走终端右键菜单（hitTest + toggleFold 供 App 层菜单使用）。
  *
  * 不变量与私有 API 全部收口在 folds.ts（本文件零私有 API，只用
  * buffer/marker/viewportY 公开接口），xterm 升级只需复核 folds.ts。
@@ -52,6 +52,8 @@ export interface BlockBarController {
   toggleFold(id: number): void
   /** 复制一个或多个块内容（多块按块序拼接，块间空行分隔）。 */
   copyBlocks(ids: number[]): void
+  /** 程序化提交通知（快捷指令/.zs 播放注入命令时调用）：与用户敲 Enter 同语义。 */
+  notifySubmit(): void
   dispose(): void
 }
 
@@ -394,8 +396,14 @@ export function attachBlockBar(
     writeClipboardText(text)
   }
 
-  function copyBlockText(b: CommandBlock) {
-    writeBlockClipboard(blockText(b))
+  /** 双击色条 / 右键菜单共用：切换折叠态（已折叠展开；未折叠且已关闭块则折叠） */
+  function toggleFoldById(id: number) {
+    if (!foldStore) return
+    const b = tracker.blocks.find((x) => x.id === id)
+    if (!b || b.start.isDisposed) return
+    if (foldStore.isFolded(id)) foldStore.unfold(id)
+    // 仅已关闭块可折叠——运行中块终点会漂移，抽不住
+    else if (b.end && !b.end.isDisposed) foldStore.fold(id)
   }
 
   const onClick = (ev: MouseEvent) => {
@@ -415,13 +423,12 @@ export function attachBlockBar(
     else if (ev.ctrlKey || ev.metaKey) toggleSelect(id)
     else singleSelect(id)
   }
-  // 双击色条复制块内容（双击前会触发两次 click，单击选中同一块两次，无副作用）
+  // 双击色条：切换折叠/展开（双击前会触发两次 click，单击选中同一块两次，无副作用）；
+  // 复制块内容改走单击选中 + Ctrl+C（singleSelect 已顺带选中块文本）或右键菜单
   const onDblClick = (ev: MouseEvent) => {
     const el = (ev.target as Element).closest('rect.block-hit') as SVGRectElement | null
     if (!el) return
-    const id = Number(el.getAttribute('data-block'))
-    const b = tracker.blocks.find((x) => x.id === id)
-    if (b) copyBlockText(b)
+    toggleFoldById(Number(el.getAttribute('data-block')))
   }
   overlay.addEventListener('click', onClick)
   overlay.addEventListener('dblclick', onDblClick)
@@ -485,12 +492,7 @@ export function attachBlockBar(
       return !!foldStore?.isFolded(id)
     },
     toggleFold(id: number) {
-      if (!foldStore) return
-      const b = tracker.blocks.find((x) => x.id === id)
-      if (!b || b.start.isDisposed) return
-      if (foldStore.isFolded(id)) foldStore.unfold(id)
-      // 仅已关闭块可折叠——运行中块终点会漂移，抽不住
-      else if (b.end && !b.end.isDisposed) foldStore.fold(id)
+      toggleFoldById(id)
     },
     copyBlocks(ids: number[]) {
       const blocks = ids
@@ -500,6 +502,10 @@ export function attachBlockBar(
       if (blocks.length === 0) return
       // 多块按块序拼接，块间空行分隔
       writeBlockClipboard(blocks.map(blockText).filter(Boolean).join('\n\n'))
+    },
+    notifySubmit() {
+      // tracker 热重建后此处闭包引用的是最新实例（let tracker）
+      tracker.notifySubmit()
     },
     dispose() {
       disposed = true

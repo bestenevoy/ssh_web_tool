@@ -334,12 +334,22 @@ class Storage:
     # ============ 快速指令管理 ============
 
     def list_quick_commands(self) -> list[dict]:
-        """获取所有快速指令（兼容旧数据：自动补全 type/pre_ops/key 字段）"""
+        """获取所有快速指令（兼容旧数据：自动补全 type/pre_ops/key 字段；env 预操作转为 exec）"""
         commands = self._data.get("quick_commands", [])
         for qc in commands:
             qc.setdefault("type", "direct")
             qc.setdefault("pre_ops", [])
             qc.setdefault("key", "")
+            # 旧版 env 预操作（key/value）已由自由命令（exec）取代：读取时自动转换，
+            # export 语句语义等价，保存后持久化为 exec
+            for op in qc["pre_ops"]:
+                if isinstance(op, dict) and op.get("type") == "env":
+                    key = str(op.get("key", "")).strip()
+                    value = str(op.get("value", ""))
+                    op.clear()
+                    op["type"] = "exec"
+                    if key:
+                        op["cmd"] = f"export {key}={value}"
         return commands
 
     @staticmethod
@@ -376,7 +386,7 @@ class Storage:
 
         Args:
             cmd_type: "direct" 直接执行 / "param" 带参数（输入后不执行，命令含 {args} 供编辑）
-            pre_ops: 预操作列表 [{"type": "upload"|"chmod"|"env", ...}]
+            pre_ops: 预操作列表 [{"type": "upload"|"chmod"|"exec", ...}]
             qc_key: 可选短标识（唯一），用于 .zs 脚本 @ 调用
         """
         key = self._normalize_qc_key(qc_key)

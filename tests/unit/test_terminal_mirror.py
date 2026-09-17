@@ -136,13 +136,41 @@ def test_resize_keeps_snapshot_alignment():
 
 
 def test_reset_starts_fresh():
-    """reset 后从空白屏幕重新转录（开启记录/恢复记录场景）"""
+    """reset 后从空白屏幕重新转录（完全重建场景）"""
     m = TerminalMirror()
     m.feed("old\r\n")
     m.drain()
     m.reset()
     m.feed("new\r\n")
     assert m.drain() == ["new"]
+
+
+def test_resize_keeps_untranscribed_scrolled():
+    """resize 保留未转录的滚出行（未开启记录长期累积的连接历史不丢）"""
+    m = TerminalMirror(columns=20, rows=3)
+    m.feed("".join(f"line{i}\r\n" for i in range(1, 8)))  # 4 行滚出，未 drain
+    m.resize(20, 4)  # 不同尺寸触发重建，滚出行必须保留
+    got = m.drain()
+    assert got[:4] == ["line1", "line2", "line3", "line4"]  # 滚出行在前
+    for i in range(5, 8):  # 屏幕行（resize 时补转录）
+        assert f"line{i}" in got
+    m.feed("after\r\n")
+    assert "after" in m.drain()  # 重建后继续正常转录
+
+
+def test_scrolled_off_bounded():
+    """未 drain 的滚出行有上限（长期不开启记录的会话内存有界）"""
+    from ssh_web_tool.terminal_mirror import _MAX_SCROLLED_LINES
+
+    m = TerminalMirror(columns=20, rows=3)
+    m.feed("".join(f"row{i}\r\n" for i in range(_MAX_SCROLLED_LINES + 500)))
+    assert len(m.screen.scrolled_off) == _MAX_SCROLLED_LINES  # 最老的行被丢弃
+    got = m.drain()
+    # drain = 滚出行（上限内）+ 屏幕上未转录的脏行，滚出行占前 _MAX_SCROLLED_LINES 行
+    assert len(got) >= _MAX_SCROLLED_LINES
+    assert got[0].startswith("row498")  # 最老保留的是 row498（row0..row497 已丢弃）
+    assert "row0" not in got
+    assert "row20499" in got  # 最后一行仍在（屏幕脏行）
 
 
 # ---------- SessionLog 集成 ----------
@@ -213,17 +241,17 @@ def test_session_log_long_output_scrolled(tmp_path):
 
 
 def test_session_log_disabled_not_recorded(tmp_path):
-    """默认不记录：输出不进镜像也不落盘；开启后从当前显示开始"""
+    """默认不记录：不创建日志文件；开启记录后连接以来的早期输出（banner 语义）也落盘"""
     s = _mk()
     s._feed_log("before enable\r\n")
     s._flush_log_now()
-    assert glob.glob(os.path.join(tmp_path, "*.log")) == []
-    s.set_logging(True)
+    assert glob.glob(os.path.join(tmp_path, "*.log")) == []  # 未开启时从不创建文件
+    s.set_logging(True)  # 开启时立即转录：之前的输出（连接信息）一并落盘
     s._feed_log("after enable\r\n")
     s._flush_log_now()
     content = _read_log(s)
     assert "after enable" in content
-    assert "before enable" not in content
+    assert "before enable" in content  # 镜像自会话创建起持续 feed，早期输出保留
 
 
 def test_session_log_pause_flushes_tail(tmp_path):

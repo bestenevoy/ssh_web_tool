@@ -48,40 +48,66 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, on
   // 仅在有筛选需求时显示筛选栏（终端数量多时才值得）
   const showFilter = terminals.size >= 4
 
+  // 按主机汇总：host_id 相同的会话聚成一组（本地终端无主机归「本地」组），
+  // 组顺序 = 该组第一个会话的出现顺序；组头显示主机名，组内 tab 只显示终端名
+  const hostGroups: { key: string; label: string; items: typeof filtered }[] = []
+  const hostGroupIndex = new Map<string, number>()
+  for (const t of filtered) {
+    const key = t.host_id || '__local__'
+    let gi = hostGroupIndex.get(key)
+    if (gi === undefined) {
+      gi = hostGroups.length
+      hostGroupIndex.set(key, gi)
+      hostGroups.push({ key, label: t.host_name || '本地', items: [] })
+    }
+    hostGroups[gi].items.push(t)
+  }
+
   return (
     <div className="tab-bar-wrap">
       <div className="tab-bar">
-        {filtered.map((t) => {
-          const shellStyle = getShellStyle(t.shell_type)
-          const group = hostGroupMap.get(t.host_id)
-          return (
+        {hostGroups.map((g) => (
+          <div className="tab-group" key={g.key}>
             <div
-              key={t.session_id}
-              className={`tab${t.session_id === activeId ? ' active' : ''}${t.disconnected ? ' disconnected' : ''}${t.reconnecting ? ' connecting' : ''}`}
-              onClick={() => onSwitch(t.session_id)}
-              title={`${t.host_name} · ${t.terminal_name}${group ? ` · ${group}` : ''}${t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
+              className="tab-group-label"
+              title={`${g.label} · ${g.items.length} 个会话`}
             >
-              <span className="type-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: getTypeColor(t.type), display: 'inline-block' }} />
-              <span className="tab-title">{t.host_name} · {t.terminal_name}</span>
-              <span
-                className="shell-type-badge"
-                style={{
-                  color: shellStyle.color,
-                  background: shellStyle.bg,
-                  fontSize: 'calc(10px * var(--ui-fs-scale))',
-                  padding: '1px 5px',
-                  borderRadius: 3,
-                  fontWeight: 600,
-                  marginLeft: 4,
-                }}
-                title={`当前环境: ${t.shell_type}`}
-              >
-                {shellStyle.label}
-              </span>
-              <span className="tab-close" onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}>✕</span>
+              {g.label}
+              {g.items.length > 1 && <span className="tab-group-count">{g.items.length}</span>}
             </div>
-          )
-        })}
+            {g.items.map((t) => {
+              const shellStyle = getShellStyle(t.shell_type)
+              const group = hostGroupMap.get(t.host_id)
+              return (
+                <div
+                  key={t.session_id}
+                  className={`tab${t.session_id === activeId ? ' active' : ''}${t.disconnected ? ' disconnected' : ''}${t.reconnecting ? ' connecting' : ''}`}
+                  onClick={() => onSwitch(t.session_id)}
+                  title={`${t.host_name} · ${t.terminal_name}${group ? ` · ${group}` : ''}${t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
+                >
+                  <span className="type-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: getTypeColor(t.type), display: 'inline-block' }} />
+                  <span className="tab-title">{t.terminal_name}</span>
+                  <span
+                    className="shell-type-badge"
+                    style={{
+                      color: shellStyle.color,
+                      background: shellStyle.bg,
+                      fontSize: 'calc(10px * var(--ui-fs-scale))',
+                      padding: '1px 5px',
+                      borderRadius: 3,
+                      fontWeight: 600,
+                      marginLeft: 4,
+                    }}
+                    title={`当前环境: ${t.shell_type}`}
+                  >
+                    {shellStyle.label}
+                  </span>
+                  <span className="tab-close" onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}>✕</span>
+                </div>
+              )
+            })}
+          </div>
+        ))}
         <div className="tab-new" onClick={onNew} title="在当前主机新建终端">+</div>
       </div>
       {showFilter && (

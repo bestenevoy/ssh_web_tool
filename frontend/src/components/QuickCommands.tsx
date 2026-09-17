@@ -16,7 +16,7 @@ interface Props {
 const PRE_OP_ICONS: Record<string, string> = {
   upload: '📤',
   chmod: '🔧',
-  env: '🌱',
+  exec: '⌨️',
 }
 
 export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDelete, onOpenAddModal, onReorder, disabled }: Props) {

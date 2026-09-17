@@ -35,6 +35,10 @@ _ALT_TOKEN_RE = re.compile(r"\x1b\[\?[\d;]*(?:1049|1047|47)[hl]")
 DEFAULT_COLUMNS = 120
 DEFAULT_ROWS = 40
 
+# 未转录滚出行上限（镜像始终 feed：会话未开启记录时不 drain，滚出行持续累积；
+# 上限防长期会话内存无限增长——超限丢最老行，极端长输出场景放弃更早的历史）
+_MAX_SCROLLED_LINES = 20000
+
 
 class TranscriptScreen(_PyteScreen):
     """带转录捕获的 pyte 屏幕
@@ -93,7 +97,9 @@ class TranscriptScreen(_PyteScreen):
 class TerminalMirror:
     """单会话终端镜像：feed 输出流 → drain 提取"新显示"的行
 
-    每个开启记录的会话一个实例（未开启记录不 feed，零开销）。
+    每个会话一个实例，会话创建起就持续 feed（开启记录晚于连接时，连接信息
+    banner 等早期输出也能随首次 flush 进入日志——用户要求"这部分必须要有"）；
+    未开启记录期间只累积不 drain（滚出行有上限兜底），开启后一次转录全程。
     """
 
     def __init__(self, columns: int = DEFAULT_COLUMNS, rows: int = DEFAULT_ROWS) -> None:
@@ -150,7 +156,10 @@ class TerminalMirror:
     def _on_scroll_top(self, text: str) -> None:
         """顶行滚出：内容与快照一致说明已转录过，跳过；否则捕获（可能尚未落盘）"""
         if text and text != self._snapshot[0]:
-            self.screen.scrolled_off.append(text)
+            off = self.screen.scrolled_off
+            if len(off) >= _MAX_SCROLLED_LINES:
+                off.pop(0)  # 超限丢最老行（长期未 drain 的内存防护）
+            off.append(text)
         # 快照随屏幕滚动同步移位（新滚入的底行视为未转录）
         self._snapshot.pop(0)
         self._snapshot.append(None)
@@ -207,6 +216,8 @@ class TerminalMirror:
         pyte 的行重排/游标恢复行为不可靠（可能乱序、游标越界），故尺寸变化时
         先把当前屏幕上未转录的行补转录（重排前行号对应关系可靠），再按新尺寸
         重建屏幕。缩小后顶部被丢弃的行不转录（屏幕上已不可见，与 rssh 一致）。
+        重建屏幕时保留未转录的滚出行（未开启记录时长期累积的连接历史不丢）；
+        被擦行缓存丢弃（旧 y 坐标在新尺寸下不可靠，其内容大部分已在滚出行中）。
         """
         if columns <= 0 or rows <= 0 or (columns == self._columns and rows == self._rows):
             return
@@ -218,13 +229,18 @@ class TerminalMirror:
             if text and text != self._snapshot[y]:
                 self._snapshot[y] = text
                 self._pending_out.append(text)
+        kept_scrolled = self.screen.scrolled_off  # 未转录滚出行跨重建保留
         alt = self._alt  # alt 期间 resize：保持 alt 状态，重绘继续被 scratch 吸收
         self._columns, self._rows = columns, rows
         self._rebuild()
         self._alt = alt
+        self.screen.scrolled_off = kept_scrolled
+        if self._pending_out or kept_scrolled:
+            # 有待产出行时唤醒 drain（_rebuild 会清 _has_new，不清会滞留到下次输出）
+            self._has_new = True
 
     def reset(self) -> None:
-        """重建镜像（开启记录/暂停后恢复时：丢弃与真实屏幕可能不一致的旧状态）"""
+        """完全重建镜像（清空全部状态，从空白屏幕重新开始）"""
         self._pending_out = []
         self._rebuild()
 

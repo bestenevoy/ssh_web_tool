@@ -481,6 +481,9 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       sendClient(inst.ws, { type: 'input', data: command + '\n' })
       api.recordCommand(command).catch(() => {})
       inst.input_buffer = ''
+      // 程序注入绕过 term.onData（只对真实键盘触发），显式走一次 Enter 语义，
+      // 否则 enter 模式下快捷指令不会开启新命令块（色块不划分）
+      inst.blockBar?.notifySubmit()
     } else {
       // 只输入命令文本，不发送换行，用户可以编辑后手动执行
       sendClient(inst.ws, { type: 'input', data: command })

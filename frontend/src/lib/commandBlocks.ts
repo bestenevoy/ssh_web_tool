@@ -34,6 +34,9 @@ export interface CommandBlockTracker extends IDisposable {
   onChange(fn: () => void): IDisposable
   /** 一次性清空所有块（term.reset()/硬重置后由外部显式调用或 ESC c 内部触发）。 */
   resetAll(): void
+  /** 程序化提交（快捷指令/.zs 播放/API 注入）：与用户敲 Enter 同语义。
+   *  term.onData 只对真实键盘触发，程序注入绕过它——必须显式通知。 */
+  notifySubmit(): void
 }
 
 /** 金色角 HSL 循环取色——无限调色板，相邻块不撞色。 */
@@ -154,14 +157,15 @@ export function createCommandBlockTracker(
   }
 
   // enter 模式按每个 `\r` 切块（含多行粘贴）；prompt 模式仅重置输出侧探测。
+  const onEnter = () => {
+    if (splitMode === 'enter') splitAt()
+    else waitForReturnedPrompt()
+  }
   disposables.push(
     term.onData((data: string) => {
       if (term.buffer.active.type === 'alternate') return
       for (const ch of data) {
-        if (ch === '\r') {
-          if (splitMode === 'enter') splitAt()
-          else waitForReturnedPrompt()
-        }
+        if (ch === '\r') onEnter()
       }
     }),
   )
@@ -209,6 +213,8 @@ export function createCommandBlockTracker(
       return { dispose: () => listeners.delete(fn) }
     },
     resetAll,
+    // 程序化提交：快捷指令等注入路径不发 onData，显式走一次 Enter 语义
+    notifySubmit: onEnter,
     dispose() {
       disposables.forEach((d) => d.dispose())
       clearSubmittedLine()

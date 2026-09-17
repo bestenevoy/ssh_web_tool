@@ -184,6 +184,27 @@ describe('enter 模式回归', () => {
     expect(tracker.blocks).toHaveLength(3)
     tracker.dispose()
   })
+
+  it('notifySubmit 与键盘 Enter 同语义（快捷指令程序注入路径）', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'enter')
+    // 程序化提交（不发 onData）：enter 模式直接开新块
+    tracker.notifySubmit()
+    expect(tracker.blocks).toHaveLength(1)
+    tracker.notifySubmit()
+    expect(tracker.blocks).toHaveLength(2)
+    tracker.dispose()
+  })
+
+  it('notifySubmit 在 prompt 模式武装等待提示符（不立即开块）', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'prompt')
+    tracker.notifySubmit()
+    expect(tracker.blocks).toHaveLength(0) // 等待返回的提示符
+    f.feed([{ text: 'user@host:~$ ' }])
+    expect(tracker.blocks).toHaveLength(1) // 提示符出现才开块
+    tracker.dispose()
+  })
 })
 
 describe('resetAll 导出与 onReset 通知', () => {

@@ -12,12 +12,12 @@ interface Props {
 const PRE_OP_LABELS: Record<QuickPreOp['type'], string> = {
   upload: '上传文件',
   chmod: '设置权限',
-  env: '设置环境变量',
+  exec: '执行命令',
 }
 
 function emptyPreOp(type: QuickPreOp['type'] = 'upload'): QuickPreOp {
   if (type === 'chmod') return { type, mode: '+x', path: '' }
-  if (type === 'env') return { type, key: '', value: '' }
+  if (type === 'exec') return { type, cmd: '' }
   return { type, source_type: 'script', source: '', remote: '' }
 }
 
@@ -64,7 +64,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
       pre_ops: preOps.filter((o) => {
         if (o.type === 'upload') return o.source?.trim() && o.remote?.trim()
         if (o.type === 'chmod') return o.mode?.trim() && o.path?.trim()
-        if (o.type === 'env') return o.key?.trim()
+        if (o.type === 'exec') return o.cmd?.trim()
         return false
       }),
       key: qcKey.trim(),
@@ -210,7 +210,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
           <label>预操作（执行命令前依次执行）</label>
           {preOps.length === 0 && (
             <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: '#5a6a8a', padding: '4px 0' }}>
-              无预操作。可添加上传文件、设置执行权限、设置环境变量等步骤
+              无预操作。可添加上传文件、设置执行权限、先执行命令等步骤
             </div>
           )}
           {preOps.map((op, idx) => (
@@ -223,7 +223,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
               >
                 <option value="upload">📤 上传文件</option>
                 <option value="chmod">🔧 设置权限</option>
-                <option value="env">🌱 环境变量</option>
+                <option value="exec">⌨️ 执行命令</option>
               </select>
               {op.type === 'upload' && (
                 <>
@@ -289,24 +289,15 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
                   />
                 </>
               )}
-              {op.type === 'env' && (
-                <>
-                  <input
-                    type="text"
-                    placeholder="变量名，如 ENV"
-                    value={op.key || ''}
-                    onChange={(e) => updatePreOp(idx, { key: e.target.value })}
-                    className="qc-preop-input-sm"
-                  />
-                  <span className="qc-preop-note">=</span>
-                  <input
-                    type="text"
-                    placeholder="变量值"
-                    value={op.value || ''}
-                    onChange={(e) => updatePreOp(idx, { value: e.target.value })}
-                    className="qc-preop-input"
-                  />
-                </>
+              {op.type === 'exec' && (
+                <input
+                  type="text"
+                  placeholder="先执行的命令，如 export TAG=v1.2 或 cd /opt/app"
+                  value={op.cmd || ''}
+                  onChange={(e) => updatePreOp(idx, { cmd: e.target.value })}
+                  className="qc-preop-input"
+                  title="在执行当前命令之前先执行此命令（自由命令，可设置环境变量、切换目录等）"
+                />
               )}
               <button
                 className="action-btn"

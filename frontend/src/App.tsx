@@ -559,16 +559,18 @@ function App() {
       } else if (op.type === 'chmod') {
         if (!op.mode || !op.path) continue
         terminals.sendCommandTo(sid, `chmod ${op.mode} ${op.path}`, true)
-      } else if (op.type === 'env') {
-        if (!op.key) continue
-        terminals.sendCommandTo(sid, `export ${op.key}=${op.value ?? ''}`, true)
+      } else if (op.type === 'exec') {
+        // 先执行的命令：自由 shell 语句（export/cd/任意命令），逐条发送
+        const cmd = (op.cmd || '').trim()
+        if (!cmd) continue
+        terminals.sendCommandTo(sid, cmd, true)
       }
     }
     return true
   }, [terminals, setStatus])
 
 
-  // 执行快捷指令（含预操作流水线：上传文件 → chmod → env → 命令本体）。
+  // 执行快捷指令（含预操作流水线：上传文件 → chmod → 先执行命令 → 命令本体）。
   // session_id 显式传入（默认当前活动终端）
   const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null, session_id?: string) => {
     if (!(await runPreOps(qc, session_id))) return

@@ -74,15 +74,14 @@ export interface ActiveTerminal {
 
 // 快捷指令预操作（执行命令前依次执行）
 export interface QuickPreOp {
-  type: 'upload' | 'chmod' | 'env'
+  type: 'upload' | 'chmod' | 'exec'
   // upload: 源文件类型 path=本机绝对路径（Server 同机直读） / script=scripts 目录下的文件
   source_type?: 'path' | 'script'
   source?: string  // upload: 源文件（本机绝对路径 或 scripts 下的文件名）
   remote?: string  // upload: 远端目标路径
   mode?: string    // chmod: 权限模式，如 +x / 755
   path?: string    // chmod: 目标文件路径
-  key?: string     // env: 环境变量名
-  value?: string   // env: 环境变量值
+  cmd?: string     // exec: 先执行的命令（自由命令，export/cd/任意 shell 语句）
 }
 
 export interface QuickCommand {
