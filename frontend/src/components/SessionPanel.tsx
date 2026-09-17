@@ -42,7 +42,7 @@ function saveOrder(order: string[]) {
 // 右侧会话列表面板：按主机 ip 聚合分组（组头=主机名/ip + 会话数徽标，
 // 组内=会话条目），点击条目切换到该会话；与顶部标签栏并存，不互相替代。
 // 单会话主机不组织成树，直接一行显示「ip · 会话名」；多会话主机才列成树。
-// 组/条目支持拖拽排序（默认按 ip 升序，拖拽后按用户顺序持久化到 localStorage）。
+// 排序：默认按 ip 升序；组/条目支持拖拽调整顺序，自定义顺序持久化到 localStorage。
 export function SessionPanel({ terminals, hosts, activeId, onSwitch, onClose }: Props) {
   const groups = useMemo<SessionGroup[]>(() => {
     const hostMap = new Map(hosts.map((h) => [h.id, h]))

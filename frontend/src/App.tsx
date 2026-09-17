@@ -51,14 +51,15 @@ function App() {
   const [connectTimeout, setConnectTimeout] = useState(10)
   const [configFile, setConfigFile] = useState('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [panelCollapsed, setPanelCollapsed] = useState(false)
+  // 右侧面板互斥显示：sessions=会话列表 / tools=工具面板(快速指令/SFTP)，同时只显示一个
+  const [rightMode, setRightMode] = useState<'none' | 'sessions' | 'tools'>('tools')
   // 分屏：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗格）；
   // panes 为各窗格显示的会话 id（null=空窗格占位），activeId 始终等于焦点窗格的会话
   const [splitMode, setSplitMode] = useState<SplitMode>('none')
   const [panes, setPanes] = useState<[string | null, string | null]>([null, null])
   const [focusedPane, setFocusedPane] = useState<PaneIndex>(0)
   // 右侧会话列表面板（按主机 ip 聚合分组，与顶部标签栏并存）
-  const [sessionPanelCollapsed, setSessionPanelCollapsed] = useState(false)
+
   // 布局宽度（侧栏/右面板可拖拽调宽，localStorage 持久化；终端是核心区，宽度自适应）
   const [sidebarWidth, setSidebarWidth] = useState(() => loadLayoutWidth('sidebar', 240, 180, 440))
   const [panelWidth, setPanelWidth] = useState(() => loadLayoutWidth('panel', 320, 260, 600))
@@ -873,12 +874,16 @@ function App() {
           </button>
         </div>
         <div className="topbar-divider" />
-        <button className="btn btn-secondary btn-sm" onClick={() => setSessionPanelCollapsed(!sessionPanelCollapsed)} title="显示/折叠右侧会话列表">
-          🗂 会话
-        </button>
-        <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(!panelCollapsed)} title="显示/折叠右侧工具面板（快速指令/SFTP）">
-          📋 面板
-        </button>
+        <button
+          className={`btn btn-sm ${rightMode === 'sessions' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setRightMode((m) => (m === 'sessions' ? 'none' : 'sessions'))}
+          title="显示/折叠右侧会话列表"
+        >🗂 会话</button>
+        <button
+          className={`btn btn-sm ${rightMode === 'tools' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setRightMode((m) => (m === 'tools' ? 'none' : 'tools'))}
+          title="显示/折叠右侧工具面板（快速指令/SFTP）"
+        >📋 面板</button>
         <button
           className={`btn btn-sm ${editorOpen ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => { setEditorOpen(!editorOpen); if (editorOpen) focusActiveTerminal() }}
@@ -991,13 +996,13 @@ function App() {
           )}
         </div>
 
-        {/* 右侧会话列表（按主机 ip 聚合分组，宽度可拖拽调整） */}
-        {!sessionPanelCollapsed && (
+        {/* 右侧会话列表（顺序与顶部 tab 一致，宽度可拖拽调整；与工具面板互斥显示） */}
+        {rightMode === 'sessions' && (
           <div className="session-panel" style={{ width: sessionPanelWidth }}>
             <div className="resizer session-panel-resizer" onMouseDown={startResize('sessionPanel')} title="拖拽调整宽度" />
             <div className="session-panel-header">
               <span className="title">会话列表</span>
-              <button className="btn btn-secondary btn-sm" onClick={() => setSessionPanelCollapsed(true)}>✕</button>
+              <button className="btn btn-secondary btn-sm" onClick={() => setRightMode('none')}>✕</button>
             </div>
             <SessionPanel
               terminals={terminals.terminals}
@@ -1009,13 +1014,13 @@ function App() {
           </div>
         )}
 
-        {/* 右侧面板（宽度可拖拽调整） */}
-        {!panelCollapsed && (
+        {/* 右侧工具面板（宽度可拖拽调整；与会话列表互斥显示） */}
+        {rightMode === 'tools' && (
           <div className="panel" style={{ width: panelWidth }}>
             <div className="resizer panel-resizer" onMouseDown={startResize('panel')} title="拖拽调整宽度" />
             <div className="panel-header">
               <span className="title">工具面板</span>
-              <button className="btn btn-secondary btn-sm" onClick={() => setPanelCollapsed(true)}>✕</button>
+              <button className="btn btn-secondary btn-sm" onClick={() => setRightMode('none')}>✕</button>
             </div>
             <div className="panel-tabs">
               <div className={`panel-tab${panelTab === 'quick' ? ' active' : ''}`} onClick={() => setPanelTab('quick')}>⚡ 快速指令</div>
