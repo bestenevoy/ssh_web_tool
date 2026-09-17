@@ -149,6 +149,27 @@ describe('setupTerminalCopy 粘贴逻辑', () => {
     expect(onCtrlF).toHaveBeenCalledTimes(1)
   })
 
+  it('Ctrl+B 触发折叠主机列表回调、preventDefault 并返回 false（不发送 ^B）', () => {
+    const term = makeFakeTerm()
+    const onCtrlB = vi.fn()
+    setupTerminalCopy(term as any, undefined, undefined, onCtrlB)
+    const h = term._keyHandler!
+    const e = { ctrlKey: true, key: 'b', preventDefault: vi.fn() } as any
+    expect(h(e)).toBe(false)
+    expect(e.preventDefault).toHaveBeenCalled()
+    expect(onCtrlB).toHaveBeenCalledTimes(1)
+  })
+
+  it('Ctrl+B 大写 B（Shift 或大写锁定）同样触发', () => {
+    const term = makeFakeTerm()
+    const onCtrlB = vi.fn()
+    setupTerminalCopy(term as any, undefined, undefined, onCtrlB)
+    const h = term._keyHandler!
+    const e = { ctrlKey: true, key: 'B', preventDefault: vi.fn() } as any
+    expect(h(e)).toBe(false)
+    expect(onCtrlB).toHaveBeenCalledTimes(1)
+  })
+
   it('普通按键返回 true（xterm 正常处理）', () => {
     const term = makeFakeTerm()
     setupTerminalCopy(term as any, () => {})

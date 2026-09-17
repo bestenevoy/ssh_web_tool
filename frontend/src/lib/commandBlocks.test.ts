@@ -168,6 +168,33 @@ describe('prompt 模式切块', () => {
     expect(tracker.blocks[1].start.line).toBe(2)
     tracker.dispose()
   })
+
+  it('输出末行无换行：接在输出后面的行尾提示符也切块（echo -n 场景）', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'prompt', {
+      extraPromptPatterns: compilePromptPatterns(['mini>']),
+    })
+    f.feed([{ text: 'mini> ' }])
+    f.type('\r')
+    // 输出最后无换行（如 echo -n abc），提示符直接接在同一行尾
+    f.feed([{ text: 'abcmini> ' }])
+    expect(tracker.blocks).toHaveLength(2) // 行尾提示符识别成功 → 切块
+    expect(tracker.blocks[1].start.line).toBe(1)
+    tracker.dispose()
+  })
+
+  it('行尾提示符误报防护：以 % 结尾的输出行不切块', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'prompt', {
+      extraPromptPatterns: compilePromptPatterns(['mini>']),
+    })
+    f.feed([{ text: 'mini> ' }])
+    f.type('\r')
+    f.feed([{ text: 'progress 50%' }])
+    expect(tracker.blocks).toHaveLength(1) // 等待真正的提示符，不误切
+    expect(tracker.blocks[0].end).toBeNull()
+    tracker.dispose()
+  })
 })
 
 describe('enter 模式回归', () => {

@@ -48,6 +48,41 @@ export function detectPrompt(text: string, extra?: ReadonlyArray<RegExp>): Promp
   return null
 }
 
+export interface PromptTailMatch extends PromptMatch {
+  /** 提示符在本行中的起点（>0 表示提示符前还有上一命令未换行的输出残留）。 */
+  start: number
+}
+
+/**
+ * 行尾提示符检测：上一命令输出末行无换行符时，新提示符直接接在输出后面
+ * （如 `echo -n abc` 后光标行变成 "abcuser@host:~$"），行首锚定的
+ * detectPrompt 无法正确处理。
+ *
+ * 做法：去掉 ^ 锚 + 追加 $ 锚（匹配必须延伸到行尾），对整行 exec——
+ * match.index 即提示符最早起点（正则自身字符类会自然停在空白/结构字符
+ * 处，输出残留通常能完整留在上一块）；附加约束 match[0].length >= 3，
+ * 防输出行尾 "$"/"%" 之类单字符撞车（"$"/"%"/">" 单字符提示符前有输出
+ * 残留时宁可漏切，等下一个整行提示符，也不误切输出）。
+ *
+ * 代价：每次输出解析批回调对单行跑一遍模式搜索，开销可忽略。
+ * 误报面与 detectPrompt 相同（仅在等待提示符期间调用，不会扫描任意输出）。
+ */
+export function detectPromptTail(text: string, extra?: ReadonlyArray<RegExp>): PromptTailMatch | null {
+  const patterns = extra ? [...extra, ...PROMPT_PATTERNS] : PROMPT_PATTERNS
+  for (const pattern of patterns) {
+    const tail = TAIL_CACHE.get(pattern) ?? new RegExp(pattern.source.replace(/^\^/, ''), pattern.flags)
+    TAIL_CACHE.set(pattern, tail)
+    const match = tail.exec(text)
+    if (match && match[0].length >= 3 && match.index + match[0].length === text.length) {
+      return { start: match.index, end: text.length }
+    }
+  }
+  return null
+}
+
+// tail 正则缓存（源码去 ^ 锚；每个内置/自定义模式只编译一次，保留原 flags）
+const TAIL_CACHE = new Map<RegExp, RegExp>()
+
 // 单条自定义正则的最大长度与总条数上限（防超宽正则拖慢检测/误判面扩大）
 export const MAX_PROMPT_PATTERN_LENGTH = 200
 export const MAX_PROMPT_PATTERN_COUNT = 20

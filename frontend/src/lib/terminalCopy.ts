@@ -72,8 +72,8 @@ function copySelection(term: Terminal): Promise<boolean> {
   })
 }
 
-/** 复制功能的容器绑定（mouseup 有选区即复制）+ 快捷键（Ctrl+C 复制 / Ctrl+V 粘贴 / Alt+R 历史搜索 / Ctrl+F 内容搜索） */
-export function setupTerminalCopy(term: Terminal, onAltR?: () => void, onCtrlF?: () => void) {
+/** 复制功能的容器绑定（mouseup 有选区即复制）+ 快捷键（Ctrl+C 复制 / Ctrl+V 粘贴 / Alt+R 历史搜索 / Ctrl+F 内容搜索 / Ctrl+B 折叠主机列表） */
+export function setupTerminalCopy(term: Terminal, onAltR?: () => void, onCtrlF?: () => void, onCtrlB?: () => void) {
   // 1) Ctrl+C：有选区时复制并阻止发送（避免打断远端正在运行的命令）
   //    Ctrl+V：不 preventDefault（让浏览器产生 paste 事件），return false 阻止 xterm
   //    把 Ctrl+V 当作按键（^V）发送到终端；粘贴统一由下方 textarea capture 阶段处理
@@ -96,6 +96,13 @@ export function setupTerminalCopy(term: Terminal, onAltR?: () => void, onCtrlF?:
       // return false 阻止 xterm 把 Ctrl+F 发送到终端
       e.preventDefault()
       if (onCtrlF) onCtrlF()
+      return false
+    }
+    if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) {
+      // Ctrl+B：显示/折叠主机列表；return false 阻止 xterm 把 ^B 发送到终端
+      // （代价：bash C-b 后退字符、tmux 前缀键在终端内不可用，见设置页快捷键列表）
+      e.preventDefault()
+      if (onCtrlB) onCtrlB()
       return false
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {

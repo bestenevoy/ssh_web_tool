@@ -5,7 +5,33 @@
  * detectPrompt 的 extra 参数优先级。
  */
 import { describe, expect, it } from 'vitest'
-import { compilePromptPatterns, detectPrompt, MAX_PROMPT_PATTERN_COUNT, MAX_PROMPT_PATTERN_LENGTH } from './promptPatterns'
+import { compilePromptPatterns, detectPrompt, detectPromptTail, MAX_PROMPT_PATTERN_COUNT, MAX_PROMPT_PATTERN_LENGTH } from './promptPatterns'
+
+describe('行尾提示符 detectPromptTail', () => {
+  it('上一命令输出无换行时，提示符接在输出后：残留止于空白/结构字符边界', () => {
+    const m = detectPromptTail('build okuser@host:~$')
+    expect(m).not.toBeNull()
+    expect(m!.end).toBe('build okuser@host:~$'.length)
+    // 提示符从 "okuser" 起（正则字符类自然停在空格后），残留 "build " 留给上一块
+    expect(m!.start).toBe(6)
+  })
+
+  it('自定义正则的行尾形态（custom 优先于内置）', () => {
+    const extra = compilePromptPatterns(['mini>'])
+    expect(detectPromptTail('abcmini>', extra)).toEqual({ start: 3, end: 8 })
+  })
+
+  it('输出行尾撞车防护：单字符 $/% 后缀不命中（提示符段至少 3 字符）', () => {
+    expect(detectPromptTail('progress 50%')).toBeNull()
+    expect(detectPromptTail('downloaded 100%')).toBeNull()
+    expect(detectPromptTail('total 42$')).toBeNull()
+  })
+
+  it('整行即短提示符（start=0）时也返回（主路径 detectPrompt 优先覆盖）', () => {
+    const m = detectPromptTail('ok>')
+    expect(m).toEqual({ start: 0, end: 3 })
+  })
+})
 
 describe('内置提示符正则', () => {
   const hit = (text: string) => expect(detectPrompt(text)).not.toBeNull()

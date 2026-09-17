@@ -17,7 +17,7 @@
  * 本模块不持有 DOM。渲染层（blockBar.ts）通过 onChange 订阅重绘。
  */
 import type { Terminal, IMarker, IDisposable } from '@xterm/xterm'
-import { detectPrompt } from './promptPatterns'
+import { detectPrompt, detectPromptTail } from './promptPatterns'
 
 export type CommandBlockSplitMode = 'enter' | 'prompt'
 
@@ -178,10 +178,22 @@ export function createCommandBlockTracker(
         if (!line) return
         if (submittedLine && !submittedLine.isDisposed && submittedLine.line === line.startLine) return
         const prompt = detectPrompt(line.text, opts?.extraPromptPatterns)
-        if (!prompt || line.text.slice(prompt.end).trim().length > 0) return
-        splitAt(line.startOffset)
-        waitingForPrompt = false
-        clearSubmittedLine()
+        if (prompt && line.text.slice(prompt.end).trim().length === 0) {
+          // 整行就是提示符：常规切块
+          splitAt(line.startOffset)
+          waitingForPrompt = false
+          clearSubmittedLine()
+          return
+        }
+        // 行尾提示符：上一命令输出末行无换行，提示符接在输出后面
+        // （如 `echo -n abc` → 光标行 "abcuser@host:~$"）。取延伸到行尾的
+        // 最短匹配切块，输出残留（start 之前的部分）留给上一块。
+        const tail = detectPromptTail(line.text, opts?.extraPromptPatterns)
+        if (tail) {
+          splitAt(line.startOffset)
+          waitingForPrompt = false
+          clearSubmittedLine()
+        }
       }),
     )
   }

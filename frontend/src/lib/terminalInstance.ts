@@ -125,6 +125,8 @@ export interface TerminalInstanceSpec {
   copyShortcut: () => void
   /** 终端内 Ctrl+F：打开内容搜索条（App 经 useTerminals 的 setSearchHandler 接线） */
   onCtrlF: (session_id: string) => void
+  /** 终端内 Ctrl+B：显示/折叠主机列表（App 经 useTerminals 的 setSidebarToggleHandler 接线） */
+  onCtrlB: (session_id: string) => void
   setTerminals: Dispatch<SetStateAction<Map<string, TerminalInstance>>>
   /** 收到 closed 消息后延迟关闭标签/连接（closeTerminal） */
   requestClose: (session_id: string) => Promise<void>
@@ -157,6 +159,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     onData,
     copyShortcut,
     onCtrlF,
+    onCtrlB,
     setTerminals,
     requestClose,
     resync,
@@ -192,7 +195,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     // 逐字符更新命令历史缓冲（保持 ESC 序列完整）
     onData(session_id, data)
   })
-  setupTerminalCopy(term, copyShortcut, () => onCtrlF(session_id))
+  setupTerminalCopy(term, copyShortcut, () => onCtrlF(session_id), () => onCtrlB(session_id))
 
   // 采用"先声明后赋值"：handlers 异步执行时 instance 已就绪
   let instance!: TerminalInstance

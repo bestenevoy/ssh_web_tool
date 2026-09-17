@@ -814,6 +814,14 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   font-size: calc(10px * var(--ui-fs-scale)); color: var(--text-tertiary); margin-top: 6px; word-break: break-all;
 }
 
+/* 设置弹窗：快捷键 kbd 键帽样式 */
+.settings-kbd {
+  display: inline-block; padding: 1px 7px; margin-left: 4px; margin-right: 0;
+  background: var(--bg-input); border: 1px solid var(--border-color); border-bottom-width: 2px;
+  border-radius: 4px; color: var(--text-primary);
+  font-size: calc(11px * var(--ui-fs-scale)); font-family: Consolas, monospace; line-height: 1.6;
+}
+
 /* 设置弹窗：自定义提示符正则编辑区（label 与输入上下排布） */
 .settings-modal-row-column { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .settings-modal-row-column > label { font-size: calc(12px * var(--ui-fs-scale)); color: var(--text-secondary); }

@@ -242,13 +242,21 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                     <span className="type-dot" style={{ background: getTypeColor(h.type) }} />
                     <span className={`conn-dot${h.is_connected ? ' online' : ''}`} title={h.is_connected ? '已连接' : '未连接'} />
                     <div className="host-info">
-                      <div className="host-name">
-                        {h.name || h.host}
-                      </div>
-                      <div className="host-ip">
-                        {h.host}
-                        {h.device_type === 'storage' ? ' · 存储阵列' : ' · 主机'}
-                      </div>
+                      {h.name ? (
+                        <>
+                          <div className="host-name">{h.name}</div>
+                          <div className="host-ip">
+                            {h.host}
+                            {h.device_type === 'storage' ? ' · 存储阵列' : ' · 主机'}
+                          </div>
+                        </>
+                      ) : (
+                        // 无名称：单行 ip · 类型（ip 不重复显示）
+                        <div className="host-name">
+                          {h.host}
+                          {h.device_type === 'storage' ? ' · 存储阵列' : ' · 主机'}
+                        </div>
+                      )}
                     </div>
                     {h.terminal_count && h.terminal_count > 0 && (
                       <span className="term-count">{h.terminal_count}</span>

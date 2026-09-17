@@ -36,14 +36,25 @@ const SHELL_LABELS: Record<string, string> = {
 }
 
 /** 设置页分区（左侧导航） */
-type SectionId = 'appearance' | 'terminal' | 'blocks' | 'highlight' | 'cache'
+type SectionId = 'appearance' | 'blocks' | 'highlight' | 'shortcuts' | 'cache'
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'appearance', label: '基本设置' },
-  { id: 'terminal', label: '本机终端' },
   { id: 'blocks', label: '命令块' },
   { id: 'highlight', label: '关键字高亮' },
+  { id: 'shortcuts', label: '快捷键' },
   { id: 'cache', label: '缓存' },
+]
+
+/** 快捷键列表（设置页展示；与实际拦截逻辑保持同步） */
+const SHORTCUTS: { keys: string; desc: string }[] = [
+  { keys: 'Ctrl B', desc: '显示 / 折叠主机列表' },
+  { keys: 'Ctrl F', desc: '终端内容搜索' },
+  { keys: 'Alt R', desc: '历史命令搜索' },
+  { keys: 'Ctrl C', desc: '有选区时复制选中内容（无选区时发送中断信号）' },
+  { keys: 'Ctrl V', desc: '粘贴（多行自动包裹防误执行）' },
+  { keys: '鼠标拖选', desc: '选中即复制到系统剪贴板' },
+  { keys: '双击色条', desc: '折叠 / 展开命令块' },
 ]
 
 /** 清理前端临时缓存（ssh-web-tool- 前缀的 localStorage 键），返回清理数量 */
@@ -59,7 +70,7 @@ export function clearFrontendCache(): number {
 
 /**
  * 设置页（整页覆盖层，非弹窗）：左侧分区导航 + 右侧内容区（rssh 式侧边栏布局）。
- * 分区：基本设置（字体/主题/日志记录）/ 本机终端 / 命令块 / 关键字高亮 / 缓存清理。
+ * 分区：基本设置（字体/主题/日志记录/本机终端）/ 命令块 / 关键字高亮 / 缓存清理。
  * 仅关闭按钮/完成/Esc 可关闭（遵循 AGENTS.md UI 规范）；
  * 所有持久化配置写入后端 config.json，localStorage 只保留临时内容。
  */
@@ -367,12 +378,9 @@ export function SettingsModal({
               onCancel={() => setLogDirPickerOpen(false)}
             />
           )}
-        </div>
-        )}
 
-        {section === 'terminal' && (
-        <div className="settings-modal-section">
-          <div className="settings-modal-title">本机终端</div>
+          {/* 本机终端：归属基本设置 */}
+          <div className="settings-modal-title" style={{ marginTop: 14 }}>本机终端</div>
           <div className="settings-modal-row">
             <label title="左侧「默认终端」条目打开的 shell，也是 SSH 断开后自动进入的 shell">默认 shell</label>
             <select value={fallbackShell} onChange={(e) => onSetFallbackShell(e.target.value)}>
@@ -533,6 +541,26 @@ export function SettingsModal({
           <div className="settings-modal-hint">
             keyword 为 JS 正则（即规则身份键）；重叠匹配时列表中先出现的规则优先。
             高亮只是显示层叠加，不会改写终端内容。
+          </div>
+        </div>
+        )}
+
+        {section === 'shortcuts' && (
+        <div className="settings-modal-section">
+          <div className="settings-modal-title">快捷键</div>
+          {SHORTCUTS.map((sc) => (
+            <div className="settings-modal-row" key={sc.keys} style={{ alignItems: 'flex-start' }}>
+              <label style={{ flex: 'none', minWidth: 110, textAlign: 'right' }}>
+                {sc.keys.split(' ').map((k, i) => (
+                  <kbd className="settings-kbd" key={i}>{k}</kbd>
+                ))}
+              </label>
+              <span style={{ paddingTop: 2 }}>{sc.desc}</span>
+            </div>
+          ))}
+          <div className="settings-modal-hint">
+            终端聚焦时 Ctrl+B / Ctrl+F / Alt+R 由终端拦截处理，不会发送到远端。
+            Ctrl+B 会占用 bash 的「后退字符」与 tmux 前缀键。
           </div>
         </div>
         )}

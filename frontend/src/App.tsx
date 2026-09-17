@@ -145,10 +145,22 @@ function App() {
           setHistorySearchOpen(true)
         }
       }
+      // Ctrl+B：显示/折叠主机列表（终端聚焦时由 terminalCopy 的 customKeyEventHandler
+      // 拦截并调用同一回调；此处覆盖终端未聚焦的其余场景）
+      if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault()
+        setSidebarCollapsed(v => !v)
+      }
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
   }, [terminals.activeId])
+
+  // 终端内 Ctrl+B：显示/折叠主机列表（经 customKeyEventHandler 拦截 ^B 不发给远端）
+  useEffect(() => {
+    terminals.setSidebarToggleHandler(() => setSidebarCollapsed(v => !v))
+    return () => terminals.setSidebarToggleHandler(null)
+  }, [terminals])
 
   // 默认本机终端 shell（左侧「默认终端」条目 + SSH 断开后自动进入共用，保存到 config.json；
   // 取值为短标识或检测列表里的完整路径）
@@ -689,7 +701,7 @@ function App() {
     <div className="app">
       {/* 顶部栏 */}
       <div className="topbar">
-        <button className="btn btn-secondary btn-sm" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} title="折叠主机列表">☰</button>
+        <button className="btn btn-secondary btn-sm" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} title="显示/折叠主机列表（Ctrl+B）">☰</button>
         <span className="logo">SSH Web Tool</span>
         <span className="status">{status}</span>
         {terminals.activeId && (() => {

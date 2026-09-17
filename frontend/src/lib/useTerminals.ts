@@ -47,6 +47,8 @@ export function useTerminals(settings: TerminalSettings) {
   const shortcutHandlerRef = useRef<(() => void) | null>(null)
   // 终端内 Ctrl+F 处理函数（App 接线：打开内容搜索条）
   const searchHandlerRef = useRef<((session_id: string) => void) | null>(null)
+  // 终端内 Ctrl+B 处理函数（App 接线：显示/折叠主机列表）
+  const sidebarToggleRef = useRef<(() => void) | null>(null)
   // 保存最新的 settings 引用，用于回调中
   const settingsRef = useRef(settings)
   settingsRef.current = settings
@@ -284,6 +286,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         },
         copyShortcut: () => shortcutHandlerRef.current?.(),
         onCtrlF: (sid) => searchHandlerRef.current?.(sid),
+        onCtrlB: () => sidebarToggleRef.current?.(),
         setTerminals,
         requestClose: (sid) => closeTerminalRef.current!(sid),
         resync: resyncTerminal,
@@ -334,6 +337,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
           },
           copyShortcut: () => shortcutHandlerRef.current?.(),
           onCtrlF: (sid) => searchHandlerRef.current?.(sid),
+          onCtrlB: () => sidebarToggleRef.current?.(),
           setTerminals,
           requestClose: (sid) => closeTerminalRef.current!(sid),
           resync: resyncTerminal,
@@ -523,6 +527,11 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     searchHandlerRef.current = handler
   }, [])
 
+  // 设置终端内 Ctrl+B 处理函数（显示/折叠主机列表）
+  const setSidebarToggleHandler = useCallback((handler: (() => void) | null) => {
+    sidebarToggleRef.current = handler
+  }, [])
+
   const registerContainer = useCallback((session_id: string, el: HTMLDivElement | null) => {
     if (el) {
       containersRef.current.set(session_id, el)
@@ -611,5 +620,6 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     focusActiveTerminal,
     setShortcutHandler,
     setSearchHandler,
+    setSidebarToggleHandler,
   }
 }
