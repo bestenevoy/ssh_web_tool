@@ -21,8 +21,12 @@ async def api_list_hosts():
     result = []
     # 为每个主机附加连接状态
     for h in hosts:
-        h["terminal_count"] = session_manager.get_host_terminal_count(h["id"])
-        h["is_connected"] = h["terminal_count"] > 0
+        sessions = session_manager.get_sessions_by_host(h["id"])
+        # 只统计远程 SSH 会话：SSH 断开后自动切换的本地 shell（is_local）
+        # 不视为"已连接远程主机"，主机状态点只反映真实远程连接
+        alive = [s for s in sessions if s.is_alive() and not s.is_local()]
+        h["terminal_count"] = len(alive)
+        h["is_connected"] = len(alive) > 0
         # 连接信息：最早创建且仍存活的会话时间作为"连接时间"
         sessions = session_manager.get_sessions_by_host(h["id"])
         alive = [s for s in sessions if s.is_alive()]
