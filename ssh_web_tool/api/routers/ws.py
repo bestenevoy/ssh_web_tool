@@ -18,6 +18,7 @@ from ssh_web_tool.ws_protocol import (
     SERVER_INFO,
     SERVER_OUTPUT,
     SERVER_PONG,
+    SERVER_SSH_DISCONNECTED,
     SERVER_SWITCHED_TO_LOCAL,
 )
 
@@ -72,7 +73,7 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                 notice = session.take_shell_notice()
                 if notice:
                     await websocket.send_json({"type": SERVER_INFO, "data": notice})
-                # 会话级切换通知：SSH 退出/断开后自动切换到本机 shell，
+                # 会话级切换通知：SSH 退出后自动切换到本机 shell，
                 # 通知前端更新终端类型为 local（隐藏断开按钮、更新标签等）
                 switch = session.take_switch_notice()
                 if switch:
@@ -84,6 +85,13 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             "terminal_name": f"本机 {label}",
                         }
                     )
+                # SSH 断开通知（不切本机终端）：推送后关闭 WebSocket，
+                # 前端 onclose 走断开态（Tab 划线 + 重连按钮），由用户手动重连
+                disconnect = session.take_disconnect_notice()
+                if disconnect:
+                    await websocket.send_json({"type": SERVER_SSH_DISCONNECTED, "data": disconnect})
+                    await websocket.close()
+                    return
                 # 会话关闭通知（本机终端 exit 等）：推送 closed 后结束输出转发，
                 # 前端收到后关闭标签与连接
                 closed = session.take_closed_notice()
@@ -110,15 +118,11 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     if session.is_local():
         pass
     elif not session.is_alive():
-        # SSH 连接已断开（页面重开恢复时命中）：不再自动重连（需求：断开后手动重连），
-        # 直接切换到本机 shell，由用户点击「重连」按钮手动恢复
-        await websocket.send_json({"type": SERVER_INFO, "data": "检测到连接断开，已切换本机终端"})
-        try:
-            await session.auto_switch_to_local("SSH 连接断开")
-        except Exception as e:
-            await websocket.send_json({"type": SERVER_ERROR, "data": f"切换本机 shell 失败: {e!s}"})
-            await websocket.close()
-            return
+        # SSH 连接已断开（页面重开恢复时命中）：不切本机终端，通知前端走断开态
+        # （Tab 划线 + 重连按钮），历史内容由前端恢复流程从 /api/logs 读取，用户手动重连
+        await websocket.send_json({"type": SERVER_SSH_DISCONNECTED, "data": "SSH 连接已断开"})
+        await websocket.close()
+        return
 
     # 如果会话已有交互式终端（页面重开恢复），直接复用 process
     # 注意：必须验证 shell 真实存活（channel/进程未关闭），否则 transport 还活着但
@@ -225,11 +229,16 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             raise RuntimeError("终端 shell 尚未就绪，请稍候再输入")
                         stdin = session.process.stdin
                         if getattr(stdin, "is_closing", None) and stdin.is_closing():
-                            # 通道已关闭（连接断开，监控周期未到）：不写死通道，给友好提示；
-                            # 同时立即触发切回本机终端（_auto_switch_to_local 幂等，
-                            # 已在切换/重连/本机时自行跳过），用户下一次输入即可正常进行
-                            session.schedule_auto_switch_local("SSH 连接断开")
-                            raise RuntimeError("SSH 通道已关闭，正在切换本机终端，请稍候再输入")
+                            # 通道已关闭（连接断开，监控周期未到）：不写死通道，广播断开提示，
+                            # 通知前端走断开态（不切本机终端），由用户点击「重连」手动恢复
+                            try:
+                                await session._broadcast_output(
+                                    "\r\n\x1b[33m[SSH 连接已断开，可点击界面重连按钮恢复]\x1b[0m\r\n"
+                                )
+                            except Exception:
+                                pass
+                            session.set_disconnect_notice("SSH 连接已断开")
+                            raise RuntimeError("SSH 连接已断开")
                         stdin.write(data)
                         session.last_active = time.time()
                 except Exception as e:

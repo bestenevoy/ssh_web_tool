@@ -265,6 +265,10 @@ class SSHSession:
         # WebSocket read_output 循环取出后发送 switched_to_local 消息给前端，
         # 前端据此更新终端类型和 UI 状态（如隐藏断开按钮）
         self._switch_notice: str | None = None
+        # SSH 断开通知（不切本机终端）：全局监控检测到传输层断开时设置，
+        # WebSocket read_output 循环取出后发送 ssh_disconnected 消息并关闭连接，
+        # 前端走断开态（Tab 划线 + 重连按钮），由用户手动重连
+        self._disconnect_notice: str | None = None
         self._closed_notice: str | None = None  # 会话关闭通知（本机终端 exit 等）
 
     # ---------- 日志文件命名/生命周期（逻辑在 SessionLog 组件） ----------
@@ -322,6 +326,16 @@ class SSHSession:
         """取出并清空会话关闭通知（read_output 循环调用，只取一次）"""
         n = self._closed_notice
         self._closed_notice = None
+        return n
+
+    def set_disconnect_notice(self, msg: str) -> None:
+        """设置 SSH 断开通知（不切本机 shell，仅通知前端走断开态：Tab 划线 + 重连按钮）"""
+        self._disconnect_notice = msg
+
+    def take_disconnect_notice(self) -> str | None:
+        """取出并清空 SSH 断开通知（read_output 循环调用，只取一次）"""
+        n = getattr(self, "_disconnect_notice", None)
+        self._disconnect_notice = None
         return n
 
     @property
@@ -555,16 +569,6 @@ class SSHSession:
             self._has_shell = False
             return True
         return False
-
-    async def auto_switch_to_local(self, reason: str = "SSH 连接断开") -> None:
-        """立即切换到本机终端（对外公开接口，内部走幂等的 _auto_switch_to_local）"""
-        await self._auto_switch_to_local(reason)
-
-    def schedule_auto_switch_local(self, reason: str = "SSH 连接断开") -> asyncio.Task:
-        """后台执行自动切换本机终端（输入时发现通道已关闭等场景），返回创建的 Task"""
-        task = asyncio.create_task(self._auto_switch_to_local(reason))
-        self._switch_task = task
-        return task
 
     async def _do_ssh_switch(
         self, websocket: WebSocket, ssh_host: str, ssh_port: int, ssh_user: str, ssh_pass: str
@@ -1904,10 +1908,17 @@ class SessionManager:
                                 print(f"[Monitor] SSH shell 已退出，自动切换本机 shell: {session.session_id}")
                                 await session._auto_switch_to_local()
                             else:
-                                # SSH 连接断开（网络异常/服务器重启/静默断线）：不再自动重连，
-                                # 直接切回本机终端并提示；用户点击「重连」按钮手动恢复
-                                print(f"[Monitor] SSH 连接断开，切换本机 shell: {session.session_id}")
-                                await session._auto_switch_to_local("SSH 连接断开")
+                                # SSH 连接断开（网络异常/服务器重启/静默断线）：不切本机终端，
+                                # 广播断开提示后通知前端走断开态（Tab 划线 + 重连按钮），
+                                # 由用户点击「重连」按钮手动恢复
+                                print(f"[Monitor] SSH 连接断开，通知前端: {session.session_id}")
+                                try:
+                                    await session._broadcast_output(
+                                        "\r\n\x1b[33m[SSH 连接已断开，可点击界面重连按钮恢复]\x1b[0m\r\n"
+                                    )
+                                except Exception:
+                                    pass
+                                session.set_disconnect_notice("SSH 连接已断开")
                     except Exception as e:
                         print(f"[Monitor] 监控异常 {session.session_id}: {e}")
         except asyncio.CancelledError:

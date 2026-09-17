@@ -33,16 +33,25 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, sp
 
   // host_id -> group 映射
   const hostGroupMap = new Map<string, string>()
+  const hostById = new Map(hosts.map((h) => [h.id, h]))
   hosts.forEach((h) => {
     if (h.id && h.group) hostGroupMap.set(h.id, h.group)
   })
 
-  // 按分组 / 主机名筛选
+  // 会话 ip：拦截 SSH 会话用原始凭据，已保存主机查配置，本地会话显示「本地」
+  const hostIpOf = (t: TerminalInstance): string =>
+    t.type === 'local' ? '本地' : t.ssh_conn?.host || hostById.get(t.host_id)?.host || t.host_name
+
+  // 按分组 / 主机名 / ip 筛选
   const filtered = Array.from(terminals.values()).filter((t) => {
     if (groupFilter && hostGroupMap.get(t.host_id) !== groupFilter) return false
     if (hostFilter.trim()) {
       const q = hostFilter.trim().toLowerCase()
-      if (!t.host_name.toLowerCase().includes(q) && !t.terminal_name.toLowerCase().includes(q)) return false
+      if (
+        !t.host_name.toLowerCase().includes(q)
+        && !t.terminal_name.toLowerCase().includes(q)
+        && !hostIpOf(t).toLowerCase().includes(q)
+      ) return false
     }
     return true
   })
@@ -54,18 +63,19 @@ export function TerminalTabs({ terminals, activeId, hostTypes, hosts, groups, sp
   return (
     <div className="tab-bar-wrap">
       <div className="tab-bar">
-        {filtered.map((t) => {
+        {filtered.map((t, i) => {
           const shellStyle = getShellStyle(t.shell_type)
           const group = hostGroupMap.get(t.host_id)
+          const ip = hostIpOf(t)
           return (
             <div
               key={t.session_id}
               className={`tab${t.session_id === activeId ? ' active' : ''}${t.disconnected ? ' disconnected' : ''}${t.reconnecting ? ' connecting' : ''}`}
               onClick={() => onSwitch(t.session_id)}
-              title={`${t.host_name} · ${t.terminal_name}${group ? ` · ${group}` : ''}${t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
+              title={`${i + 1} · ${ip} · ${t.terminal_name}${group ? ` · ${group}` : ''}${t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
             >
               <span className="type-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: getTypeColor(t.type), display: 'inline-block' }} />
-              <span className="tab-title">{t.terminal_name}</span>
+              <span className="tab-title">{i + 1} · {ip}</span>
               {splitSessions?.has(t.session_id) && (
                 <span className="tab-split-badge" title="该会话正在分屏中显示">◫</span>
               )}

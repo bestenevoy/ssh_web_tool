@@ -17,6 +17,7 @@ SERVER_ERROR = "error"  # {data: str} 错误（红色）
 SERVER_CLOSED = "closed"  # {data: str} 会话关闭
 SERVER_SSH_CONNECTED = "ssh_connected"  # {host, port, username, password, terminal_name}
 SERVER_SWITCHED_TO_LOCAL = "switched_to_local"  # {shell, terminal_name} SSH 退出/断开切本机 shell
+SERVER_SSH_DISCONNECTED = "ssh_disconnected"  # {data} SSH 传输层断开（不切本机），通知后关闭 WebSocket
 SERVER_PONG = "pong"
 
 # ---------- 事件通道 /ws/events（服务端 → 客户端；event_bus.publish 广播） ----------
@@ -31,6 +32,7 @@ SERVER_MSG_TYPES: tuple[str, ...] = (
     SERVER_CLOSED,
     SERVER_SSH_CONNECTED,
     SERVER_SWITCHED_TO_LOCAL,
+    SERVER_SSH_DISCONNECTED,
     SERVER_PONG,
 )
 EVENT_MSG_TYPES: tuple[str, ...] = (SERVER_EVENT,)
@@ -55,6 +57,7 @@ MSG_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     SERVER_CLOSED: ("data",),
     SERVER_SSH_CONNECTED: ("host", "port", "username", "password", "terminal_name"),
     SERVER_SWITCHED_TO_LOCAL: ("shell", "terminal_name"),
+    SERVER_SSH_DISCONNECTED: ("data",),
     SERVER_PONG: (),
     SERVER_EVENT: ("event_type", "source", "detail", "timestamp", "time_str"),
 }

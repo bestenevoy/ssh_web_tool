@@ -41,6 +41,11 @@ export interface WsSwitchedToLocal {
   terminal_name: string
 }
 
+export interface WsSshDisconnected {
+  type: 'ssh_disconnected' // SSH 传输层断开（不切本机）：通知后服务端关闭 WebSocket
+  data: string
+}
+
 export interface WsPong {
   type: 'pong'
 }
@@ -52,6 +57,7 @@ export type WsServerMessage =
   | WsClosed
   | WsSshConnected
   | WsSwitchedToLocal
+  | WsSshDisconnected
   | WsPong
 
 // ---------- 客户端 → 服务端（上行） ----------
@@ -89,6 +95,6 @@ export interface WsEventMessage {
 export type WsEventsServerMessage = WsEventMessage
 
 // type 字面量集合（一致性测试从本文件解析：union 成员接口的 type 字段）
-// 终端通道服务端类型：output / info / error / closed / ssh_connected / switched_to_local / pong
+// 终端通道服务端类型：output / info / error / closed / ssh_connected / switched_to_local / ssh_disconnected / pong
 // 终端通道客户端类型：input / resize / ping
 // 事件通道服务端类型：event
