@@ -39,9 +39,6 @@ export function useTerminals(settings: TerminalSettings) {
   const [activeId, setActiveId] = useState<string | null>(null)
   // 终端内内容搜索（Ctrl+F）打开中的会话 id；null = 未打开
   const [searchOpenId, setSearchOpenId] = useState<string | null>(null)
-  // 连接防抖：同一时间只允许一个连接建立中，避免快速点击多个主机并发连接
-  const [connecting, setConnecting] = useState(false)
-  const connectingRef = useRef(false)
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map())
   // 快捷键处理函数（外部设置，用于打开搜索弹窗等）
   const shortcutHandlerRef = useRef<(() => void) | null>(null)
@@ -61,7 +58,7 @@ export function useTerminals(settings: TerminalSettings) {
   // closeTerminal 经 ref 转发给终端工厂：closeTerminal 随 terminals 每次渲染重建，
   // 工厂回调若直接捕获会拿到创建时（首次渲染、空 Map）的过期闭包，导致后端
   // closed 消息到来时 terminals.get() 找不到实例而提前 return（标签无法自动关闭清理）
-  const closeTerminalRef = useRef<((session_id: string) => Promise<void>) | null>(null)
+  const closeTerminalRef = useRef<((session_id: string, keepActive?: boolean) => Promise<void>) | null>(null)
 
   // 直接发送输入到后端，不做任何延迟/合并
   const sendInput = useCallback((session_id: string, data: string) => {
@@ -230,15 +227,24 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     password?: string,      // 已保存主机连接的密码覆盖（重连弹窗输入）；raw 会话密码带在 rawConn 内
     connect_message?: string,  // 连接成功后写入新终端的提示（如「已连接 user@host」）
   ) => {
-    // 连接防抖：已有连接正在建立时拒绝新的连接请求
-    if (connectingRef.current) {
-      const err = new Error('已有连接正在建立中，请稍候再试')
-      ;(err as any).isConnecting = true
-      throw err
-    }
-    connectingRef.current = true
-    setConnecting(true)
-    try {
+    const s = settingsRef.current
+    // 工厂共用回调（占位实例 / 真实实例 / 恢复实例行为一致）
+    const factoryCommon = {
+      onData: (sid: string, data: string) => {
+        handleTerminalInput(sid, data)
+        sendInput(sid, data)
+      },
+      copyShortcut: () => shortcutHandlerRef.current?.(),
+      onCtrlF: (sid: string) => searchHandlerRef.current?.(sid),
+      onCtrlB: () => sidebarToggleRef.current?.(),
+      setTerminals,
+      requestClose: (sid: string) => closeTerminalRef.current!(sid),
+      resync: resyncTerminal,
+      ensureFit,
+    } as const
+
+    // ---- 本机终端 / rawConn 重连：后端会话先行，直接建连（无占位阶段）----
+    if (kind === 'local' || rawConn) {
       let session_id: string
       let tname: string
       let hostLike: { id: string; host: string; name: string; type: string }
@@ -248,21 +254,15 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         session_id = r.session_id
         tname = r.terminal_name || terminal_name || (localShell === 'cmd' ? '本机 cmd' : localShell === 'powershell' ? '本机 PowerShell' : '本机 pwsh')
         hostLike = { id: 'local', host: 'localhost', name: tname, type: 'local' }
-      } else if (rawConn) {
-        const result = await api.connectRaw(rawConn, terminal_name)
-        session_id = result.session_id
-        tname = result.terminal_name || terminal_name || '终端1'
-        hostLike = { id: '', host: rawConn.host, name: `${rawConn.username}@${rawConn.host}`, type: 'ssh' }
       } else {
-        const result = await api.connectHost(host!.id, terminal_name, password)
+        const conn = rawConn as SshConnInfo  // 外层分支条件已保证 rawConn 存在
+        const result = await api.connectRaw(conn, terminal_name)
         session_id = result.session_id
         tname = result.terminal_name || terminal_name || '终端1'
-        hostLike = { id: host!.id, host: host!.host, name: host!.name || host!.host, type: host!.type }
+        hostLike = { id: '', host: conn.host, name: `${conn.username}@${conn.host}`, type: 'ssh' }
       }
-      const s = settingsRef.current
 
-      // 统一工厂（P0-③）：xterm/WebSocket/消息路由/洪水供给器在此一次装配，
-      // createTerminal 与 restoreTerminals 共用同一套行为
+      // 统一工厂（P0-③）：xterm/WebSocket/消息路由/洪水供给器在此一次装配
       const instance = createTerminalInstance({
         session_id,
         host_id: hostLike.id,
@@ -280,17 +280,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         ssh_conn: rawConn ? { ...rawConn } : null,
         settings: s,
         containersRef,
-        onData: (sid, data) => {
-          handleTerminalInput(sid, data)
-          sendInput(sid, data)
-        },
-        copyShortcut: () => shortcutHandlerRef.current?.(),
-        onCtrlF: (sid) => searchHandlerRef.current?.(sid),
-        onCtrlB: () => sidebarToggleRef.current?.(),
-        setTerminals,
-        requestClose: (sid) => closeTerminalRef.current!(sid),
-        resync: resyncTerminal,
-        ensureFit,
+        ...factoryCommon,
       })
 
       setTerminals((prev) => {
@@ -300,12 +290,77 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       })
       setActiveId(session_id)
       return session_id
+    }
+
+    // ---- 已保存主机 SSH：先建占位 tab（显示"连接中"），HTTP 连接成功后关闭占位、
+    //      另建真实实例接管（并发友好：不同主机可同时建立连接，状态在各自 tab 内呈现）----
+    if (!host) throw new Error('缺少主机连接信息')
+    const display = `${host.username}@${host.host}:${host.port}`
+    const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const pending = createTerminalInstance({
+      session_id: pendingId,
+      host_id: host.id,
+      host_name: host.name || host.host,
+      terminal_name: '连接中…',
+      type: host.type,
+      shell_type: 'shell',
+      local_starting: false,
+      deferConnect: true,  // 占位实例不建 ws，只做"连接中"状态展示
+      historyLimit: 200000,
+      ssh_conn: null,
+      settings: s,
+      containersRef,
+      ...factoryCommon,
+    })
+    pending.pending = true
+    setTerminals((prev) => {
+      const next = new Map(prev)
+      next.set(pendingId, pending)
+      return next
+    })
+    setActiveId(pendingId)
+
+    try {
+      const result = await api.connectHost(host.id, terminal_name, password)
+      // 连接成功：关闭占位 tab（keepActive 防止 activeId 闪跳到其他标签），另建真实实例
+      await closeTerminalRef.current!(pendingId, true)
+      const instance = createTerminalInstance({
+        session_id: result.session_id,
+        host_id: host.id,
+        host_name: host.name || host.host,
+        terminal_name: result.terminal_name || terminal_name || '终端1',
+        type: host.type,
+        shell_type: 'shell',
+        local_starting: false,
+        historyContent: history_content,
+        historyLimit: 200000,
+        connectMessage: connect_message,
+        ssh_conn: null,
+        settings: s,
+        containersRef,
+        ...factoryCommon,
+      })
+      setTerminals((prev) => {
+        const next = new Map(prev)
+        next.set(result.session_id, instance)
+        return next
+      })
+      setActiveId(result.session_id)
+      return result.session_id
     } catch (e) {
-      console.error('创建终端失败', e)
+      // 连接失败：占位 tab 撤掉遮罩并写入失败原因，延迟自动关闭；
+      // "退到本地终端"由调用方（App）负责（需要 fallback shell 上下文）
+      const msg = (e as Error)?.message || '未知错误'
+      setTerminals((prev) => {
+        const cur = prev.get(pendingId)
+        if (!cur) return prev
+        const next = new Map(prev)
+        next.set(pendingId, { ...cur, pending: false, terminal_name: '连接失败' })
+        return next
+      })
+      pending.term.write(`\r\n\x1b[31m[SSH 连接失败] ${display}\r\n原因: ${msg}\x1b[0m\r\n`)
+      setTimeout(() => { closeTerminalRef.current!(pendingId).catch(() => {}) }, 2500)
       throw e
-    } finally {
-      connectingRef.current = false
-      setConnecting(false)
     }
   }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, sendInput, ensureFit])
 
@@ -612,10 +667,11 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   return {
     terminals,
     activeId,
-    connecting,
     activeSessions,
     searchOpenId,
     setSearchOpenId,
+    // 按会话 id 读取最新实例（terminalsRef，绕过闭包过期问题；不存在返回 undefined）
+    getTerminal: (session_id: string) => terminalsRef.current.get(session_id),
     createTerminal,
     // 打开本机终端（shell 为短标识或检测列表里的完整路径，WinPTY，不经过 SSH）
     openLocalTerminal: (shell: string) => createTerminal({} as Host, undefined, 'local', shell),

@@ -12,6 +12,7 @@ interface Props {
   defaultShell: string
   onOpenDefaultTerminal: () => void
   onHostClick: (host: Host) => void
+  onHostDoubleClick: (host: Host) => void
   onEdit: (host: Host) => void
   onDelete: (host: Host) => void
   onCopy: (host: Host) => void
@@ -23,7 +24,7 @@ interface Props {
 // 默认终端条目右侧的 shell 显示名
 const SHELL_LABELS: Record<string, string> = { cmd: 'cmd', powershell: 'PowerShell', pwsh: 'pwsh' }
 
-export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onHostClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onHostClick, onHostDoubleClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -228,6 +229,7 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                     key={h.id}
                     className={`host-item${activeHostId === h.id ? ' active' : ''}${dragHostId === h.id ? ' dragging' : ''}${overHostId === h.id && dragHostId && dragHostId !== h.id ? ' drag-over' : ''}`}
                     onClick={() => onHostClick(h)}
+                    onDoubleClick={() => onHostDoubleClick(h)}
                     onContextMenu={(e) => {
                       e.preventDefault()
                       setMenu({ x: e.clientX, y: e.clientY, host: h })
@@ -237,7 +239,7 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                     onDragOver={(e) => handleHostDragOver(e, h)}
                     onDrop={() => handleHostDrop(h)}
                     onDragEnd={handleHostDragEnd}
-                    title="右键打开操作菜单，拖动调整顺序"
+                    title="单击连接/切换 · 双击另开新连接 · 右键操作菜单 · 拖动调整顺序"
                   >
                     <span className="type-dot" style={{ background: getTypeColor(h.type) }} />
                     <span className={`conn-dot${h.is_connected ? ' online' : ''}`} title={h.is_connected ? '已连接' : '未连接'} />

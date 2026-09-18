@@ -239,56 +239,6 @@ function App() {
 
   const activeHostId: string | null = terminals.activeId ? terminals.terminals.get(terminals.activeId)?.host_id || null : null
 
-  const handleHostClick = useCallback((host: Host) => {
-    // 连接防抖：已有连接正在建立时忽略新点击，避免并发连接
-    if (terminals.connecting) {
-      setStatus('正在连接其他主机，请稍候...')
-      return
-    }
-    const existing = Array.from(terminals.terminals.values()).find((t) => t.host_id === host.id && !t.disconnected)
-    if (existing) {
-      terminals.switchTerminal(existing.session_id)
-      setStatus(`已连接 ${host.host} [${existing.session_id}]`)
-    } else {
-      setStatus(`正在连接 ${host.host}...`)
-      terminals.createTerminal(host)
-        .then(() => {
-          setStatus(`已连接 ${host.host}`)
-          // 立即刷新 + 延迟刷新（确保 WebSocket 和 shell 启动完成，状态完全同步）
-          loadHosts()
-          setTimeout(() => loadHosts(), 800)
-        })
-        .catch((e) => {
-          if ((e as any)?.isConnecting) {
-            setStatus('正在连接其他主机，请稍候...')
-            return
-          }
-          setStatus('连接失败')
-          alert('SSH连接失败: ' + (e as Error).message)
-        })
-    }
-  }, [terminals, loadHosts])
-
-  const handleNewTerminal = useCallback(() => {
-    // 分屏焦点是空窗格（activeId=null）时回退：取任一存活会话的主机
-    const inst = (terminals.activeId ? terminals.terminals.get(terminals.activeId) : null)
-      ?? Array.from(terminals.terminals.values()).find((t) => !t.disconnected)
-      ?? null
-    if (inst) {
-      const host = hosts.find((h) => h.id === inst.host_id)
-      if (host) {
-        terminals.createTerminal(host)
-          .then(() => {
-            loadHosts()
-            setTimeout(() => loadHosts(), 800)
-          })
-          .catch((e) => alert('创建终端失败: ' + (e as Error).message))
-      }
-    } else {
-      alert('请先选择一个主机')
-    }
-  }, [terminals, hosts, loadHosts])
-
   // 分屏窗格中的会话集合（顶部 tab 分屏标记用）
   const splitSessions = useMemo(() => new Set(panes.filter((id): id is string => !!id)), [panes])
 
@@ -436,7 +386,7 @@ function App() {
   const [pwPromptTitle, setPwPromptTitle] = useState('')
   const askPassword = useCallback((title: string) => {
     return new Promise<string | null>((resolve) => {
-      pwResolveRef.current?.(null)  // 理论不会并发：防抖已保证单连接流程
+      pwResolveRef.current?.(null)  // 并发弹窗保护：新弹窗顶掉旧等待（旧流程按"已取消"收尾）
       pwResolveRef.current = resolve
       setPwPromptTitle(title)
     })
@@ -456,7 +406,6 @@ function App() {
   // 成功：新终端显示「已连接」并关闭旧标签；失败/取消：统一走断开流程收尾
   // （终端写明原因、保持断开标记，重连按钮继续可用，不弹 alert）
   const handleReconnectTerminal = useCallback(async (session_id: string) => {
-    if (terminals.connecting) { setStatus('正在连接其他主机，请稍候...'); return }
     const inst = terminals.terminals.get(session_id)
     if (!inst || inst.reconnecting) return
 
@@ -522,11 +471,6 @@ function App() {
       loadHosts()
       setTimeout(() => loadHosts(), 800)
     } catch (e) {
-      if ((e as any)?.isConnecting) {
-        inst.term.write('\r\n\x1b[33m[重连] 已有连接正在建立，请稍候再试\x1b[0m\r\n')
-        setStatus('正在连接其他主机，请稍候...')
-        return
-      }
       // ⑤ 失败统一走断开流程：终端写失败原因、保持断开态（重连按钮可用），不弹 alert
       const msg = (e as Error)?.message || '未知错误'
       inst.term.write(`\r\n\x1b[31m[重连] 连接失败：${msg}\x1b[0m\r\n`)
@@ -535,6 +479,70 @@ function App() {
       terminals.setReconnecting(session_id, false)
     }
   }, [terminals, hosts, loadHosts, askPassword])
+
+  // ---- 主机连接入口（单击复用 / 双击新建）----
+  // 新建连接：先建 tab 显示"连接中"，成功后接管显示；失败退到本地终端并写入失败原因
+  // （占位 tab 的失败信息由 useTerminals 写入并延迟自动关闭）。连接状态不再进顶栏 status
+  const connectHostWithFallback = useCallback((host: Host) => {
+    return terminals.createTerminal(host)
+      .then(() => {
+        loadHosts()
+        setTimeout(() => loadHosts(), 800)
+      })
+      .catch((e) => {
+        const failText = `\r\n\x1b[31m[SSH 连接失败] ${host.username}@${host.host}:${host.port} - ${(e as Error)?.message || '未知错误'}\x1b[0m\r\n`
+        const local = Array.from(terminals.terminals.values()).find((t) => t.type === 'local' && !t.disconnected)
+        if (local) {
+          terminals.switchTerminal(local.session_id)
+          local.term.write(failText)
+        } else {
+          terminals.openLocalTerminal(fallbackShell)
+            .then((sid) => { setTimeout(() => terminals.getTerminal(sid)?.term.write(failText), 50) })
+            .catch(() => alert('SSH连接失败: ' + (e as Error).message))
+        }
+        loadHosts()
+      })
+  }, [terminals, loadHosts, fallbackShell])
+
+  // 单击主机：该主机"连接中"时忽略 → 已有活跃会话直接切换 →
+  // 上次连接的闲置终端（断开后未进行其他操作）复用重连 → 否则新建连接
+  const handleHostClick = useCallback((host: Host) => {
+    const insts = Array.from(terminals.terminals.values())
+    if (insts.some((t) => t.host_id === host.id && (t.pending || t.reconnecting))) return
+    const live = insts.find((t) => t.host_id === host.id && !t.disconnected)
+    if (live) {
+      terminals.switchTerminal(live.session_id)
+      return
+    }
+    // 复用最近断开的闲置终端（Map 迭代序 = 创建序，倒序取最新的一个）
+    const idle = [...insts].reverse().find((t) => t.host_id === host.id && t.disconnected)
+    if (idle) {
+      handleReconnectTerminal(idle.session_id)
+      return
+    }
+    connectHostWithFallback(host)
+  }, [terminals, handleReconnectTerminal, connectHostWithFallback])
+
+  // 双击主机：即使该主机已有连接也强制新建一条连接（多会话场景）
+  const handleHostDoubleClick = useCallback((host: Host) => {
+    const insts = Array.from(terminals.terminals.values())
+    if (insts.some((t) => t.host_id === host.id && (t.pending || t.reconnecting))) return
+    connectHostWithFallback(host)
+  }, [terminals, connectHostWithFallback])
+
+  // 顶部 tab 栏「+」：以当前会话的主机另开一条新连接（无会话则提示）
+  const handleNewTerminal = useCallback(() => {
+    // 分屏焦点是空窗格（activeId=null）时回退：取任一存活会话的主机
+    const inst = (terminals.activeId ? terminals.terminals.get(terminals.activeId) : null)
+      ?? Array.from(terminals.terminals.values()).find((t) => !t.disconnected)
+      ?? null
+    if (inst) {
+      const host = hosts.find((h) => h.id === inst.host_id)
+      if (host) connectHostWithFallback(host)
+    } else {
+      alert('请先选择一个主机')
+    }
+  }, [terminals, hosts, connectHostWithFallback])
 
   const handleSaveHost = useCallback(async (data: Partial<Host>) => {
     try {
@@ -797,6 +805,10 @@ function App() {
         <span className="status">{status}</span>
         {terminals.activeId && (() => {
           const activeInst = terminals.terminals.get(terminals.activeId!)
+          // 占位连接中的 tab：无连接可断开，不显示操作按钮（状态在 tab/终端遮罩内呈现）
+          if (activeInst?.pending) {
+            return null
+          }
           // 断开或 SSH exit 后自动切换本地终端：显示重连按钮（重连到原 SSH 主机）
           if (activeInst?.disconnected || activeInst?.ssh_exited) {
             return (
@@ -926,13 +938,12 @@ function App() {
             activeHostId={activeHostId}
             defaultShell={fallbackShell}
             onOpenDefaultTerminal={() => {
-              if (terminals.connecting) { setStatus('正在连接其他终端，请稍候...'); return }
-              setStatus(`正在打开本机 ${fallbackShell}...`)
               terminals.openLocalTerminal(fallbackShell)
-                .then(() => { setStatus(`本机 ${fallbackShell} 已打开`); setTimeout(() => loadHosts(), 500) })
-                .catch((e) => { setStatus('打开本机终端失败'); alert('本机终端打开失败: ' + (e as Error).message) })
+                .then(() => { setTimeout(() => loadHosts(), 500) })
+                .catch((e) => alert('本机终端打开失败: ' + (e as Error).message))
             }}
             onHostClick={handleHostClick}
+            onHostDoubleClick={handleHostDoubleClick}
             onEdit={(h) => { setEditingHost(h); setModalOpen(true) }}
             onDelete={handleDeleteHost}
             onCopy={handleCopyConnection}
@@ -949,7 +960,6 @@ function App() {
             activeId={terminals.activeId}
             hostTypes={hostTypes}
             hosts={hosts}
-            groups={groups}
             splitSessions={splitSessions}
             onSwitch={handleSwitchTerminal}
             onClose={handleCloseTerminal}

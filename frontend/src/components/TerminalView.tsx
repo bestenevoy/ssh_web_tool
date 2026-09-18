@@ -50,11 +50,11 @@ export function TerminalView({
         onMouseDown={inSplit && paneIdx >= 0 ? () => onPaneClick?.(paneIdx as PaneIndex, t.session_id) : undefined}
         onContextMenu={(e) => onTerminalContextMenu?.(t.session_id, e)}
       >
-        {(t.reconnecting || t.local_starting) && (
+        {(t.pending || t.reconnecting || t.local_starting) && (
           <div className="terminal-starting">
             <div className="terminal-starting-spinner" />
             <div className="terminal-starting-text">
-              {t.reconnecting ? '正在重新连接，请稍候…' : '正在启动本机终端…'}
+              {t.pending ? '正在连接，请稍候…' : t.reconnecting ? '正在重新连接，请稍候…' : '正在启动本机终端…'}
             </div>
           </div>
         )}
