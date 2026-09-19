@@ -77,7 +77,7 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
 
       <div className="qc-list">
         {commands.length === 0 && (
-          <div style={{ textAlign: 'center', color: '#5a6a8a', padding: '20px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
+          <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '20px 10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
             暂无快捷指令，点击右上角"添加"创建
           </div>
         )}
@@ -133,7 +133,7 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
         })}
 
         {disabled && commands.length > 0 && (
-          <div style={{ textAlign: 'center', color: '#666', padding: '10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
+          <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '10px', fontSize: 'calc(11px * var(--ui-fs-scale))' }}>
             请先连接 SSH 终端
           </div>
         )}

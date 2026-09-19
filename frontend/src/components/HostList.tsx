@@ -207,7 +207,7 @@ export const HostList = memo(function HostList({ hosts, groups, activeHostId, de
         onDoubleClick={onOpenDefaultTerminal}
         title="单击切换本机已打开的终端会话（不新建） · 双击打开新的本机终端（不经过 SSH）"
       >
-        <span className="type-dot" style={{ background: '#10b981' }} />
+        <span className="type-dot" style={{ background: 'var(--ok)' }} />
         <div className="host-info">
           <div className="host-name">{SHELL_LABELS[defaultShell] || defaultShell}</div>
         </div>

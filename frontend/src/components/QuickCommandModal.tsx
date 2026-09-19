@@ -150,11 +150,11 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
             style={{ fontFamily: 'Consolas, Monaco, monospace' }}
           />
           {qcKey.trim() && !/^[A-Za-z0-9_-]{1,50}$/.test(qcKey.trim()) && (
-            <div style={{ fontSize: 'calc(11px * var(--ui-fs-scale))', color: '#e05555', marginTop: 3 }}>
+            <div style={{ fontSize: 'calc(11px * var(--ui-fs-scale))', color: 'var(--danger)', marginTop: 3 }}>
               key 仅限字母/数字/下划线/连字符，最长 50 字符
             </div>
           )}
-          <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: '#5a6a8a', marginTop: 3 }}>
+          <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: 'var(--text-muted)', marginTop: 3 }}>
             全局唯一（不区分大小写），.zs 脚本中用 @key 或 @名称 引用（仅支持直接执行型指令）
           </div>
         </div>
@@ -187,7 +187,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
 
         {cmdType === 'param' && (
           <div className="form-group">
-            <div style={{ fontSize: 'calc(11px * var(--ui-fs-scale))', color: '#5a6a8a' }}>
+            <div style={{ fontSize: 'calc(11px * var(--ui-fs-scale))', color: 'var(--text-muted)' }}>
               命令中使用 {`{args}`} 表示参数位置；未包含 {`{args}`} 时参数自动追加到命令末尾。
             </div>
           </div>
@@ -209,7 +209,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
         <div className="form-group">
           <label>预操作（执行命令前依次执行）</label>
           {preOps.length === 0 && (
-            <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: '#5a6a8a', padding: '4px 0' }}>
+            <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: 'var(--text-muted)', padding: '4px 0' }}>
               无预操作。可添加上传文件、设置执行权限、先执行命令等步骤
             </div>
           )}
@@ -313,7 +313,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
           >
             + 添加预操作
           </button>
-          <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: '#5a6a8a', marginTop: 4 }}>
+          <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: 'var(--text-muted)', marginTop: 4 }}>
             上传文件：源文件填「本机绝对路径」由 Server 直接读取，或选「scripts 文件」在 ~/.ai4one/sshtool/scripts/ 下查找（可下拉选择），通过 SFTP 上传后再执行命令
           </div>
         </div>
@@ -328,7 +328,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
             {editing ? '保存' : '添加'}
           </button>
         </div>
-        <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: '#5a6a8a', marginTop: 8, textAlign: 'center' }}>
+        <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: 'var(--text-muted)', marginTop: 8, textAlign: 'center' }}>
           Ctrl+Enter 快速保存 | ESC 关闭
         </div>
       </div>

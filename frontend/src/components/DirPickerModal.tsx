@@ -118,7 +118,7 @@ export function DirPickerModal({ title, initialDir, onConfirm, onCancel }: Props
             {currentDir || '—'}
           </span>
         </div>
-        {error && <div style={{ color: '#e06c75', fontSize: 'calc(12px * var(--ui-fs-scale))', marginBottom: 8 }}>{error}</div>}
+        {error && <div style={{ color: 'var(--danger)', fontSize: 'calc(12px * var(--ui-fs-scale))', marginBottom: 8 }}>{error}</div>}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button className="btn btn-secondary" onClick={onCancel}>
             取消

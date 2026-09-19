@@ -22,15 +22,15 @@ export const TERMINAL_SCROLLBACK_LINES = 5000
 
 // 强调色（与 index.css 的 --accent / --accent-rgb 保持一致；
 // xterm 走 canvas 渲染，无法读取 CSS 变量，只能在此集中定义字面量）
-const ACCENT = '#e94560'
-const ACCENT_SELECTION = 'rgba(233, 69, 96, 0.3)'
+const ACCENT = '#4d6bfe'
+const ACCENT_SELECTION = 'rgba(77, 107, 254, 0.3)'
 
 // 内容搜索装饰（addon-search 0.16 的 decorations 是每次 findNext/findPrevious
 // 的 ISearchOptions，非构造参数）：普通匹配淡蓝灰背景、当前匹配红色背景+红边框，
 // 两者颜色明显区分；总览标尺同色系。背景用 #RRGGBBAA 带透明度（纯色会盖住终端文字）
 export const SEARCH_DECORATIONS = {
-  matchBackground: '#8892b040',
-  matchOverviewRuler: '#8892b0',
+  matchBackground: '#94a0ba40',
+  matchOverviewRuler: '#94a0ba',
   activeMatchBackground: `${ACCENT}90`,
   activeMatchBorder: ACCENT,
   activeMatchColorOverviewRuler: ACCENT,
@@ -93,27 +93,28 @@ export const MAX_PENDING_BYTES = 2 * 1024 * 1024
 // 滑块颜色走 theme.scrollbarSlider*；overviewRulerBorder 不钉透明会在滚动条旁
 // 画出一条前景色竖线（rssh 同款处理）
 export function getTerminalTheme(settings: TerminalSettings) {
+  // 背景/前景色与 index.css --term-bg / --text-primary 手工同步（xterm 读不了 CSS 变量）
   if (settings.theme === 'light') {
     return {
-      background: '#fafafa',
-      foreground: '#1a1a2e',
+      background: '#f7f9fc',
+      foreground: '#1b2231',
       cursor: ACCENT,
       selectionBackground: ACCENT_SELECTION,
       // 滚动条滑块：沿用 6.0 之前 thumb 的边框系配色，hover/active 用次级文字色
-      scrollbarSliderBackground: '#cbd5e0',
-      scrollbarSliderHoverBackground: '#a0aec0',
-      scrollbarSliderActiveBackground: '#718096',
+      scrollbarSliderBackground: '#c4cedd',
+      scrollbarSliderHoverBackground: '#9daabf',
+      scrollbarSliderActiveBackground: '#77839c',
       overviewRulerBorder: 'rgba(0,0,0,0)',
     }
   }
   return {
-    background: '#0a0e1a',
-    foreground: '#c8d0e0',
+    background: '#0d1017',
+    foreground: '#dee5f2',
     cursor: ACCENT,
     selectionBackground: ACCENT_SELECTION,
-    scrollbarSliderBackground: '#2a3040',
-    scrollbarSliderHoverBackground: '#5a6a8a',
-    scrollbarSliderActiveBackground: '#8892b0',
+    scrollbarSliderBackground: '#2f3a4e',
+    scrollbarSliderHoverBackground: '#57647e',
+    scrollbarSliderActiveBackground: '#94a0ba',
     overviewRulerBorder: 'rgba(0,0,0,0)',
   }
 }
@@ -401,4 +402,4 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
   }
   if (!deferConnect) connectWs()
   return instance
-}
+}
