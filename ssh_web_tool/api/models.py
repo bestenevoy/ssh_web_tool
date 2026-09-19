@@ -85,7 +85,7 @@ class QuickCommandRequest(BaseModel):
     description: str = ""
     # 指令类型：direct 直接执行 / param 带参数（输入后不执行，命令含 {args} 供编辑）
     type: str = "direct"
-    # 预操作（执行命令前依次执行）：[{"type": "upload", "remote": "/path"}, {"type": "chmod", "mode": "+x", "path": "/path"}, {"type": "env", "key": "VAR", "value": "x"}]
+    # 预操作（执行命令前依次执行）：[{"type": "upload", "remote": "/path"}, {"type": "chmod", "mode": "+x", "path": "/path"}, {"type": "exec", "cmd": "export VAR=x"}]
     pre_ops: list = []
     # 可选短标识（唯一，大小写不敏感），用于 .zs 脚本 @ 调用
     key: str = ""

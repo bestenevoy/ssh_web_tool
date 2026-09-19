@@ -3,12 +3,11 @@
 
 - 数据库文件：~/.ai4one/sshtool/history.db（随统一数据目录）
 - 表 command_history：command(唯一) / count(使用次数) / last_used / ignored(忽略标记)
-- 提供记录、搜索、最近、忽略/恢复、JSON 迁移能力
+- 提供记录、搜索、最近、忽略/恢复能力
 
 优化：使用单例连接 + WAL 模式，避免每次操作都新建/关闭连接。
 """
 
-import json
 import re
 import time
 from pathlib import Path
@@ -99,39 +98,6 @@ async def init_db() -> None:
     )
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_history_last ON command_history(last_used)")
     await conn.commit()
-    await _purge_dirty_commands(conn)
-    await conn.commit()
-
-
-# 孤立方向键/功能键残留模式：如 [T、[D、[C、[A、[B、[3~ 等（旧版本输入处理把
-# ESC 序列拆开后残留的字面片段，无 ESC 前缀无法用 ANSI 正则清除）
-_GARBAGE_RE = re.compile(r"^\[\S{0,3}$")
-
-
-async def _purge_dirty_commands(conn) -> int:
-    """清理历史命令中的控制字符脏数据（旧版本方向键残留 [D/[C 等），返回清理条数"""
-    cur = await conn.execute("SELECT id, command FROM command_history")
-    rows = await cur.fetchall()
-    removed = 0
-    for rid, cmd in rows:
-        if not cmd:
-            continue
-        clean = clean_command(cmd)
-        if clean != cmd:
-            if not clean:
-                await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
-            else:
-                try:
-                    await conn.execute("UPDATE command_history SET command = ? WHERE id = ?", (clean, rid))
-                except Exception:
-                    # 清洗后与已有记录冲突：保留原记录，删除脏行
-                    await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
-            removed += 1
-        elif _GARBAGE_RE.match(clean):
-            # 整条命令就是孤立控制残留（无内容可言）：直接删除
-            await conn.execute("DELETE FROM command_history WHERE id = ?", (rid,))
-            removed += 1
-    return removed
 
 
 async def record_command(command: str) -> None:
@@ -260,39 +226,6 @@ async def unignore_command(command: str) -> bool:
     cur = await conn.execute("UPDATE command_history SET ignored = 0 WHERE command = ?", (cmd,))
     await conn.commit()
     return cur.rowcount > 0
-
-
-async def migrate_from_json(json_path: Path) -> int:
-    """
-    把旧版 data.json 中的 command_history 导入 SQLite（幂等）。
-    - 数据库已有历史数据时不重复导入
-    - 返回导入条数
-    """
-    if not json_path.is_file():
-        return 0
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception:
-        return 0
-    hist = data.get("command_history") or {}
-    if not hist:
-        return 0
-    conn = await get_db()
-    cur = await conn.execute("SELECT COUNT(*) FROM command_history")
-    row = await cur.fetchone()
-    existing = row[0] if row else 0
-    if existing > 0:
-        return 0
-    for cmd, info in hist.items():
-        clean = clean_command(cmd)
-        if not clean or _GARBAGE_RE.match(clean):
-            continue  # 跳过控制字符残留垃圾（如 [T、[D 等）
-        await conn.execute(
-            "INSERT OR IGNORE INTO command_history (command, count, last_used) VALUES (?, ?, ?)",
-            (clean, info.get("count", 1), info.get("last_used", time.time())),
-        )
-    await conn.commit()
-    return len(hist)
 
 
 async def clear_history() -> int:

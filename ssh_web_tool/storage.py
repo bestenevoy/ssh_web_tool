@@ -73,7 +73,6 @@ class Storage:
                 data.setdefault("quick_commands", DEFAULT_QUICK_COMMANDS.copy())
                 data.setdefault("host_types", DEFAULT_HOST_TYPES.copy())
                 data.setdefault("saved_terminals", [])  # 持久化的终端（会话ID复用）
-                data.setdefault("command_history", {})  # 全局命令历史（跨终端，记录使用频次）
                 return data
             except Exception as e:
                 print(f"加载数据文件失败: {e}，使用默认数据")
@@ -83,7 +82,6 @@ class Storage:
             "quick_commands": DEFAULT_QUICK_COMMANDS.copy(),
             "host_types": DEFAULT_HOST_TYPES.copy(),
             "saved_terminals": [],
-            "command_history": {},
         }
 
     def _save(self):
@@ -334,23 +332,8 @@ class Storage:
     # ============ 快速指令管理 ============
 
     def list_quick_commands(self) -> list[dict]:
-        """获取所有快速指令（兼容旧数据：自动补全 type/pre_ops/key 字段；env 预操作转为 exec）"""
-        commands = self._data.get("quick_commands", [])
-        for qc in commands:
-            qc.setdefault("type", "direct")
-            qc.setdefault("pre_ops", [])
-            qc.setdefault("key", "")
-            # 旧版 env 预操作（key/value）已由自由命令（exec）取代：读取时自动转换，
-            # export 语句语义等价，保存后持久化为 exec
-            for op in qc["pre_ops"]:
-                if isinstance(op, dict) and op.get("type") == "env":
-                    key = str(op.get("key", "")).strip()
-                    value = str(op.get("value", ""))
-                    op.clear()
-                    op["type"] = "exec"
-                    if key:
-                        op["cmd"] = f"export {key}={value}"
-        return commands
+        """获取所有快速指令"""
+        return self._data.get("quick_commands", [])
 
     @staticmethod
     def _normalize_qc_key(qc_key: str) -> str:
@@ -529,35 +512,6 @@ class Storage:
             self._save()
             return True
         return False
-
-    # ============ 全局命令历史（跨终端，记录使用频次） ============
-
-    def search_commands(self, keyword: str = "", limit: int = 50) -> list:
-        """历史命令已迁移至 SQLite（见 history_db.py），此方法保留以兼容旧数据访问"""
-        history = self._data.get("command_history", {})
-        kw = keyword.lower().strip()
-        results = []
-        for cmd, info in history.items():
-            if not kw or kw in cmd.lower():
-                results.append(
-                    {
-                        "command": cmd,
-                        "count": info.get("count", 1),
-                        "last_used": info.get("last_used", 0),
-                    }
-                )
-        results.sort(key=lambda x: (-x["count"], -x["last_used"]))
-        return results[:limit]
-
-    def list_recent_commands(self, limit: int = 100) -> list:
-        """历史命令已迁移至 SQLite（见 history_db.py），此方法保留以兼容旧数据访问"""
-        history = self._data.get("command_history", {})
-        results = [
-            {"command": cmd, "count": info.get("count", 1), "last_used": info.get("last_used", 0)}
-            for cmd, info in history.items()
-        ]
-        results.sort(key=lambda x: -x["last_used"])
-        return results[:limit]
 
 
 # 全局存储实例

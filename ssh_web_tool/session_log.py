@@ -10,7 +10,7 @@ alt-screen 全屏应用内容不混入）。镜像仅在开启记录时回放；
 有界近期环，首次开启时回放进镜像，保证连接 banner 等早期输出仍随日志落盘。
 
 逻辑原为 SSHSession 中的日志一节；SSHSession 保留 LOG_DIR/_logger_cache 等
-兼容属性并在 __init__ 装配本组件（测试隔离依赖这些类属性）。
+类属性并在 __init__ 装配本组件（测试隔离依赖这些类属性）。
 """
 
 import asyncio
@@ -45,14 +45,12 @@ def fmt_time(ts: float | None) -> str:
 def resolve_existing_log(session_id: str, log_dir: str) -> str | None:
     """恢复场景：同 session_id 已存在日志文件则沿用（同一终端同一份记录）
 
-    匹配新命名 *_{sid}.log；兼容旧命名 {sid}.log（历史版本遗留）
+    匹配命名 *_{sid}.log
     """
     try:
         os.makedirs(log_dir, exist_ok=True)
         pat = re.compile(rf".*_{re.escape(session_id)}\.log$")
         cands = [p for p in os.listdir(log_dir) if pat.match(p)]
-        if not cands and os.path.exists(os.path.join(log_dir, f"{session_id}.log")):
-            return os.path.join(log_dir, f"{session_id}.log")
         if cands:
             full = [os.path.join(log_dir, c) for c in cands]
             return max(full, key=os.path.getmtime)

@@ -151,38 +151,3 @@ def test_save_config_always_writes_data_dir(tmp_app_dir, monkeypatch, tmp_path):
     assert (tmp_app_dir / "config.json").is_file()
     assert cfg_mod.load_config()["fallback_local_shell"] == "powershell"
     assert json.loads((exe_dir / "config.json").read_text(encoding="utf-8"))["fallback_local_shell"] == "cmd"
-
-
-# ============ v0.1.49: 旧数据目录 ~/.ai4one/wstool 一次性迁移 ============
-
-
-def test_migrate_from_old_wstool_dir(tmp_app_dir, monkeypatch, tmp_path):
-    "旧目录 wstool 的 config/data/history.db/logs 迁移到新目录，且不覆盖已有文件"
-    old_dir = tmp_path / ".ai4one" / "wstool"
-    old_dir.mkdir(parents=True)
-    (old_dir / "config.json").write_text('{"fallback_local_shell": "pwsh"}', encoding="utf-8")
-    (old_dir / "data.json").write_text('{"hosts": []}', encoding="utf-8")
-    (old_dir / "history.db").write_bytes(b"sqlite")
-    (old_dir / "logs").mkdir()
-    (old_dir / "logs" / "server.log").write_text("log", encoding="utf-8")
-    # 让 migrate_legacy_data 里的 Path.home() 指向临时目录（get_app_dir 已由 fixture 隔离）
-    monkeypatch.setattr(cfg_mod.Path, "home", lambda: tmp_path)
-
-    cfg_mod.migrate_legacy_data()
-
-    assert (tmp_app_dir / "config.json").is_file()
-    assert (tmp_app_dir / "data.json").is_file()
-    assert (tmp_app_dir / "history.db").read_bytes() == b"sqlite"
-    assert (tmp_app_dir / "logs" / "server.log").is_file()
-
-    # 新目录已有文件时不覆盖
-    cfg_mod.save_config({"fallback_local_shell": "cmd"})
-    cfg_mod.migrate_legacy_data()
-    assert json.loads((tmp_app_dir / "config.json").read_text(encoding="utf-8"))["fallback_local_shell"] == "cmd"
-
-
-def test_migrate_noop_when_old_dir_absent(tmp_app_dir, monkeypatch, tmp_path):
-    "旧目录不存在时迁移为空操作"
-    monkeypatch.setattr(cfg_mod.Path, "home", lambda: tmp_path)
-    cfg_mod.migrate_legacy_data()
-    assert not (tmp_app_dir / "config.json").exists()

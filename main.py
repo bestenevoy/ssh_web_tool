@@ -26,7 +26,6 @@ from ssh_web_tool.config import (
     ensure_data_dir,
     get_app_dir,
     load_config,
-    migrate_legacy_data,
     resolve_server_config,
 )
 
@@ -196,16 +195,12 @@ def main():
 
     import uvicorn
 
-    # 统一数据目录：~/.ai4one/sshtool；首次运行一次性迁移旧位置（旧目录 ~/.ai4one/wstool、EXE 目录、项目根）的数据
+    # 统一数据目录：~/.ai4one/sshtool
     ensure_data_dir()
-    migrate_legacy_data()
 
-    # 历史命令数据库：建表 + 从 data.json 迁移存量命令（幂等）
+    # 历史命令数据库：建表（幂等）
     try:
         asyncio.run(history_db.init_db())
-        migrated = asyncio.run(history_db.migrate_from_json(get_app_dir() / "data.json"))
-        if migrated:
-            print(f"[history] 已从 data.json 迁移 {migrated} 条历史命令到 SQLite")
     except Exception as e:
         print(f"[history] 初始化历史数据库失败: {e}")
 

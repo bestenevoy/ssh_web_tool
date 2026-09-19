@@ -31,8 +31,6 @@ EXAMPLE_FILE_NAME = "config.example.json"
 # 统一数据目录：~/.ai4one/sshtool（配置文件、数据、日志全部存放于此）
 DATA_DIR_NAME = ".ai4one"
 DATA_DIR_SUB = "sshtool"
-# 旧数据目录名（目录改名前的位置），首次运行时一次性迁移到新目录
-OLD_DATA_DIR_SUB = "wstool"
 
 
 def get_app_dir() -> Path:
@@ -41,24 +39,8 @@ def get_app_dir() -> Path:
     配置文件（config.json）、数据（data.json）、历史库（history.db）、
     日志（logs/）、脚本（scripts/）、运行时端口（.running_port）
     统一存放在用户家目录，方便集中管理。
-
-    首次调用时触发一次性旧数据迁移（惰性）：保证任何入口
-    （python main.py / uvicorn 直启 / 打包 EXE）都是"先迁移后读写"，
-    避免 storage 先读到空数据、history_db 先建空库挡住迁移。
     """
-    global _MIGRATION_DONE
-    d = Path.home() / DATA_DIR_NAME / DATA_DIR_SUB
-    if not _MIGRATION_DONE:
-        _MIGRATION_DONE = True
-        if "pytest" not in sys.modules:  # 测试进程绝不触碰真实数据目录
-            try:
-                _do_migrate_legacy(d)
-            except Exception as e:  # 迁移失败不阻塞启动
-                print(f"[config] 旧数据迁移失败: {e}")
-    return d
-
-
-_MIGRATION_DONE = False
+    return Path.home() / DATA_DIR_NAME / DATA_DIR_SUB
 
 
 def ensure_data_dir() -> Path:
@@ -75,47 +57,6 @@ def get_example_path() -> Path | None:
         return p if p.is_file() else None
     p = Path(__file__).resolve().parent.parent / EXAMPLE_FILE_NAME
     return p if p.is_file() else None
-
-
-def _do_migrate_legacy(d: Path) -> None:
-    """执行迁移：把旧位置的数据一次性复制到目标数据目录（仅复制缺失文件，不覆盖）
-
-    迁移来源（按优先级）：
-    1. 旧数据目录 ~/.ai4one/wstool（目录改名 wstool -> sshtool 的一次性迁移）
-    2. EXE 所在目录 / 项目根目录（更早期的散落位置，打包用户的配置可能在 EXE 旁）
-
-    注意：迁移只是复制，配置的读取永远只来自统一数据目录一处。
-    """
-    d.mkdir(parents=True, exist_ok=True)  # 惰性迁移可能先于 ensure_data_dir 执行
-    roots: list[Path] = [Path.home() / DATA_DIR_NAME / OLD_DATA_DIR_SUB]
-    if getattr(sys, "frozen", False):
-        roots.append(Path(sys.executable).parent)
-    roots.append(Path(__file__).resolve().parent.parent)
-    for root in roots:
-        if not root.is_dir() or root.resolve() == d.resolve():
-            continue
-        for name in (CONFIG_FILE_NAME, "data.json", "history.db"):
-            src = root / name
-            if src.is_file() and not (d / name).exists():
-                try:
-                    shutil.copy2(src, d / name)
-                    print(f"[config] 已迁移 {src.name} -> {d}")
-                except OSError as e:
-                    print(f"[config] 迁移 {src} 失败: {e}")
-        for sub in ("logs", "scripts"):
-            src_dir = root / sub
-            dst_dir = d / sub
-            if src_dir.is_dir() and not dst_dir.exists():
-                try:
-                    shutil.copytree(src_dir, dst_dir)
-                    print(f"[config] 已迁移 {sub} 目录 -> {dst_dir}")
-                except OSError as e:
-                    print(f"[config] 迁移 {src_dir} 失败: {e}")
-
-
-def migrate_legacy_data() -> None:
-    """显式迁移入口（main.py 启动时调用；幂等，惰性迁移的兜底）"""
-    _do_migrate_legacy(get_app_dir())
 
 
 # 关键字高亮默认规则（rssh 同款 9 条）：keyword 即正则源（前端按 RegExp 编译），
