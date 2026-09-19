@@ -59,3 +59,10 @@ _menu_*.bmp
 
 # Zig backend build output (temp)
 Backend/
+
+# IDE (trae)
+.trae/
+# Node deps (any level)
+node_modules/
+# pytest output files
+pytest_out*.txt
