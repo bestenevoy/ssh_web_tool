@@ -74,6 +74,9 @@ export interface TerminalInstance {
   highlight: HighlightDecorator | null
   // 终端内容搜索（Ctrl+F）：真折叠内容不在 buffer，打开搜索时先 unfoldAll（SearchBar 负责）
   search: SearchAddon
+  // 容器尺寸观察器（registerContainer 挂载）：pywebview/WebView2 最大化、还原、
+  // 拖边框时 window.resize 不一定派发，容器 ResizeObserver 是唯一可靠的重 fit 信号
+  resizeObserver?: ResizeObserver | null
   // 重连后重建 WebSocket（断开时 ws 被置空/关闭，重建以恢复终端输出）
   reconnectWs?: () => void
 }

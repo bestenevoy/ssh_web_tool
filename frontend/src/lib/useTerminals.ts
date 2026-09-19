@@ -531,6 +531,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     if (!inst) return
     if (inst.ws) inst.ws.close()
     inst.feeder?.dispose()
+    inst.resizeObserver?.disconnect()
+    inst.resizeObserver = null
     inst.blockBar?.dispose()
     inst.highlight?.dispose()
     // state_timer 已改为批量轮询，不再需要单独清理
@@ -656,6 +658,24 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     if (el) {
       containersRef.current.set(session_id, el)
       const inst = terminals.get(session_id)
+      // 容器尺寸观察器：window.resize 在 pywebview 窗口最大化/还原时不一定派发，
+      // 改为观察容器自身尺寸（rAF 防抖），任何布局变化都重 fit 并向后端上报新尺寸
+      if (inst) {
+        inst.resizeObserver?.disconnect()
+        let raf = 0
+        const ro = new ResizeObserver(() => {
+          if (raf) return
+          raf = requestAnimationFrame(() => {
+            raf = 0
+            if (inst.container && inst.container.clientWidth > 0) {
+              fitTerminal(inst)
+              sendResize(inst.term, inst.ws)
+            }
+          })
+        })
+        ro.observe(el)
+        inst.resizeObserver = ro
+      }
       if (inst && !inst.container) {
         inst.term.open(el)
         inst.container = el
