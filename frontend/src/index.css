@@ -45,12 +45,12 @@ body {
   color: var(--text-primary);
   height: 100vh;
   overflow: hidden;
-  padding-bottom: 48px; /* 底部留出空间，防止被任务栏遮挡 */
+  padding-bottom: 6px; /* 底部留一点空隙（原 48px 过宽） */
   box-sizing: border-box;
   -webkit-user-select: none;  /* 全局禁止文字选中（标题/标签等非内容区域） */
   user-select: none;
 }
-#root { height: calc(100vh - 48px); display: flex; flex-direction: column; }
+#root { height: calc(100vh - 6px); display: flex; flex-direction: column; }
 .app { display: flex; flex-direction: column; height: 100%; }
 
 /* 允许选中的区域：输入框、文本域、xterm 终端内容、代码预览 */
@@ -208,6 +208,11 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
    theme.scrollbarSlider*（getTerminalTheme 里按主题设置）。这里只需
    压掉滚动条顶部的内嵌阴影（默认 --vscode-scrollbar-shadow 为黑色）。 */
 .terminal-instance { --vscode-scrollbar-shadow: transparent; }
+/* xterm.css 自带 `.xterm .xterm-viewport { background-color: #000 }`（不随主题变化）。
+   viewport 高度拉满终端容器，而画布只有 rows×行高，fit 取整剩下的一行以内空隙会露出
+   这个黑底（亮色主题下尤其明显，表现为终端底部一条黑带）。用主题终端背景色覆盖。 */
+.terminal-instance .xterm .xterm-viewport { background-color: #fafafa; }
+[data-theme="dark"] .terminal-instance .xterm .xterm-viewport { background-color: #0a0e1a; }
 .tab .tab-close:hover { opacity: 1; background: var(--accent); color: #fff; }
 .tab-new { padding: 5px 10px; font-size: calc(14px * var(--ui-fs-scale)); color: var(--text-muted); cursor: pointer; border-radius: 4px; }
 .tab-new:hover { color: var(--text-secondary); background: var(--bg-hover); }
@@ -1219,19 +1224,7 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 .host-item.drag-over { outline: 2px dashed var(--accent, #4a90d9); outline-offset: -2px; }
 
 /* ---------- 终端特性标注（shellProfiles） ---------- */
-.tab .tab-info { font-size: calc(11px * var(--ui-fs-scale)); opacity: .55; cursor: pointer; padding: 0 2px; border-radius: 2px; margin-left: 1px; line-height: 1; }
-.tab .tab-info:hover { opacity: 1; color: var(--accent); }
-.shell-info-pop { position: fixed; z-index: 600; width: 330px; max-width: 74vw; max-height: 72vh; overflow-y: auto; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; font-size: calc(12px * var(--ui-fs-scale)); line-height: 1.5; text-align: left; }
-.shell-info-pop .sip-head { font-weight: 700; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
-.shell-info-pop .sip-badge { font-size: calc(10px * var(--ui-fs-scale)); font-weight: 700; padding: 1px 6px; border-radius: 3px; }
-.shell-info-pop .sip-summary { color: var(--text-secondary); font-size: calc(11px * var(--ui-fs-scale)); margin-bottom: 6px; }
-.shell-info-pop .sip-row { font-size: calc(11px * var(--ui-fs-scale)); margin: 2px 0; }
-.shell-info-pop .sip-row b { margin-right: 6px; color: var(--accent); }
-.shell-info-pop .sip-block { margin-top: 8px; border-top: 1px dashed var(--border-color); padding-top: 6px; }
-.shell-info-pop .sip-block-title { font-weight: 700; font-size: calc(11px * var(--ui-fs-scale)); margin-bottom: 3px; }
-.shell-info-pop .sip-caution .sip-block-title { color: #e94560; }
-.shell-info-pop .sip-item { font-size: calc(11px * var(--ui-fs-scale)); margin: 3px 0; }
-.shell-info-pop .sip-item b { margin-right: 4px; color: var(--text-secondary); }
+/* shell 特性档案入口（App 顶栏）；tab 上的 ⓘ 浮层已移除 */
 
 /* 会话列表 shell 徽标 */
 .session-item .sess-shell { font-size: calc(9px * var(--ui-fs-scale)); font-weight: 700; padding: 0 5px; border-radius: 3px; flex-shrink: 0; margin-right: 4px; line-height: 16px; }

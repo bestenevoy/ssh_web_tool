@@ -56,8 +56,6 @@ export function TerminalWindow({
 
   // 拖拽中的 tab（仅用于移除点击等误操作，不做额外视觉变化）
   const [dragSid, setDragSid] = useState<string | null>(null)
-  // 正在查看特性的会话浮层（fixed 定位，避免被 tab 栏 overflow 裁剪）
-  const [infoPop, setInfoPop] = useState<{ sid: string; x: number; y: number } | null>(null)
 
   const renderTab = (t: TerminalInstance, i: number) => {
     const profile = profileOf(t)
@@ -90,56 +88,7 @@ export function TerminalWindow({
         >
           {profile.badge}
         </span>
-        <span
-          className="tab-info"
-          title={`查看「${profile.label}」特性与注意事项`}
-          onClick={(e) => {
-            e.stopPropagation()
-            const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
-            setInfoPop(infoPop?.sid === t.session_id ? null : { sid: t.session_id, x: r.left, y: r.bottom + 4 })
-          }}
-        >ⓘ</span>
         <span className="tab-close" onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}>✕</span>
-      </div>
-    )
-  }
-
-  // 特性浮层（fixed 定位，独立于 tab 渲染，避免被 tab 栏 overflow 裁剪）
-  const renderInfoPop = () => {
-    if (!infoPop) return null
-    const t = terminals.get(infoPop.sid)
-    if (!t) return null
-    const p = profileOf(t)
-    const nearRight = infoPop.x > window.innerWidth - 340
-    return (
-      <div
-        className="shell-info-pop"
-        style={{ position: 'fixed', left: nearRight ? undefined : infoPop.x, right: nearRight ? window.innerWidth - infoPop.x : undefined, top: infoPop.y }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="sip-head" style={{ color: p.badgeColor }}>
-          <span className="sip-badge" style={{ background: p.badgeBg, color: p.badgeColor }}>{p.badge}</span>
-          {p.label}
-        </div>
-        <div className="sip-summary">{p.summary}</div>
-        <div className="sip-row"><b>清屏</b>{p.clearCmd}</div>
-        <div className="sip-row"><b>退出</b>{p.exitCmd}</div>
-        {p.features.length > 0 && (
-          <div className="sip-block">
-            <div className="sip-block-title">特性</div>
-            {p.features.map((f) => (
-              <div className="sip-item" key={f.label}><b>{f.label}</b>{f.desc}</div>
-            ))}
-          </div>
-        )}
-        {p.cautions.length > 0 && (
-          <div className="sip-block sip-caution">
-            <div className="sip-block-title">注意事项（防误操作）</div>
-            {p.cautions.map((c) => (
-              <div className="sip-item" key={c.label}><b>{c.label}</b>{c.desc}</div>
-            ))}
-          </div>
-        )}
       </div>
     )
   }
@@ -156,7 +105,7 @@ export function TerminalWindow({
   }
 
   return (
-    <div className={`terminal-window${focused ? ' focused' : ''}`} onMouseDown={() => { onFocusWindow(windowIndex); setInfoPop(null) }}>
+    <div className={`terminal-window${focused ? ' focused' : ''}`} onMouseDown={() => onFocusWindow(windowIndex)}>
       {/* 窗口 tab 栏：本窗口的会话标签 + 新建按钮；同时是跨窗口拖拽的接收区 */}
       <div className="terminal-window-tabs" onDragOver={onDragOver} onDrop={onDrop}>
         {sessions.map((sid, i) => {
@@ -165,8 +114,6 @@ export function TerminalWindow({
         })}
         <div className="tab-new" onClick={onNew} title="在当前窗口新建终端">+</div>
       </div>
-      {/* 特性浮层（fixed，随窗口渲染） */}
-      {renderInfoPop()}
       {/* 窗口终端区：本窗口的会话实例由共享实例层渲染（保持挂载不重建）；
           这里只放空窗口占位提示 */}
       <div className="terminal-window-body">

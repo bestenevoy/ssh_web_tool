@@ -38,7 +38,7 @@ export function ShellProfileModal({ onClose }: Props) {
           <div className="sprof-intro">
             每种 shell / 终端环境都有自己的特点。以下档案标注了清屏、退出、常用特性与
             注意事项——尤其「清屏只上移不清空」是本工具的统一语义：clear / cls / Ctrl+L
-            之后历史仍保留，可向上滚动回看。悬停标签或点标签上的 ⓘ 可查看当前会话对应条目。
+            之后历史仍保留，可向上滚动回看。悬停标签可查看当前会话对应条目。
           </div>
           <div className="sprof-grid">
             {profiles.map((p) => (
