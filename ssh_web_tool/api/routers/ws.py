@@ -64,7 +64,11 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     # 若 listener 未注册就启动 reader，提示符被广播到空 listener 列表后丢失，
     # 前端永远等不到首包（local_starting 无法清除）。
     listener = session.add_output_listener()
-    await session.start_output_reader()
+    # SSH 会话在 HTTP 创建阶段只 connect、不启动 shell（shell 延后到下方启动，
+    # 保证 banner/MOTD 广播时监听器已注册），此刻启动 reader 会报"没有交互式终端"；
+    # 本地终端/已有 shell 的会话仍需先启动 reader 防首包丢失。
+    if session.is_local() or session.has_shell:
+        await session.start_output_reader()
 
     async def read_output():
         try:
@@ -240,6 +244,11 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             session.set_disconnect_notice("SSH 连接已断开")
                             raise RuntimeError("SSH 连接已断开")
                         stdin.write(data)
+                        # 行缓冲跟踪 cd 命令（不拦截输入，仅维护 current_dir 供 SFTP 初始目录）
+                        try:
+                            session.feed_ssh_input(data)
+                        except Exception:
+                            pass
                         session.last_active = time.time()
                 except Exception as e:
                     # 不再自动重连：重连会中断正在运行的全屏程序（如 vi/vim），

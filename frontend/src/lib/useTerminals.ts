@@ -91,6 +91,9 @@ export function useTerminals(settings: TerminalSettings) {
         inst.blockBar?.unfoldAll()
         inst.fitAddon.fit()
         inst.blockBar?.afterFit()
+        // 强制重绘可见区：分屏切换/跨窗口拖拽后 DOM renderer 可能停留在空白帧
+        // （尺寸未变时 fit 不触发重绘，内容行不刷新）
+        try { inst.term.refresh(0, inst.term.rows - 1) } catch { /* 忽略 */ }
         const el = inst.term.element
         if (el && el.scrollHeight > el.clientHeight + 2 && inst.term.rows > 5) {
           inst.term.resize(inst.term.cols, inst.term.rows - 1)
@@ -270,6 +273,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         terminal_name: tname,
         type: hostLike.type,
         shell_type: kind === 'local' ? 'local' : 'shell',
+        local_shell: kind === 'local' ? localShell : undefined,
         local_starting: kind === 'local',
         // history_content：重连时由 App 预先读取旧会话历史传入（旧会话在读取后才关闭），
         // 直接写入新终端，保证重连后之前的内容（banner/命令输出）仍然可看（用户要求：重连不清空）
@@ -348,18 +352,17 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       setActiveId(result.session_id)
       return result.session_id
     } catch (e) {
-      // 连接失败：占位 tab 撤掉遮罩并写入失败原因，延迟自动关闭；
-      // "退到本地终端"由调用方（App）负责（需要 fallback shell 上下文）
+      // 连接失败：占位 tab 保留（置为断开态划线，顶部出现「重连」按钮可手动重试，
+      // 也可手动关闭），不再自动关闭；"退到本地终端"由调用方（App）负责
       const msg = (e as Error)?.message || '未知错误'
       setTerminals((prev) => {
         const cur = prev.get(pendingId)
         if (!cur) return prev
         const next = new Map(prev)
-        next.set(pendingId, { ...cur, pending: false, terminal_name: '连接失败' })
+        next.set(pendingId, { ...cur, pending: false, disconnected: true, terminal_name: '连接失败' })
         return next
       })
       pending.term.write(`\r\n\x1b[31m[SSH 连接失败] ${display}\r\n原因: ${msg}\x1b[0m\r\n`)
-      setTimeout(() => { closeTerminalRef.current!(pendingId).catch(() => {}) }, 2500)
       throw e
     }
   }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, sendInput, ensureFit])
@@ -552,8 +555,10 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       api.recordCommand(command).catch(() => {})
       inst.input_buffer = ''
       // 程序注入绕过 term.onData（只对真实键盘触发），显式走一次 Enter 语义，
-      // 否则 enter 模式下快捷指令不会开启新命令块（色块不划分）
-      inst.blockBar?.notifySubmit()
+      // 否则 enter 模式下快捷指令不会开启新命令块（色块不划分）。
+      // 多行指令（一次下发多条命令）按行数通知：首行即时开块，其余行等
+      // 各自执行完的提示符行出现时逐个补切块——见 commandBlocks.ts onEnter
+      inst.blockBar?.notifySubmit(command.split('\n').length)
     } else {
       // 只输入命令文本，不发送换行，用户可以编辑后手动执行
       sendClient(inst.ws, { type: 'input', data: command })

@@ -293,3 +293,11 @@ async def migrate_from_json(json_path: Path) -> int:
         )
     await conn.commit()
     return len(hist)
+
+
+async def clear_history() -> int:
+    """清空全部命令历史（含已忽略），返回删除条数"""
+    conn = await get_db()
+    cur = await conn.execute("DELETE FROM command_history")
+    await conn.commit()
+    return cur.rowcount

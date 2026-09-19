@@ -1,88 +1,63 @@
 import { useMemo, useRef, useState } from 'react'
 import type { TerminalInstance } from '../lib/useTerminals'
 import type { Host } from '../types'
+import { groupKeyOf, groupLabelOf } from '../lib/sessionOrder'
+import { profileOf } from '../lib/shellProfiles'
 
 interface Props {
   terminals: Map<string, TerminalInstance>
-  hosts: Host[]  // 用于把 host_id 解析成 ip / 主机名
+  hosts: Host[]  // 用于把 host_id 解析成 ip / port / 用户名
   activeId: string | null
+  /** 自定义组顺序（localStorage 持久化，App 统一持有；拖拽更新后回调） */
+  customOrder: string[]
+  onOrderChange: (keys: string[]) => void
   onSwitch: (id: string) => void
   onClose: (id: string) => void
 }
 
 interface SessionGroup {
-  key: string    // ip 或 '__local__'
+  key: string    // '__local__' / '__tmp__' / 'ip:port'
   ip: string
-  label: string  // 组头主显示：主机名（无则 ip）
+  label: string  // 组头主显示：主机名 / 本地终端 / 临时 SSH
   items: TerminalInstance[]
 }
 
-// 会话列表面板的自定义排序（按组 key=ip 持久化；未保存时默认按 ip 升序）
-const ORDER_KEY = 'ssh-web-tool-session-order'
-
-function loadOrder(): string[] {
-  try {
-    const raw = localStorage.getItem(ORDER_KEY)
-    if (!raw) return []
-    const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function saveOrder(order: string[]) {
-  try {
-    localStorage.setItem(ORDER_KEY, JSON.stringify(order))
-  } catch {
-    /* localStorage 不可用时忽略（排序仅在当前会话生效） */
-  }
-}
-
-// 右侧会话列表面板：按主机 ip 聚合分组（组头=主机名/ip + 会话数徽标，
+// 右侧会话列表面板：按主机 ip:port 聚合分组（组头=主机名 + 会话数徽标，
 // 组内=会话条目），点击条目切换到该会话；与顶部标签栏并存，不互相替代。
-// 单会话主机不组织成树，直接一行显示「ip · 会话名」；多会话主机才列成树。
-// 组/条目支持拖拽排序（默认按 ip 升序，拖拽后按用户顺序持久化到 localStorage）。
-export function SessionPanel({ terminals, hosts, activeId, onSwitch, onClose }: Props) {
-  // 会话搜索：按连接 ip 过滤（不再按分组）
-  const [searchQuery, setSearchQuery] = useState('')
+// 分组规则（与 tab 栏共用 sessionOrder）：
+// - 已保存主机会话按 'ip:port' 分组；同 ip:port 不同登录用户允许共存，
+//   组内条目以 username@host 区分（单击切换可分辨）
+// - 本地终端 ssh 链接建立的会话（ssh user:pass@ip:port）独立成「SSH 链接」组，
+//   不属于任何主机会话
+// - 本地终端单列「本地终端」组
+// 单会话主机不组织成树，直接一行显示；多会话主机才列成树。
+// 排序：组间 = 自定义顺序（拖拽）优先，未收录按组 key 升序；组内 = 创建顺序。
+export function SessionPanel({ terminals, hosts, activeId, customOrder, onOrderChange, onSwitch, onClose }: Props) {
   const groups = useMemo<SessionGroup[]>(() => {
     const hostMap = new Map(hosts.map((h) => [h.id, h]))
     const groups: SessionGroup[] = []
     const index = new Map<string, number>()
     for (const t of terminals.values()) {
-      if (t.type === 'local') {
-        // 本机会话不经过 SSH，单列「本地终端」组
-        const gi = index.get('__local__') ?? groups.length
-        if (gi === groups.length) {
-          index.set('__local__', gi)
-          groups.push({ key: '__local__', ip: 'localhost', label: '本地终端', items: [] })
-        }
-        groups[gi].items.push(t)
-        continue
-      }
-      // 分组键 = 连接 ip：拦截 SSH 会话用原始凭据，已保存主机查配置，都无则退回显示名
-      const ip = t.ssh_conn?.host || hostMap.get(t.host_id)?.host || t.host_name
-      const name = hostMap.get(t.host_id)?.name || ''
-      const gi = index.get(ip) ?? groups.length
+      const key = groupKeyOf(t, hostMap)
+      const gi = index.get(key) ?? groups.length
       if (gi === groups.length) {
-        index.set(ip, gi)
-        groups.push({ key: ip, ip, label: name || ip, items: [] })
+        index.set(key, gi)
+        const h = key !== '__local__' && key !== '__tmp__' ? hostMap.get(t.host_id) : undefined
+        groups.push({ key, ip: h?.host || t.host_name, label: groupLabelOf(key, hostMap), items: [] })
       }
       groups[gi].items.push(t)
     }
     return groups
   }, [terminals, hosts])
 
-  // 拖拽排序状态（持久化到 localStorage）
-  const [customOrder, setCustomOrder] = useState<string[]>(loadOrder)
+  // 拖拽排序状态（组间自定义顺序，App 统一持久化）
   const dragKey = useRef<string | null>(null)
   const [dragOverKey, setDragOverKey] = useState<string | null>(null)
 
-  // 排序：自定义顺序优先（未收录的组按 ip 排后面）；未保存过时按 ip 升序
+  // 组间排序：自定义顺序优先（未收录的组按组 key 升序排后面）
   const sortedGroups = useMemo(() => {
-    const byIp = (a: SessionGroup, b: SessionGroup) => a.key.localeCompare(b.key)
-    if (customOrder.length === 0) return [...groups].sort(byIp)
+    const byKey = (a: SessionGroup, b: SessionGroup) => a.key.localeCompare(b.key)
+    if (customOrder.length === 0) return [...groups].sort(byKey)
     const pos = new Map(customOrder.map((k, i) => [k, i]))
     return [...groups].sort((a, b) => {
       const pa = pos.get(a.key)
@@ -90,7 +65,7 @@ export function SessionPanel({ terminals, hosts, activeId, onSwitch, onClose }: 
       if (pa !== undefined && pb !== undefined) return pa - pb
       if (pa !== undefined) return -1
       if (pb !== undefined) return 1
-      return byIp(a, b)
+      return byKey(a, b)
     })
   }, [groups, customOrder])
 
@@ -113,58 +88,77 @@ export function SessionPanel({ terminals, hosts, activeId, onSwitch, onClose }: 
     const toIdx = keys.indexOf(key)
     keys.splice(fromIdx, 1)
     keys.splice(toIdx, 0, from)
-    setCustomOrder(keys)
-    saveOrder(keys)
+    onOrderChange(keys)
   }
   const onDragEnd = () => {
     dragKey.current = null
     setDragOverKey(null)
   }
 
-  // 按 ip 过滤（大小写不敏感的包含匹配；本地组 ip 为 localhost）
-  const q = searchQuery.trim().toLowerCase()
-  const visibleGroups = q
-    ? sortedGroups.filter((g) => g.ip.toLowerCase().includes(q))
-    : sortedGroups
-
   if (terminals.size === 0) {
     return (
       <div className="session-panel-body">
-        <div className="session-panel-search">
-          <input
-            type="text"
-            className="session-search-input"
-            placeholder="按 IP 搜索会话..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-          {searchQuery && (
-            <button className="session-search-clear" onClick={() => setSearchQuery('')}>✕</button>
-          )}
-        </div>
         <div className="session-panel-empty">暂无会话<br />连接主机后在此显示</div>
+      </div>
+    )
+  }
+
+  // 会话条目标题（区分同 ip:port 不同用户 / ssh 链接会话 + shell 特性）
+  const itemTitle = (t: TerminalInstance, hostMap: Map<string, Host>): string => {
+    const parts: string[] = []
+    if (t.ssh_conn) {
+      // ssh 链接会话：完整连接信息
+      parts.push(`ssh ${t.ssh_conn.username}:${t.ssh_conn.password ? '***' : ''}@${t.ssh_conn.host}:${t.ssh_conn.port}`)
+    } else if (t.type !== 'local') {
+      const h = hostMap.get(t.host_id)
+      parts.push(`${h?.username || ''}@${h?.host || t.host_name}${h?.port && h.port !== 22 ? `:${h.port}` : ''}`)
+    }
+    parts.push(t.terminal_name)
+    if (t.reconnecting) parts.push('（重连中…）')
+    if (t.pending) parts.push('（连接中…）')
+    if (t.disconnected) parts.push('（已断开）')
+    const p = profileOf(t)
+    return parts.join(' · ') + `\nShell: ${p.label}（${p.summary}）\n清屏: ${p.clearCmd}\n退出: ${p.exitCmd}`
+  }
+  // 条目主文本：ssh 链接会话显示完整「ssh user:pass@ip:port」；已保存主机会话显示
+  // username@host（同 ip:port 不同用户可区分）；本地显示 terminal_name
+  const itemText = (t: TerminalInstance): string => {
+    if (t.ssh_conn) return `ssh ${t.ssh_conn.username}:${t.ssh_conn.password}@${t.ssh_conn.host}:${t.ssh_conn.port}`
+    if (t.type !== 'local' && !t.host_id) return t.host_name || t.terminal_name
+    return t.terminal_name
+  }
+
+  const hostMap = new Map(hosts.map((h) => [h.id, h]))
+
+  // 会话条目：状态点 + 名称 + shell 徽标 + 关闭（两处渲染共用）
+  const renderItem = (t: TerminalInstance) => {
+    const p = profileOf(t)
+    return (
+      <div
+        key={t.session_id}
+        className={`session-item${t.session_id === activeId ? ' active' : ''}`}
+        onClick={() => onSwitch(t.session_id)}
+        title={itemTitle(t, hostMap)}
+      >
+        <span className={`status-dot${t.disconnected ? ' disconnected' : t.reconnecting || t.pending ? ' reconnecting' : ''}`} />
+        <span className="sess-name">{itemText(t)}</span>
+        <span
+          className="sess-shell"
+          style={{ color: p.badgeColor, background: p.badgeBg }}
+          title={`${p.label}（${p.summary}）`}
+        >{p.badge}</span>
+        <span
+          className="sess-close"
+          title="关闭会话（同时关闭连接）"
+          onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}
+        >✕</span>
       </div>
     )
   }
 
   return (
     <div className="session-panel-body">
-      <div className="session-panel-search">
-        <input
-          type="text"
-          className="session-search-input"
-          placeholder="按 IP 搜索会话..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-        {searchQuery && (
-          <button className="session-search-clear" onClick={() => setSearchQuery('')}>✕</button>
-        )}
-      </div>
-      {visibleGroups.length === 0 && (
-        <div className="session-panel-empty">无匹配 IP 的会话</div>
-      )}
-      {visibleGroups.map((g) => (
+      {sortedGroups.map((g) => (
         <div
           key={g.key}
           className={`session-draggable${dragOverKey === g.key ? ' drag-over' : ''}`}
@@ -176,46 +170,16 @@ export function SessionPanel({ terminals, hosts, activeId, onSwitch, onClose }: 
           title="拖拽调整排序"
         >
           {g.items.length <= 1 ? (
-            // 单会话主机：不组织成树，直接一行显示 ip 会话（无组头层级）
-            g.items.map((t) => (
-              <div
-                key={t.session_id}
-                className={`session-item${t.session_id === activeId ? ' active' : ''}`}
-                onClick={() => onSwitch(t.session_id)}
-                title={`${t.host_name} · ${t.terminal_name}${t.pending ? '（连接中…）' : t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
-              >
-                <span className={`status-dot${t.disconnected ? ' disconnected' : t.pending || t.reconnecting ? ' reconnecting' : ''}`} />
-                <span className="sess-name">{g.label} · {t.terminal_name}</span>
-                <span
-                  className="sess-close"
-                  title="关闭会话（同时关闭连接）"
-                  onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}
-                >✕</span>
-              </div>
-            ))
+            // 单会话主机：不组织成树，直接一行显示
+            g.items.map((t) => renderItem(t))
           ) : (
-            // 多会话主机：组头（主机名/ip + 会话数）+ 组内会话条目（树形）
+            // 多会话主机：组头（主机名 + 会话数）+ 组内会话条目（树形）
             <>
               <div className="session-group-header" title={`${g.label}${g.ip !== g.label ? ` · ${g.ip}` : ''}`}>
                 <span className="session-group-name">{g.label}</span>
                 {g.items.length > 1 && <span className="session-group-count">{g.items.length}</span>}
               </div>
-              {g.items.map((t) => (
-                <div
-                  key={t.session_id}
-                  className={`session-item${t.session_id === activeId ? ' active' : ''}`}
-                  onClick={() => onSwitch(t.session_id)}
-                  title={`${t.host_name} · ${t.terminal_name}${t.pending ? '（连接中…）' : t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''}`}
-                >
-                  <span className={`status-dot${t.disconnected ? ' disconnected' : t.pending || t.reconnecting ? ' reconnecting' : ''}`} />
-                  <span className="sess-name">{t.terminal_name}</span>
-                  <span
-                    className="sess-close"
-                    title="关闭会话（同时关闭连接）"
-                    onClick={(e) => { e.stopPropagation(); onClose(t.session_id) }}
-                  >✕</span>
-                </div>
-              ))}
+              {g.items.map((t) => renderItem(t))}
             </>
           )}
         </div>

@@ -1,16 +1,17 @@
-import { useState, memo } from 'react'
-import type { Host, HostType } from '../types'
+import { useEffect, useState, memo } from 'react'
+import type { Host } from '../types'
 import { writeClipboardText } from '../lib/terminalCopy'
 import { ContextMenu } from './ContextMenu'
 import type { CtxMenuItem } from './ContextMenu'
 
 interface Props {
   hosts: Host[]
-  hostTypes: HostType[]
   groups: string[]
   activeHostId: string | null
   defaultShell: string
   onOpenDefaultTerminal: () => void
+  /** 单击本地终端条目：切换/轮换已打开的本地终端会话（不新建） */
+  onLocalClick: () => void
   onHostClick: (host: Host) => void
   onHostDoubleClick: (host: Host) => void
   onEdit: (host: Host) => void
@@ -24,7 +25,7 @@ interface Props {
 // 默认终端条目右侧的 shell 显示名
 const SHELL_LABELS: Record<string, string> = { cmd: 'cmd', powershell: 'PowerShell', pwsh: 'pwsh' }
 
-export const HostList = memo(function HostList({ hosts, hostTypes, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onHostClick, onHostDoubleClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onLocalClick, onHostClick, onHostDoubleClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -33,8 +34,10 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
   const [overHostId, setOverHostId] = useState<string | null>(null)
   // 主机右键菜单（原 hover 按钮的操作全部收编进来，条目上不再常驻按钮）
   const [menu, setMenu] = useState<{ x: number; y: number; host: Host } | null>(null)
+  // 单击选中的主机（单击不建连，只高亮；会话切换后清除恢复跟随活动会话）
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  useEffect(() => { setSelectedHostId(null) }, [activeHostId])
 
-  const getTypeColor = (key: string) => hostTypes.find((t) => t.key === key)?.color || '#999'
 
   // 按名称或 IP 过滤主机
   const filteredHosts = searchQuery.trim()
@@ -200,14 +203,14 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
       {/* 默认终端：单行条目，打开配置的默认本机 shell（不经过 SSH） */}
       <div
         className="host-item local-default-terminal"
-        onClick={onOpenDefaultTerminal}
-        title={`打开本机 ${SHELL_LABELS[defaultShell] || defaultShell} 终端（不经过 SSH）`}
+        onClick={onLocalClick}
+        onDoubleClick={onOpenDefaultTerminal}
+        title="单击切换本机已打开的终端会话（不新建） · 双击打开新的本机终端（不经过 SSH）"
       >
         <span className="type-dot" style={{ background: '#10b981' }} />
         <div className="host-info">
-          <div className="host-name">默认终端</div>
+          <div className="host-name">{SHELL_LABELS[defaultShell] || defaultShell}</div>
         </div>
-        <span className="default-shell-label">{SHELL_LABELS[defaultShell] || defaultShell}</span>
       </div>
       {orderedGroups.map((group) => {
         const groupHosts = grouped[group] || []
@@ -227,8 +230,8 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                 {groupHosts.map((h) => (
                   <div
                     key={h.id}
-                    className={`host-item${activeHostId === h.id ? ' active' : ''}${dragHostId === h.id ? ' dragging' : ''}${overHostId === h.id && dragHostId && dragHostId !== h.id ? ' drag-over' : ''}`}
-                    onClick={() => onHostClick(h)}
+                    className={`host-item${activeHostId === h.id || selectedHostId === h.id ? ' active' : ''}${dragHostId === h.id ? ' dragging' : ''}${overHostId === h.id && dragHostId && dragHostId !== h.id ? ' drag-over' : ''}`}
+                    onClick={() => { setSelectedHostId(h.id); onHostClick(h) }}
                     onDoubleClick={() => onHostDoubleClick(h)}
                     onContextMenu={(e) => {
                       e.preventDefault()
@@ -239,9 +242,8 @@ export const HostList = memo(function HostList({ hosts, hostTypes, groups, activ
                     onDragOver={(e) => handleHostDragOver(e, h)}
                     onDrop={() => handleHostDrop(h)}
                     onDragEnd={handleHostDragEnd}
-                    title="单击连接/切换 · 双击另开新连接 · 右键操作菜单 · 拖动调整顺序"
+                    title="单击切换该主机已连接会话(不建连) · 双击另开新连接 · 右键操作菜单 · 拖动调整顺序"
                   >
-                    <span className="type-dot" style={{ background: getTypeColor(h.type) }} />
                     <span className={`conn-dot${h.is_connected ? ' online' : ''}`} title={h.is_connected ? '已连接' : '未连接'} />
                     <div className="host-info">
                       {h.name ? (

@@ -56,3 +56,6 @@ _wstool_update.log
 _commit_msg.txt
 _menu_*.bmp
 .catpaw/
+
+# Zig backend build output (temp)
+Backend/

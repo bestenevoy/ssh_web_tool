@@ -50,6 +50,13 @@ async def api_unignore_command(req: IgnoreCommandRequest):
     return {"status": "ok" if ok else "not_found"}
 
 
+@router.post("/history/clear")
+async def api_clear_history():
+    """清空全部命令历史，返回删除条数"""
+    cleared = await get_history_db().clear_history()
+    return {"status": "ok", "cleared": cleared}
+
+
 @router.get("/search")
 async def api_unified_search(keyword: str = "", limit: int = 50):
     """

@@ -20,6 +20,8 @@ export function SftpPanel({ sessionId }: Props) {
   const [items, setItems] = useState<SftpItem[]>([])
   const [loading, setLoading] = useState(false)
   const [viewer, setViewer] = useState<{ name: string; content: string } | null>(null)
+  // 上传状态：{name: 百分比}（多文件逐个上传时只显示当前文件）；null = 空闲
+  const [uploading, setUploading] = useState<{ name: string; pct: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dropZoneRef = useRef<HTMLDivElement>(null)
 
@@ -126,18 +128,18 @@ export function SftpPanel({ sessionId }: Props) {
 
   const uploadFiles = async (files: FileList) => {
     if (!sessionId) return
-    // 优化：使用 multipart sftpUpload 代替 JSON sftpWrite
-    // 原 sftpWrite 通过 file.text() 读取为字符串再 JSON 发送，二进制文件会被损坏
-    // multipart 直接以二进制 FormData 上传，后端接收 bytes 直传 SFTP
+    // 逐个上传，XHR 进度回调驱动上传状态显示（大文件可见进度，不再像卡死）
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
+      setUploading({ name: file.name, pct: 0 })
       try {
         const path = currentPath.replace(/\/$/, '') + '/' + file.name
-        await api.sftpUpload(sessionId, path, file)
+        await api.sftpUpload(sessionId, path, file, (pct) => setUploading({ name: file.name, pct }))
       } catch (e) {
         alert('上传失败 ' + file.name + ': ' + (e as Error).message)
       }
     }
+    setUploading(null)
     loadList(currentPath)
   }
 
@@ -162,7 +164,10 @@ export function SftpPanel({ sessionId }: Props) {
       <div className="sftp-toolbar">
         <button className="btn btn-secondary btn-sm" onClick={goUp}>⬆ 上级</button>
         <button className="btn btn-secondary btn-sm" onClick={() => loadList(currentPath)}>🔄</button>
-        <button className="btn btn-primary btn-sm" onClick={() => fileInputRef.current?.click()}>⬆ 上传</button>
+        <button className="btn btn-primary btn-sm" disabled={!!uploading} onClick={() => fileInputRef.current?.click()}>
+          {uploading ? `⬆ ${uploading.pct}%` : '⬆ 上传'}
+        </button>
+        {uploading && <span className="sftp-upload-status">{uploading.name} {uploading.pct}%</span>}
       </div>
       <input
         ref={fileInputRef}

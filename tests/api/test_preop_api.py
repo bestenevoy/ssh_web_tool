@@ -15,6 +15,12 @@ def _make_fake_session():
             self.written.append((path, content))
             return True
 
+        async def write_file_stream(self, path, chunk_iter):
+            # 流式上传桩：聚合分块后按原 write_file 语义记录（内容逐字节无损断言）
+            data = b"".join([chunk async for chunk in chunk_iter])
+            self.written.append((path, data))
+            return len(data)
+
     return FakeSession()
 
 

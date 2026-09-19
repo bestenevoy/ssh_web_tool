@@ -1,7 +1,8 @@
-import { useRef } from 'react'
+import { TerminalWindow } from './TerminalWindow'
 import type { TerminalInstance } from '../lib/useTerminals'
+import type { Host, HostType } from '../types'
 
-// 分屏模式：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗格，不做拖拽分割树）
+// 分屏模式：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗口，不做拖拽分割树）
 export type SplitMode = 'none' | 'h' | 'v'
 
 export type PaneIndex = 0 | 1
@@ -10,11 +11,23 @@ interface Props {
   terminals: Map<string, TerminalInstance>
   activeId: string | null
   splitMode: SplitMode
-  /** 两个窗格各自显示的会话 id（null = 空窗格，显示占位提示） */
-  panes: [string | null, string | null]
-  /** 焦点窗格索引（activeId 所在窗格） */
+  /** 两个窗口各自的会话 id 列表（tab 顺序；单屏只用窗口0） */
+  windowSessions: [string[], string[]]
+  /** 两个窗口各自当前显示的会话 id */
+  windowActive: [string | null, string | null]
+  /** 焦点窗口索引 */
   focusedPane: PaneIndex
+  hostTypes: HostType[]
+  hosts: Host[]
+  /** 会话显示顺序（单屏时窗口0 的 tab 顺序 = 会话列表顺序；缺省 = 创建顺序） */
+  order?: string[]
   registerContainer: (session_id: string, el: HTMLDivElement | null) => void
+  onSwitch: (id: string) => void
+  onClose: (id: string) => void
+  onNew: () => void
+  /** 跨窗口拖拽：把会话移动到目标窗口 */
+  onMoveTabToWindow: (sid: string, toWindow: PaneIndex) => void
+  onFocusWindow: (idx: PaneIndex) => void
   /** 终端区右键：App 层弹终端专属菜单（块操作由 blockBar.hitTest 判定），与主机列表菜单区分 */
   onTerminalContextMenu?: (session_id: string, e: React.MouseEvent) => void
   /** 点击窗格（含空窗格占位）→ App 聚焦该窗格 */
@@ -22,70 +35,91 @@ interface Props {
 }
 
 export function TerminalView({
-  terminals, activeId, splitMode, panes, focusedPane, registerContainer, onTerminalContextMenu, onPaneClick,
+  terminals, activeId, splitMode, windowSessions, windowActive, focusedPane,
+  hostTypes, hosts, order, registerContainer,
+  onSwitch, onClose, onNew, onMoveTabToWindow, onFocusWindow,
+  onTerminalContextMenu, onPaneClick,
 }: Props) {
-  const containerRefs = useRef<Map<string, HTMLDivElement>>(new Map())
-
-  const setRef = (session_id: string) => (el: HTMLDivElement | null) => {
-    if (el) {
-      containerRefs.current.set(session_id, el)
-    } else {
-      containerRefs.current.delete(session_id)
-    }
-    registerContainer(session_id, el)
-  }
-
   const inSplit = splitMode !== 'none'
 
-  // 单个终端实例渲染：单屏模式用 .active 控制显隐；分屏模式用 .pane-N 控制网格定位
-  // （未上屏的会话保持挂载但 display:none，保住 xterm 容器不被卸载重建）
-  const renderInstance = (t: TerminalInstance, paneIdx: PaneIndex | -1) => {
-    const paneCls = paneIdx >= 0 ? ` pane-${paneIdx}` : ''
-    const focusedCls = inSplit && paneIdx === focusedPane ? ' focused' : ''
-    return (
-      <div
-        key={t.session_id}
-        ref={setRef(t.session_id)}
-        className={`terminal-instance${!inSplit && t.session_id === activeId ? ' active' : ''}${paneCls}${focusedCls}`}
-        onMouseDown={inSplit && paneIdx >= 0 ? () => onPaneClick?.(paneIdx as PaneIndex, t.session_id) : undefined}
-        onContextMenu={(e) => onTerminalContextMenu?.(t.session_id, e)}
-      >
-        {(t.pending || t.reconnecting || t.local_starting) && (
-          <div className="terminal-starting">
-            <div className="terminal-starting-spinner" />
-            <div className="terminal-starting-text">
-              {t.pending ? '正在连接，请稍候…' : t.reconnecting ? '正在重新连接，请稍候…' : '正在启动本机终端…'}
-            </div>
-          </div>
-        )}
-      </div>
-    )
+  // 单屏窗口0 的会话列表：优先共享顺序（tab 顺序 = 会话列表顺序）
+  const singleSessions = order && order.length > 0
+    ? order.filter((sid) => terminals.has(sid))
+    : Array.from(terminals.keys())
+
+  // 窗口列表：单屏 = 1 个窗口（全部会话，激活 = activeId）；分屏 = 2 个窗口
+  const windows: { idx: PaneIndex; sessions: string[]; active: string | null }[] = inSplit
+    ? [
+        { idx: 0, sessions: windowSessions[0], active: windowActive[0] },
+        { idx: 1, sessions: windowSessions[1], active: windowActive[1] },
+      ]
+    : [{ idx: 0, sessions: singleSessions, active: activeId }]
+
+  // 会话所属窗口（分屏）：窗口0 / 窗口1 / -1（不属于任何窗口，不显示）
+  const paneOf = (sid: string): PaneIndex | -1 =>
+    inSplit ? (windowSessions[0].includes(sid) ? 0 : windowSessions[1].includes(sid) ? 1 : -1) : 0
+  // 会话是否可见（所属窗口的当前显示会话）
+  const visibleOf = (sid: string): boolean => {
+    const idx = paneOf(sid)
+    if (inSplit) {
+      if (idx < 0) return false
+      return windowActive[idx as PaneIndex] === sid
+    }
+    return sid === activeId
   }
 
   return (
     <div className={`terminal-container${inSplit ? ` split split-${splitMode}` : ''}`}>
-      {Array.from(terminals.values()).map((t) => (
-        renderInstance(t, inSplit ? (panes.indexOf(t.session_id) as PaneIndex | -1) : -1)
+      {/* 窗口层：tab 栏 + 空窗口占位（终端实例不在此层渲染） */}
+      {windows.map((w) => (
+        <TerminalWindow
+          key={w.idx}
+          windowIndex={w.idx}
+          sessions={w.sessions}
+          activeId={w.active}
+          focused={!inSplit || w.idx === focusedPane}
+          terminals={terminals}
+          hostTypes={hostTypes}
+          hosts={hosts}
+          onSwitch={onSwitch}
+          onClose={onClose}
+          onNew={onNew}
+          onMoveTabToWindow={onMoveTabToWindow}
+          onFocusWindow={onFocusWindow}
+          onPaneClick={onPaneClick}
+          inSplit={inSplit}
+        />
       ))}
-      {/* 空窗格 / 会话已被关闭的窗格：显示占位（也复用 pane-N 做网格定位） */}
-      {inSplit && panes.map((sid, i) => {
-        if (sid && terminals.has(sid)) return null
+
+      {/* 共享实例层：所有会话实例保持挂载（跨窗口拖拽只改 pane/active 类，
+          xterm DOM 不重建），定位到所属窗口终端区 */}
+      {Array.from(terminals.values()).map((t) => {
+        const idx = paneOf(t.session_id)
+        const visible = visibleOf(t.session_id)
         return (
           <div
-            key={`pane-empty-${i}`}
-            className={`pane-placeholder pane-${i}${i === focusedPane ? ' focused' : ''}`}
-            onMouseDown={() => onPaneClick?.(i as PaneIndex, null)}
+            key={t.session_id}
+            ref={(el) => registerContainer(t.session_id, el)}
+            className={`terminal-instance${idx >= 0 ? ` pane-${idx}` : ''}${visible ? ' active' : ''}`}
+            onMouseDown={(e) => { if (e.button === 0 && idx >= 0) onPaneClick?.(idx as PaneIndex, t.session_id) }}
+            onContextMenu={(e) => onTerminalContextMenu?.(t.session_id, e)}
           >
-            <div className="text">空白窗格</div>
-            <div className="hint">点击顶部标签在此窗格打开会话</div>
+            {(t.pending || t.reconnecting || t.local_starting) && (
+              <div className="terminal-starting">
+                <div className="terminal-starting-spinner" />
+                <div className="terminal-starting-text">
+                  {t.pending ? '正在连接，请稍候…' : t.reconnecting ? '正在重新连接，请稍候…' : '正在启动本机终端…'}
+                </div>
+              </div>
+            )}
           </div>
         )
       })}
-      {terminals.size === 0 && !inSplit && (
+
+      {!inSplit && terminals.size === 0 && (
         <div className="empty-state">
           <div className="icon">🖥️</div>
           <div className="text">选择左侧主机开始 SSH 连接</div>
-          <div className="hint">支持多标签终端 · 关闭标签同时关闭 SSH 连接 · 整关页面后重开会自动恢复仍连接的会话</div>
         </div>
       )}
     </div>

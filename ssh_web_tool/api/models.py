@@ -114,6 +114,13 @@ class SftpDeleteRequest(BaseModel):
     path: str
 
 
+class SftpDownloadToRequest(BaseModel):
+    """远程文件下载到本机目录（SFTP 双窗工作台：服务器端流式下载，不经过浏览器）"""
+
+    remote_path: str
+    local_dir: str
+
+
 class FallbackShellRequest(BaseModel):
     """设置 SSH 断开后切换的本机 shell"""
 

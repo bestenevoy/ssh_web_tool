@@ -13,16 +13,18 @@ import { useEvents } from './lib/useEvents'
 import { useSettings, FONT_OPTIONS } from './lib/useSettings'
 import { HostList } from './components/HostList'
 import { GroupManager } from './components/GroupManager'
-import { TerminalTabs } from './components/TerminalTabs'
 import { TerminalView } from './components/TerminalView'
 import type { SplitMode, PaneIndex } from './components/TerminalView'
 import { SessionPanel } from './components/SessionPanel'
+import { loadOrder, sortSessionIds } from './lib/sessionOrder'
 import { QuickCommands } from './components/QuickCommands'
 import { SftpPanel } from './components/SftpPanel'
+import { SftpWorkbench } from './components/SftpWorkbench'
 import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
 import { PasswordModal } from './components/PasswordModal'
 import { SettingsModal } from './components/SettingsModal'
+import { ShellProfileModal } from './components/ShellProfileModal'
 import { DirPickerModal } from './components/DirPickerModal'
 import { SearchBar } from './components/SearchBar'
 import { FileEditor } from './components/FileEditor'
@@ -53,10 +55,15 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   // 右侧面板互斥显示：sessions=会话列表 / tools=工具面板(快速指令/SFTP)，同时只显示一个
   const [rightMode, setRightMode] = useState<'none' | 'sessions' | 'tools'>('tools')
-  // 分屏：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗格）；
-  // panes 为各窗格显示的会话 id（null=空窗格占位），activeId 始终等于焦点窗格的会话
+  // 会话列表 / tab 栏共用排序：组间自定义顺序（localStorage 持久化，拖拽更新）
+  const [customOrder, setCustomOrder] = useState<string[]>(loadOrder)
+  // 分屏（窗口模型）：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗口）；
+  // 每个窗口 = 自己的 tab 列表（windowSessions）+ 当前显示会话（windowActive），
+  // 单屏时只用窗口0（会话 = sortedSessionIds，激活 = activeId）；
+  // 分屏时 activeId 恒等于焦点窗口的激活会话
   const [splitMode, setSplitMode] = useState<SplitMode>('none')
-  const [panes, setPanes] = useState<[string | null, string | null]>([null, null])
+  const [windowSessions, setWindowSessions] = useState<[string[], string[]]>([[], []])
+  const [windowActive, setWindowActive] = useState<[string | null, string | null]>([null, null])
   const [focusedPane, setFocusedPane] = useState<PaneIndex>(0)
   // 右侧会话列表面板（按主机 ip 聚合分组，与顶部标签栏并存）
 
@@ -70,8 +77,12 @@ function App() {
   const [status, setStatus] = useState('就绪')
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [sprofOpen, setSprofOpen] = useState(false) // 终端特性档案弹窗（顶栏 📋）
   // 编辑器页：打开后替换中间终端区（终端实例保持挂载，仅隐藏容器）
   const [editorOpen, setEditorOpen] = useState(false)
+  const [sftpWbOpen, setSftpWbOpen] = useState(false)
+  // SFTP 打开时的初始远程目录（当前终端 cd 跟踪；null 走保存/默认）
+  const [sftpInitialRemote, setSftpInitialRemote] = useState<string | null>(null)
   const [quickCommandModalOpen, setQuickCommandModalOpen] = useState(false)
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null)
   // 终端窗口右键菜单（与主机列表右键菜单各自独立）：坐标 + 会话 + 命中的色块 id
@@ -239,94 +250,138 @@ function App() {
 
   const activeHostId: string | null = terminals.activeId ? terminals.terminals.get(terminals.activeId)?.host_id || null : null
 
-  // 分屏窗格中的会话集合（顶部 tab 分屏标记用）
-  const splitSessions = useMemo(() => new Set(panes.filter((id): id is string => !!id)), [panes])
+  // 会话显示顺序（tab 栏与会话列表共用：组间自定义顺序 + ip:port 排序，组内创建顺序）
+  const sortedSessionIds = useMemo(() => {
+    const hostMap = new Map(hosts.map((h) => [h.id, h]))
+    return sortSessionIds(terminals.terminals, hostMap, customOrder)
+  }, [terminals.terminals, hosts, customOrder])
 
-  // 分屏模式下的会话切换（顶部 tab / 右侧会话列表共用）：
-  // 目标已在某窗格 → 聚焦该窗格；否则放进焦点窗格显示。单屏 = 普通切换
+  // 会话切换（顶部 tab / 右侧会话列表共用）：
+  // 单屏 = 普通切换；分屏 = 目标在某窗口则聚焦该窗口，否则放进焦点窗口显示
   const handleSwitchTerminal = useCallback((id: string) => {
-    if (splitMode === 'none') {
+    if (splitMode === 'none') { terminals.switchTerminal(id); return }
+    const in0 = windowSessions[0].includes(id)
+    const in1 = windowSessions[1].includes(id)
+    if (in0 || in1) {
+      const idx: PaneIndex = in0 ? 0 : 1
+      setFocusedPane(idx)
+      setWindowActive((prev) => { const n: [string | null, string | null] = [prev[0], prev[1]]; n[idx] = id; return n })
       terminals.switchTerminal(id)
       return
     }
-    const idx = panes.indexOf(id)
-    if (idx >= 0) {
-      setFocusedPane(idx as PaneIndex)
-      return
-    }
-    setPanes((prev) => {
-      const next: [string | null, string | null] = [prev[0], prev[1]]
-      next[focusedPane] = id
-      return next
+    // 不在任何窗口（新建/未分屏会话）：放进焦点窗口并激活
+    setFocusedPane(focusedPane)
+    setWindowSessions((prev) => {
+      const n: [string[], string[]] = [[...prev[0]], [...prev[1]]]
+      if (!n[focusedPane].includes(id)) n[focusedPane].push(id)
+      return n
     })
-  }, [splitMode, panes, focusedPane, terminals])
+    setWindowActive((prev) => { const n: [string | null, string | null] = [prev[0], prev[1]]; n[focusedPane] = id; return n })
+    terminals.switchTerminal(id)
+  }, [splitMode, windowSessions, focusedPane, terminals])
 
-  // 进入分屏：窗格0 = 当前会话，窗格1 = 另一个会话（无则空窗格占位，之后点标签填入）
+  // 进入分屏：当前活动的 tab 自动移到新窗口（窗口1），其余留在窗口0
   const enterSplit = useCallback((mode: 'h' | 'v') => {
     if (terminals.terminals.size === 0) { setStatus('请先打开一个终端会话'); return }
     if (window.innerWidth < 800) { setStatus('窗口太窄，无法分屏'); return }
     const ids = Array.from(terminals.terminals.keys())
     const first = terminals.activeId && ids.includes(terminals.activeId) ? terminals.activeId : ids[0]
-    const second = ids.find((id) => id !== first) ?? null
+    const rest = ids.filter((s) => s !== first)
     setSplitMode(mode)
-    setPanes([first, second])
-    setFocusedPane(0)
+    setWindowSessions([rest, [first]])
+    setWindowActive([rest.length > 0 ? rest[0] : null, first])
+    setFocusedPane(1)
     if (terminals.activeId !== first) terminals.switchTerminal(first)
   }, [terminals])
 
-  // 退出分屏：回到单屏，显示退出前焦点窗格的会话
+  // 退出分屏：合并两窗口会话回单屏，显示退出前焦点窗口的会话
   const exitSplit = useCallback(() => {
-    const sid = panes[focusedPane] ?? panes[0] ?? panes[1]
+    const merged = [...windowSessions[0], ...windowSessions[1]]
+    const sid = windowActive[focusedPane] ?? windowActive[0] ?? merged[0] ?? null
     setSplitMode('none')
-    setPanes([null, null])
+    setWindowSessions([[], []])
+    setWindowActive([null, null])
     setFocusedPane(0)
     if (sid && terminals.terminals.has(sid)) terminals.switchTerminal(sid)
-  }, [panes, focusedPane, terminals])
+  }, [windowSessions, windowActive, focusedPane, terminals])
+
+  // 跨窗口拖拽 tab：把会话从原窗口移动到目标窗口（原窗口移除，目标窗口追加末尾并激活）
+  const handleMoveTabToWindow = useCallback((sid: string, toIdx: PaneIndex) => {
+    if (splitMode === 'none') return
+    setWindowSessions((prev) => {
+      const n: [string[], string[]] = [[...prev[0]], [...prev[1]]]
+      const in0 = n[0].includes(sid)
+      const in1 = n[1].includes(sid)
+      if (!in0 && !in1) return prev
+      const from: PaneIndex = in0 ? 0 : 1
+      if (from === toIdx) return prev
+      n[from] = n[from].filter((s) => s !== sid)
+      n[toIdx] = [...n[toIdx], sid]
+      return n
+    })
+    setFocusedPane(toIdx)
+    setWindowActive((prev) => { const n: [string | null, string | null] = [prev[0], prev[1]]; n[toIdx] = sid; return n })
+    terminals.switchTerminal(sid)
+  }, [splitMode, terminals])
+
+  // 点击窗口 → 聚焦（会话切换交给具体交互）
+  const handleFocusWindow = useCallback((idx: PaneIndex) => {
+    setFocusedPane(idx)
+  }, [])
 
   // 分屏状态自愈（每次渲染收敛检查，守卫保证只跑一次有效分支）：
-  // ① 清理窗格里已被关闭的会话；② 两窗格全空则退出分屏；
-  // ③ activeId 指向的新会话（新建/重连/自动恢复）进入焦点窗格；
-  // ④ 焦点窗格会话与 activeId 不一致时同步（点击窗格/空占位切换焦点的收尾）
+  // ① 清理窗口里已被关闭的会话；② 两窗口全空则退出分屏；
+  // ③ activeId 指向的新会话（新建/重连/自动恢复）进入焦点窗口；
+  // ④ 焦点窗口激活与会话列表同步；⑤ 非焦点窗口激活失效时取该窗口第一个
   useEffect(() => {
     if (splitMode === 'none') return
-    const liveOf = (sid: string | null): string | null =>
-      sid && terminals.terminals.has(sid) ? sid : null
-    const l0 = liveOf(panes[0])
-    const l1 = liveOf(panes[1])
-    if (l0 !== panes[0] || l1 !== panes[1]) { setPanes([l0, l1]); return }
-    if (!l0 && !l1) { setSplitMode('none'); return }
+    const liveOf = (sid: string): string | null => (terminals.terminals.has(sid) ? sid : null)
+    const w0 = windowSessions[0].map(liveOf).filter((x): x is string => !!x)
+    const w1 = windowSessions[1].map(liveOf).filter((x): x is string => !!x)
+    if (w0.length !== windowSessions[0].length || w1.length !== windowSessions[1].length) { setWindowSessions([w0, w1]); return }
+    if (w0.length === 0 && w1.length === 0) { setSplitMode('none'); setFocusedPane(0); return }
     const aid = terminals.activeId
-    if (aid && aid !== l0 && aid !== l1) {
-      setPanes((prev) => {
-        const next: [string | null, string | null] = [prev[0], prev[1]]
-        next[focusedPane] = aid
-        return next
-      })
+    // ③ 新会话（activeId 不在任何窗口）→ 放进焦点窗口
+    if (aid && !w0.includes(aid) && !w1.includes(aid)) {
+      setWindowSessions((prev) => { const n: [string[], string[]] = [[...prev[0]], [...prev[1]]]; if (!n[focusedPane].includes(aid)) n[focusedPane].push(aid); return n })
+      setWindowActive((prev) => { const n: [string | null, string | null] = [prev[0], prev[1]]; n[focusedPane] = aid; return n })
       return
     }
-    const focusedLive = focusedPane === 0 ? l0 : l1
-    if (focusedLive !== aid) {
-      if (focusedLive) terminals.switchTerminal(focusedLive)
-      else terminals.setActiveId(null)
+    // ④ 焦点窗口：窗口列表与激活会话保持一致
+    const focusedWin = focusedPane === 0 ? w0 : w1
+    if (aid && focusedWin.includes(aid)) {
+      if (windowActive[focusedPane] !== aid) setWindowActive((prev) => { const n: [string | null, string | null] = [prev[0], prev[1]]; n[focusedPane] = aid; return n })
+    } else if (aid && !focusedWin.includes(aid)) {
+      // activeId 在另一窗口 → 同步聚焦
+      const otherIdx: PaneIndex = focusedPane === 0 ? 1 : 0
+      setFocusedPane(otherIdx)
+      setWindowActive((prev) => { const n: [string | null, string | null] = [prev[0], prev[1]]; n[otherIdx] = aid; return n })
+    } else if (!aid && focusedWin[0]) {
+      terminals.switchTerminal(focusedWin[0])
     }
-  }, [splitMode, focusedPane, panes, terminals])
+    // ⑤ 非焦点窗口激活失效 → 取该窗口第一个
+    const otherIdx: PaneIndex = focusedPane === 0 ? 1 : 0
+    const otherWin = otherIdx === 0 ? w0 : w1
+    const oa = windowActive[otherIdx]
+    if (oa && !otherWin.includes(oa)) setWindowActive((prev) => { const n: [string | null, string | null] = [prev[0], prev[1]]; n[otherIdx] = otherWin[0] ?? null; return n })
+  }, [splitMode, focusedPane, windowSessions, windowActive, terminals])
 
-  // 分屏布局变化后重新 fit 可见窗格（等 grid 生效后的下一帧再量尺寸）
+  // 分屏布局/窗口内容变化后重新 fit 两个窗口的激活会话（等布局生效后的下一帧再量尺寸）
   const refitSplit = terminals.refitTerminals
   useEffect(() => {
     if (splitMode === 'none') return
-    const ids = panes.filter((id): id is string => !!id)
+    const ids = [windowActive[0], windowActive[1]].filter((x): x is string => !!x)
     const raf = requestAnimationFrame(() => refitSplit(ids))
     return () => cancelAnimationFrame(raf)
-  }, [splitMode, panes, refitSplit])
+  }, [splitMode, windowActive, windowSessions, refitSplit])
 
-  // 分屏模式下窗口尺寸变化：两个窗格都要重新 fit（单屏场景由 useTerminals 内部处理 activeId）
+  // 分屏模式下窗口尺寸变化：两个窗口都要重新 fit（单屏场景由 useTerminals 内部处理 activeId）
   useEffect(() => {
     if (splitMode === 'none') return
-    const handler = () => refitSplit(panes.filter((id): id is string => !!id))
+    const handler = () => refitSplit([windowActive[0], windowActive[1]].filter((x): x is string => !!x))
     window.addEventListener('resize', handler)
     return () => window.removeEventListener('resize', handler)
-  }, [splitMode, panes, refitSplit])
+  }, [splitMode, windowActive, refitSplit])
 
   const handleCloseTerminal = useCallback((session_id: string) => {
     const ok = confirm('关闭终端标签？\n\n将同时关闭后端 SSH 连接，重开页面不会恢复该会话。')
@@ -504,26 +559,43 @@ function App() {
       })
   }, [terminals, loadHosts, fallbackShell])
 
-  // 单击主机：该主机"连接中"时忽略 → 已有活跃会话直接切换 →
-  // 上次连接的闲置终端（断开后未进行其他操作）复用重连 → 否则新建连接
+  // 单击主机：不发起新连接。只在该主机的已连接会话间切换：
+  // 当前激活不是该主机 → 选中分组内第一个（= 第一次连接的会话）；
+  // 当前激活已是该主机 → 轮换到下一个已连接会话（同 ip:port 不同用户也能区分切换）。
+  // 无已连接会话 → 无操作（仅列表选中高亮）；连接请用双击 / 右键菜单。
   const handleHostClick = useCallback((host: Host) => {
-    const insts = Array.from(terminals.terminals.values())
-    if (insts.some((t) => t.host_id === host.id && (t.pending || t.reconnecting))) return
-    const live = insts.find((t) => t.host_id === host.id && !t.disconnected)
-    if (live) {
-      terminals.switchTerminal(live.session_id)
-      return
+    const insts = Array.from(terminals.terminals.values()).filter(
+      (t) => t.host_id === host.id && !t.disconnected && !t.pending && !t.reconnecting,
+    )
+    if (insts.length === 0) return
+    const cur = terminals.activeId ? terminals.terminals.get(terminals.activeId) : null
+    if (cur && cur.host_id === host.id && insts.some((t) => t.session_id === cur.session_id)) {
+      // 当前激活就是该主机：切到分组内下一个（轮换）
+      const idx = insts.findIndex((t) => t.session_id === cur.session_id)
+      terminals.switchTerminal(insts[(idx + 1) % insts.length].session_id)
+    } else {
+      // 第一次单击：选中分组内第一个
+      terminals.switchTerminal(insts[0].session_id)
     }
-    // 复用最近断开的闲置终端（Map 迭代序 = 创建序，倒序取最新的一个）
-    const idle = [...insts].reverse().find((t) => t.host_id === host.id && t.disconnected)
-    if (idle) {
-      handleReconnectTerminal(idle.session_id)
-      return
-    }
-    connectHostWithFallback(host)
-  }, [terminals, handleReconnectTerminal, connectHostWithFallback])
+  }, [terminals])
 
-  // 双击主机：即使该主机已有连接也强制新建一条连接（多会话场景）
+  // 单击本地终端条目：在该主机已打开的本地终端会话间切换/轮换（不新建）
+  // 当前激活是本地终端 → 轮换到下一个；否则切到第一个（第一次打开的）；无会话则无操作
+  const handleLocalClick = useCallback(() => {
+    const insts = Array.from(terminals.terminals.values()).filter(
+      (t) => t.type === 'local' && !t.disconnected && !t.pending && !t.reconnecting,
+    )
+    if (insts.length === 0) return
+    const cur = terminals.activeId ? terminals.terminals.get(terminals.activeId) : null
+    if (cur && cur.type === 'local' && insts.some((t) => t.session_id === cur.session_id)) {
+      const idx = insts.findIndex((t) => t.session_id === cur.session_id)
+      terminals.switchTerminal(insts[(idx + 1) % insts.length].session_id)
+    } else {
+      terminals.switchTerminal(insts[0].session_id)
+    }
+  }, [terminals])
+
+  // 双击主机：新建一条连接（即使该主机已有连接；连接唯一入口之一，右键菜单同）
   const handleHostDoubleClick = useCallback((host: Host) => {
     const insts = Array.from(terminals.terminals.values())
     if (insts.some((t) => t.host_id === host.id && (t.pending || t.reconnecting))) return
@@ -791,8 +863,12 @@ function App() {
             disabled={!terminals.activeId}
           />
         )
-      case 'sftp':
-        return <SftpPanel sessionId={terminals.activeId} />
+      case 'sftp': {
+        const sftpInst = terminals.activeId ? terminals.terminals.get(terminals.activeId) : null
+        // 仅 SSH/远程会话可用 SFTP：本地终端、断开会话一律显示"请先连接 SSH"
+        const sftpSid = sftpInst && sftpInst.shell_type !== 'local' && !sftpInst.disconnected ? terminals.activeId : null
+        return <SftpPanel sessionId={sftpSid} />
+      }
     }
   }
 
@@ -837,13 +913,13 @@ function App() {
         <button
           className={`btn btn-sm ${splitMode === 'h' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => (splitMode === 'h' ? exitSplit() : enterSplit('h'))}
-          title="左右分屏（均分两栏，再次点击退出）"
+          title="左右分屏：两个窗口各带标签栏，标签可拖拽跨窗口（再次点击退出）"
           style={{ whiteSpace: 'nowrap' }}
         >◫ 左右</button>
         <button
           className={`btn btn-sm ${splitMode === 'v' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => (splitMode === 'v' ? exitSplit() : enterSplit('v'))}
-          title="上下分屏（均分两行，再次点击退出）"
+          title="上下分屏：两个窗口各带标签栏，标签可拖拽跨窗口（再次点击退出）"
           style={{ whiteSpace: 'nowrap' }}
         >⬒ 上下</button>
         <div style={{ flex: 1 }} />
@@ -903,6 +979,37 @@ function App() {
         >
           📝 编辑器
         </button>
+        {/* SFTP 双窗工作台：本地/远程双栏 Xftp 风格，拖拽跨窗传输（需已连接 SSH 会话） */}
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={async () => {
+            const inst = terminals.activeId ? terminals.terminals.get(terminals.activeId) : null
+            // type 是主机业务分类（web/db/other…）不可靠；shell_type='local' 才是本地终端
+            if (!inst || inst.shell_type === 'local' || inst.disconnected) {
+              alert('请先连接一个 SSH 主机，再打开 SFTP 工作台')
+              return
+            }
+            // 打开时定位到当前终端所在目录（cd 跟踪；失败/未知回退默认目录）
+            let cwd: string | null = null
+            try {
+              const r = await api.getSessionCwd(terminals.activeId!)
+              cwd = r.cwd
+            } catch { /* 忽略，走默认目录 */ }
+            setSftpInitialRemote(cwd)
+            setSftpWbOpen(true)
+          }}
+          title="SFTP 双窗工作台：本地/远程双栏浏览，拖拽文件上传/下载"
+        >
+          🗂 SFTP
+        </button>
+        {/* 终端特性档案入口：每种 shell 的特性与注意事项（防误操作） */}
+        <button
+          className="btn btn-secondary btn-sm settings-btn"
+          onClick={() => setSprofOpen(true)}
+          title="终端特性档案：每种 shell 的清屏/退出/特性与注意事项"
+        >
+          📋
+        </button>
         {/* 检查配置入口已移入设置页「本机终端」分区 */}
         {/* 设置入口：顶栏最右上角，打开整页设置 */}
         <button
@@ -933,7 +1040,6 @@ function App() {
           </div>
           <HostList
             hosts={hosts}
-            hostTypes={hostTypes}
             groups={groups}
             activeHostId={activeHostId}
             defaultShell={fallbackShell}
@@ -942,6 +1048,7 @@ function App() {
                 .then(() => { setTimeout(() => loadHosts(), 500) })
                 .catch((e) => alert('本机终端打开失败: ' + (e as Error).message))
             }}
+            onLocalClick={handleLocalClick}
             onHostClick={handleHostClick}
             onHostDoubleClick={handleHostDoubleClick}
             onEdit={(h) => { setEditingHost(h); setModalOpen(true) }}
@@ -953,25 +1060,24 @@ function App() {
           />
         </div>
 
-        {/* 中间终端区域（编辑器页以覆盖层形式呈现：终端实例保持挂载，避免 xterm 重建） */}
+        {/* 中间终端区域（窗口模型：每个窗口 = 自己的 tab 栏 + 终端区，tab 可跨窗口拖拽） */}
         <div className="terminal-area">
-          <TerminalTabs
-            terminals={terminals.terminals}
-            activeId={terminals.activeId}
-            hostTypes={hostTypes}
-            hosts={hosts}
-            splitSessions={splitSessions}
-            onSwitch={handleSwitchTerminal}
-            onClose={handleCloseTerminal}
-            onNew={handleNewTerminal}
-          />
           <TerminalView
             terminals={terminals.terminals}
             activeId={terminals.activeId}
             splitMode={splitMode}
-            panes={panes}
+            windowSessions={windowSessions}
+            windowActive={windowActive}
             focusedPane={focusedPane}
+            hosts={hosts}
+            order={sortedSessionIds}
+            hostTypes={hostTypes}
             registerContainer={terminals.registerContainer}
+            onSwitch={handleSwitchTerminal}
+            onClose={handleCloseTerminal}
+            onNew={handleNewTerminal}
+            onMoveTabToWindow={handleMoveTabToWindow}
+            onFocusWindow={handleFocusWindow}
             onTerminalContextMenu={handleTerminalContextMenu}
             onPaneClick={(idx) => setFocusedPane(idx)}
           />
@@ -1018,6 +1124,8 @@ function App() {
               terminals={terminals.terminals}
               hosts={hosts}
               activeId={terminals.activeId}
+              customOrder={customOrder}
+              onOrderChange={setCustomOrder}
               onSwitch={handleSwitchTerminal}
               onClose={handleCloseTerminal}
             />
@@ -1091,6 +1199,15 @@ function App() {
         <PasswordModal title={pwPromptTitle} onSubmit={handlePwSubmit} onCancel={handlePwCancel} />
       )}
 
+      {/* SFTP 双窗工作台（Xftp 风格）：本地/远程双栏 + 拖拽传输，跟随当前活跃 SSH 会话 */}
+      {sftpWbOpen && terminals.activeId && (
+        <SftpWorkbench
+          sessionId={terminals.activeId}
+          initialRemote={sftpInitialRemote}
+          onClose={() => { setSftpInitialRemote(null); setSftpWbOpen(false) }}
+        />
+      )}
+
       {/* 开启日志记录的目录选择弹窗：未勾选「不再询问」时右键「开始记录日志」先选目录 */}
       {recordDirModal && (
         <DirPickerModal
@@ -1103,6 +1220,9 @@ function App() {
           onCancel={() => setRecordDirModal(null)}
         />
       )}
+
+      {/* 终端特性档案（整页覆盖）：每种 shell 的特性与注意事项 */}
+      {sprofOpen && <ShellProfileModal onClose={() => setSprofOpen(false)} />}
 
       {/* 设置页（整页覆盖）：本机终端 / 命令块 / 字体主题 / 关键字高亮 / 缓存清理 */}
       {settingsOpen && (

@@ -174,6 +174,8 @@ export const api = {
       body: JSON.stringify({ command, timeout }),
     }),
   getSessionState: (session_id: string) => request<TerminalState>(`/api/sessions/${session_id}/state`),
+  // 获取 SSH 会话当前目录（cd 跟踪；SFTP 打开时定位初始目录）
+  getSessionCwd: (session_id: string) => request<{ cwd: string | null }>(`/api/sessions/${session_id}/cwd`),
   // 批量获取终端状态（减少 HTTP 请求次数）
   getBatchSessionStates: (session_ids: string[]) =>
     request<{ states: Record<string, TerminalState & { state?: string }> }>('/api/sessions/states', {
@@ -243,26 +245,46 @@ export const api = {
     }),
   sftpDelete: (session_id: string, path: string) =>
     request(`/api/sftp/${session_id}/delete`, { method: 'POST', body: JSON.stringify({ path }) }),
+  // 远程文件下载到本机目录（服务器端流式下载，SFTP 双窗工作台用）
+  sftpDownloadTo: (session_id: string, remote_path: string, local_dir: string) =>
+    request<{ status: string; path: string; local: string; size: number }>(`/api/sftp/${session_id}/download-to`, {
+      method: 'POST',
+      body: JSON.stringify({ remote_path, local_dir }),
+    }),
   sftpDownloadUrl: (session_id: string, path: string) =>
     `/api/sftp/${session_id}/download?path=${encodeURIComponent(path)}`,
-  // 上传本地文件到远端（multipart）
-  sftpUpload: async (session_id: string, remote_path: string, file: File) => {
-    const fd = new FormData()
-    fd.append('file', file)
-    const resp = await fetch(`${BASE}/api/sftp/${session_id}/upload?remote_path=${encodeURIComponent(remote_path)}`, {
-      method: 'POST',
-      body: fd,
-    })
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ detail: resp.statusText }))
-      throw new Error(err.detail || `HTTP ${resp.status}`)
-    }
-    return resp.json()
-  },
+  // 上传本地文件到远端（multipart，XHR 以支持上传进度回调）
+  sftpUpload: (session_id: string, remote_path: string, file: File, onProgress?: (pct: number) => void) =>
+    new Promise<{ status: string; path: string; size: number }>((resolve, reject) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${BASE}/api/sftp/${session_id}/upload?remote_path=${encodeURIComponent(remote_path)}`)
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText))
+          } catch {
+            resolve({ status: 'uploaded', path: remote_path, size: 0 })
+          }
+        } else {
+          let detail = `HTTP ${xhr.status}`
+          try {
+            detail = JSON.parse(xhr.responseText).detail || detail
+          } catch { /* 非 JSON 错误体 */ }
+          reject(new Error(detail))
+        }
+      }
+      xhr.onerror = () => reject(new Error('网络错误'))
+      xhr.send(fd)
+    }),
 
   // 预操作上传：后端直读本机源文件（绝对路径或 scripts 目录文件）后 SFTP 上传
   preopUpload: (session_id: string, source: string, source_type: string, remote: string) =>
-    request('/api/preop/upload', {
+    request<{ status: string; source: string; path: string; size: number }>('/api/preop/upload', {
       method: 'POST',
       body: JSON.stringify({ session_id, source, source_type, remote }),
     }),
@@ -299,4 +321,7 @@ export const api = {
     request<{ commands: Array<{ command: string; count: number; last_used: number }> }>(
       `/api/history/ignored?limit=${limit}`
     ),
+  // 清空全部命令历史（返回删除条数）
+  clearHistory: () =>
+    request<{ status: string; cleared: number }>('/api/history/clear', { method: 'POST' }),
 }

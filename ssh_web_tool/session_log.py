@@ -62,6 +62,59 @@ def build_log_file(session_id: str, host: str, created_at: float, log_dir: str) 
     return os.path.join(log_dir, f"{sanitize_host(host)}_{start}_running_{session_id}.log")
 
 
+
+# 每种终端/Shell 的特性要点（与前端 shellProfiles.ts 对应）。写入会话日志文件头，
+# 让「清屏不清空 / 退出方式 / 临时会话」等防误操作信息随记录留存。
+SHELL_FEATURES: dict[str, list[str]] = {
+    "powershell": [
+        "Shell 类型: PowerShell（本机终端）",
+        "说明: 本机 PowerShell 5.1（Windows 自带）",
+        "清屏: clear / cls / Ctrl+L —— 本工具中只把窗口上移，历史保留可滚动回看（不会真清空）",
+        "退出: exit",
+        "特性: ↑/↓ 召回历史、Tab 补全（PSReadLine）、命令不区分大小写、ls/cd 为别名",
+        "注意: 粘贴多行会立即逐行执行，粘贴前先确认；误点标签 ✕ 会结束会话",
+    ],
+    "pwsh": [
+        "Shell 类型: pwsh（PowerShell 7+）",
+        "说明: 本机 PowerShell 7+（独立安装版）",
+        "清屏: clear / cls / Ctrl+L —— 本工具中只把窗口上移，历史保留可滚动回看（不会真清空）",
+        "退出: exit / Ctrl+D",
+        "特性: ↑/↓ 召回历史、Tab 补全（PSReadLine）、命令不区分大小写",
+        "注意: 粘贴多行会立即逐行执行，粘贴前先确认；误点标签 ✕ 会结束会话",
+    ],
+    "cmd": [
+        "Shell 类型: CMD（命令提示符）",
+        "说明: 本机 CMD",
+        "清屏: cls —— 本工具中只把窗口上移，历史保留可滚动回看（不会真清空）",
+        "退出: exit",
+        "特性: ↑/↓ 召回历史（doskey）、命令与路径不区分大小写、变量用 %var%",
+        "注意: 无 PSReadLine 智能补全；行为与 PowerShell 不同；粘贴多行会逐行执行",
+    ],
+    "ssh-remote": [
+        "Shell 类型: SSH 远程会话（远端 shell 依服务器而定，常见 bash/sh/zsh）",
+        "清屏: clear / Ctrl+L —— 本工具中只把窗口上移，历史保留可滚动回看（不会真清空）",
+        "退出: exit / Ctrl+D",
+        "特性: 远端 ↑/↓ 历史、Tab 补全以服务器 shell 为准",
+        "注意: 命令在远端服务器执行，rm/dd 等破坏性操作不可撤销；断开后自动切回本机终端可重连",
+    ],
+    "ssh-link": [
+        "Shell 类型: SSH 链接（临时会话，由 ssh user:pass@ip:port 建立）",
+        "清屏: clear / Ctrl+L —— 本工具中只把窗口上移，历史保留可滚动回看（不会真清空）",
+        "退出: exit / Ctrl+D",
+        "注意: 临时会话不归属任何已保存主机，主机列表单击不会切换；关闭后需重新输入 ssh 命令；连接串含密码，注意保管本日志",
+    ],
+}
+
+
+def build_shell_meta(shell_key: str, host: str, session_id: str) -> list[str]:
+    """组装日志文件头的 Shell 特性元信息（未知类型给通用说明）"""
+    lines = SHELL_FEATURES.get(shell_key) or [
+        "Shell 类型: 未知",
+        "注意: 当前环境类型未知，请先确认处于什么程序再输入命令，避免误操作",
+    ]
+    return [f"主机: {host or 'unknown'}", f"会话 ID: {session_id}", *lines]
+
+
 class SessionLog:
     """单个会话的日志持久化（每个会话一个实例）
 
@@ -93,7 +146,9 @@ class SessionLog:
         # 信息 banner 等早期输出随首次 flush 进入日志（用户明确要求保留）
         self._mirror = TerminalMirror()
 
-    def enable_with(self, log_file: str, log_dir: str, cache: dict[str, logging.Logger]) -> None:
+    def enable_with(
+        self, log_file: str, log_dir: str, cache: dict[str, logging.Logger], meta: list[str] | None = None
+    ) -> None:
         """开启记录并落到指定文件（惰性创建文件与 FileHandler；路径变化时重建 handler）
 
         - log_file 与当前一致（同会话暂停后恢复/重连沿用）→ 直接复用；
@@ -108,6 +163,19 @@ class SessionLog:
         self.log_file = log_file
         self._logger = self.get_or_create_logger(self._session_id, log_file, log_dir, cache)
         self.enabled = True
+        # 会话元信息头部（Shell 特性 / 防误操作）：仅在新文件（空文件）时写一次，
+        # 恢复/重连续写旧文件不重复写头部
+        if meta:
+            try:
+                if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > 0:
+                    pass
+                else:
+                    self._logger.info("===== 会话元信息（Shell 特性 / 防误操作）=====")
+                    for line in meta:
+                        self._logger.info(line)
+                    self._logger.info("=" * 46)
+            except OSError:
+                pass
         # 立即转录一次：首次开启时把连接以来的滚出行（banner/MOTD）与当前屏幕
         # 内容落盘，用户打开日志面板马上能看到连接信息，不必等下一波输出
         self.flush_now()
@@ -246,7 +314,10 @@ class SessionLog:
             # 提取镜像屏幕上"新显示"的行（终端显示一致的转录，见 TerminalMirror）
             lines = self._mirror.drain()
             if lines:
-                self._logger.info("\n".join(lines))
+                # 每一行前加时间戳（同一批 flush 内各行时间相同；便于查看日志时
+                # 知道每行输出发生的时刻）
+                ts = time.strftime("%H:%M:%S")
+                self._logger.info("\n".join(f"[{ts}] {ln}" for ln in lines))
         except Exception:
             pass  # 日志写入失败不影响主流程
 

@@ -3,10 +3,17 @@
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 
-from ssh_web_tool.api.models import PreopUploadRequest, SftpDeleteRequest, SftpListRequest, SftpWriteRequest
+from ssh_web_tool.api.models import (
+    PreopUploadRequest,
+    SftpDeleteRequest,
+    SftpDownloadToRequest,
+    SftpListRequest,
+    SftpWriteRequest,
+)
 from ssh_web_tool.deps import get_app_dir_fn, get_event_bus, get_session_manager
+from ssh_web_tool.sessions import SFTP_CHUNK_SIZE
 
 router = APIRouter(prefix="/api", tags=["sftp"])
 
@@ -51,24 +58,29 @@ async def api_sftp_read(session_id: str, path: str):
 
 @router.get("/sftp/{session_id}/download")
 async def api_sftp_download(session_id: str, path: str):
-    """下载远程文件（二进制）"""
+    """下载远程文件（流式：分块读取转发，大文件不再整块进内存）"""
     session = _get_connected_session(session_id)
     try:
-        data = await session.read_file_bytes(path)
+        size = await session.stat_file(path)
         filename = path.split("/")[-1] or "download"
+
+        async def gen():
+            # 流式转发：读取异常时中断响应（流已开始后无法改状态码）
+            async for chunk in session.read_file_stream(path):
+                yield chunk
+
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if size >= 0:
+            headers["Content-Length"] = str(size)
         await get_event_bus().publish(
             "sftp_download",
             "api",
-            f"[{session_id}] SFTP 下载: {path} ({len(data)} bytes)",
+            f"[{session_id}] SFTP 下载: {path} ({size} bytes)",
             session_id=session_id,
             path=path,
-            size=len(data),
+            size=size,
         )
-        return Response(
-            content=data,
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        return StreamingResponse(gen(), media_type="application/octet-stream", headers=headers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"下载失败: {e!s}")
 
@@ -92,6 +104,41 @@ async def api_sftp_write(session_id: str, req: SftpWriteRequest):
         raise HTTPException(status_code=500, detail=f"写入文件失败: {e!s}")
 
 
+@router.post("/sftp/{session_id}/download-to")
+async def api_sftp_download_to(session_id: str, req: SftpDownloadToRequest):
+    """远程文件下载到本机目录（服务器端流式下载，Xftp 双窗工作台用）
+
+    浏览器无法写本地任意路径，由同机 Server 直接经 SFTP 流式写入目标目录。
+    仅支持文件（目录递归暂不支持）。
+    """
+    session = _get_connected_session(session_id)
+    filename = req.remote_path.rstrip("/").rsplit("/", 1)[-1]
+    if not filename:
+        raise HTTPException(status_code=400, detail="远程路径不是文件")
+    local_dir = Path(req.local_dir).expanduser()
+    if not local_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"本地目录不存在: {req.local_dir}")
+    dest = local_dir / filename
+    total = 0
+    try:
+        with open(dest, "wb") as f:
+            # 分块流式写入：磁盘写 4MB 耗时可忽略，不整块进内存
+            async for chunk in session.read_file_stream(req.remote_path):
+                f.write(chunk)
+                total += len(chunk)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"下载失败: {e!s}")
+    await get_event_bus().publish(
+        "sftp_download",
+        "api",
+        f"[{session_id}] SFTP 下载到本机: {req.remote_path} → {dest} ({total} bytes)",
+        session_id=session_id,
+        path=req.remote_path,
+        size=total,
+    )
+    return {"status": "downloaded", "path": req.remote_path, "local": str(dest), "size": total}
+
+
 @router.post("/sftp/{session_id}/delete")
 async def api_sftp_delete(session_id: str, req: SftpDeleteRequest):
     """删除远程文件或目录"""
@@ -105,27 +152,36 @@ async def api_sftp_delete(session_id: str, req: SftpDeleteRequest):
 
 @router.post("/sftp/{session_id}/upload")
 async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = File(...)):
-    """上传文件到远程服务器（multipart，支持二进制文件）
+    """上传文件到远程服务器（multipart，流式分块写入 SFTP，支持任意大小）
 
-    优化：原代码将 bytes decode 为 utf-8 字符串后写入，
-    二进制文件（图片/压缩包/可执行文件）会被损坏。
-    改为直接写入 bytes，通过 write_file_bytes 方法。
+    优化：原实现 `await file.read()` 将整个文件读入内存后一次性 write，
+    大文件（几百 MB+）内存暴涨导致上传失败。改为 4MB 分块流式写入。
     """
     session = _get_connected_session(session_id)
+
+    async def req_chunks():
+        # UploadFile 内部 spool 到临时文件，分块读取不会占用大量内存
+        while True:
+            chunk = await file.read(SFTP_CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
+
     try:
-        content = await file.read()
-        await session.write_file(remote_path, content)
+        total = await session.write_file_stream(remote_path, req_chunks())
         await get_event_bus().publish(
             "sftp_upload",
             "api",
-            f"[{session_id}] SFTP 上传: {remote_path} ({len(content)} bytes)",
+            f"[{session_id}] SFTP 上传: {remote_path} ({total} bytes)",
             session_id=session_id,
             path=remote_path,
-            size=len(content),
+            size=total,
         )
-        return {"status": "uploaded", "path": remote_path, "size": len(content)}
+        return {"status": "uploaded", "path": remote_path, "size": total}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {e!s}")
+    finally:
+        await file.close()
 
 
 @router.post("/preop/upload")
@@ -151,11 +207,19 @@ async def api_preop_upload(req: PreopUploadRequest):
             src = get_app_dir_fn_() / "scripts" / src
     if not src.is_file():
         raise HTTPException(status_code=404, detail=f"源文件不存在: {source}")
+
+    async def local_chunks():
+        # 本地磁盘分块读（4MB 一次，耗时可忽略）；源文件再大也不整块进内存
+        with open(src, "rb") as f:
+            while True:
+                chunk = f.read(SFTP_CHUNK_SIZE)
+                if not chunk:
+                    break
+                yield chunk
+
     try:
-        # 以 bytes 读取并二进制写入：文本/二进制文件均无损（不再 utf-8 替换损坏）
-        data = src.read_bytes()
-        await session.write_file(req.remote, data)
-        return {"status": "uploaded", "source": str(src), "path": req.remote, "size": len(data)}
+        total = await session.write_file_stream(req.remote, local_chunks())
+        return {"status": "uploaded", "source": str(src), "path": req.remote, "size": total}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {e!s}")
 

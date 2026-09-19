@@ -35,8 +35,11 @@ export interface CommandBlockTracker extends IDisposable {
   /** 一次性清空所有块（term.reset()/硬重置后由外部显式调用或 ESC c 内部触发）。 */
   resetAll(): void
   /** 程序化提交（快捷指令/.zs 播放/API 注入）：与用户敲 Enter 同语义。
-   *  term.onData 只对真实键盘触发，程序注入绕过它——必须显式通知。 */
-  notifySubmit(): void
+   *  term.onData 只对真实键盘触发，程序注入绕过它——必须显式通知。
+   *  多行注入（一次下发多条命令）传 lines：首行即时开块，其余 lines-1 个
+   *  块边界等各条命令执行完的提示符行出现时逐个切（即时连切只会落在同一
+   *  光标位置，产生空块且全部输出并入最后一块）。 */
+  notifySubmit(lines?: number): void
 }
 
 /** 金色角 HSL 循环取色——无限调色板，相邻块不撞色。 */
@@ -83,6 +86,8 @@ export function createCommandBlockTracker(
 
   let waitingForPrompt = splitMode === 'prompt'
   let submittedLine: IMarker | null = null
+  // 多行注入的剩余待切块数：onWriteParsed 检测到提示符行时逐个消费（两种模式共用）
+  let pendingPromptSplits = 0
 
   const clearSubmittedLine = () => {
     submittedLine?.dispose()
@@ -146,6 +151,7 @@ export function createCommandBlockTracker(
     opts?.onReset?.()
     clearSubmittedLine()
     waitingForPrompt = splitMode === 'prompt'
+    pendingPromptSplits = 0
     if (blocks.length === 0) return
     const snapshot = blocks.slice()
     blocks.length = 0
@@ -157,9 +163,42 @@ export function createCommandBlockTracker(
   }
 
   // enter 模式按每个 `\r` 切块（含多行粘贴）；prompt 模式仅重置输出侧探测。
-  const onEnter = () => {
-    if (splitMode === 'enter') splitAt()
-    else waitForReturnedPrompt()
+  // lines>1（多行注入）：先即时开块承载第一条命令，剩余 lines-1 个边界由
+  // onWriteParsed 的提示符检测逐个补切。
+  const onEnter = (lines = 1) => {
+    if (lines > 1) {
+      splitAt()
+      pendingPromptSplits += lines - 1
+      return
+    }
+    if (splitMode === 'enter') {
+      pendingPromptSplits = 0  // 真实键盘 Enter：清掉残留的待切块计数
+      splitAt()
+    } else {
+      waitForReturnedPrompt()
+    }
+  }
+  // 提示符行命中检测：光标逻辑行是"整行=提示符"或"行尾提示符"时在行首切块。
+  // 返回是否命中（命中后由调用方收尾 waitingForPrompt/pendingPromptSplits）。
+  const trySplitAtPrompt = (): boolean => {
+    const line = logicalLineAtCursor(term)
+    if (!line) return false
+    if (submittedLine && !submittedLine.isDisposed && submittedLine.line === line.startLine) return false
+    const prompt = detectPrompt(line.text, opts?.extraPromptPatterns)
+    if (prompt && line.text.slice(prompt.end).trim().length === 0) {
+      // 整行就是提示符：常规切块
+      splitAt(line.startOffset)
+      return true
+    }
+    // 行尾提示符：上一命令输出末行无换行，提示符接在输出后面
+    // （如 `echo -n abc` → 光标行 "abcuser@host:~$"）。取延伸到行尾的
+    // 最短匹配切块，输出残留（start 之前的部分）留给上一块。
+    const tail = detectPromptTail(line.text, opts?.extraPromptPatterns)
+    if (tail) {
+      splitAt(line.startOffset)
+      return true
+    }
+    return false
   }
   disposables.push(
     term.onData((data: string) => {
@@ -170,33 +209,24 @@ export function createCommandBlockTracker(
     }),
   )
 
-  if (splitMode === 'prompt') {
-    disposables.push(
-      term.onWriteParsed(() => {
-        if (!waitingForPrompt || term.buffer.active.type === 'alternate') return
-        const line = logicalLineAtCursor(term)
-        if (!line) return
-        if (submittedLine && !submittedLine.isDisposed && submittedLine.line === line.startLine) return
-        const prompt = detectPrompt(line.text, opts?.extraPromptPatterns)
-        if (prompt && line.text.slice(prompt.end).trim().length === 0) {
-          // 整行就是提示符：常规切块
-          splitAt(line.startOffset)
-          waitingForPrompt = false
-          clearSubmittedLine()
-          return
-        }
-        // 行尾提示符：上一命令输出末行无换行，提示符接在输出后面
-        // （如 `echo -n abc` → 光标行 "abcuser@host:~$"）。取延伸到行尾的
-        // 最短匹配切块，输出残留（start 之前的部分）留给上一块。
-        const tail = detectPromptTail(line.text, opts?.extraPromptPatterns)
-        if (tail) {
-          splitAt(line.startOffset)
-          waitingForPrompt = false
-          clearSubmittedLine()
-        }
-      }),
-    )
-  }
+  // 输出解析完的提示符探测：prompt 模式常驻（waitingForPrompt 驱动）；
+  // enter 模式仅多行注入期间工作（pendingPromptSplits > 0）
+  disposables.push(
+    term.onWriteParsed(() => {
+      const multi = pendingPromptSplits > 0
+      if (splitMode === 'prompt') {
+        if (!waitingForPrompt) return
+      } else if (!multi) {
+        return
+      }
+      if (term.buffer.active.type === 'alternate') return
+      if (trySplitAtPrompt()) {
+        waitingForPrompt = false
+        clearSubmittedLine()
+        if (multi) pendingPromptSplits--
+      }
+    }),
+  )
 
   // 规则 2：缓冲区切换。进备用区时关闭当前块；返回普通区不动作。
   disposables.push(
@@ -226,6 +256,7 @@ export function createCommandBlockTracker(
     },
     resetAll,
     // 程序化提交：快捷指令等注入路径不发 onData，显式走一次 Enter 语义
+    // （多行注入 lines>1：首行即时开块，其余边界等提示符行逐个补切）
     notifySubmit: onEnter,
     dispose() {
       disposables.forEach((d) => d.dispose())

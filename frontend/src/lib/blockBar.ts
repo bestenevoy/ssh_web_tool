@@ -40,6 +40,8 @@ export interface BlockBarController {
   handleTerminalReset(): void
   /** 搜索打开期间暂停自动折叠（保证 unfoldAll 后内容不被再次折起）。 */
   setSearchActive(active: boolean): void
+  /** clear/cls 后暂停自动折叠直到用户下次输入：历史展开进 scrollback 后可滚动回看。 */
+  suppressAutoFoldUntilInput(): void
   /** 命中测试：屏幕坐标 → 左侧色条区命中的块 id（未命中/色条关闭返回 null）。 */
   hitTest(clientX: number, clientY: number): number | null
   /** 选中块 id 快照（rssh Finder 风格多选）。 */
@@ -52,8 +54,9 @@ export interface BlockBarController {
   toggleFold(id: number): void
   /** 复制一个或多个块内容（多块按块序拼接，块间空行分隔）。 */
   copyBlocks(ids: number[]): void
-  /** 程序化提交通知（快捷指令/.zs 播放注入命令时调用）：与用户敲 Enter 同语义。 */
-  notifySubmit(): void
+  /** 程序化提交通知（快捷指令/.zs 播放注入命令时调用）：与用户敲 Enter 同语义。
+   *  多行注入传行数 lines（见 commandBlocks.ts notifySubmit）。 */
+  notifySubmit(lines?: number): void
   dispose(): void
 }
 
@@ -72,6 +75,8 @@ export function attachBlockBar(
   let autoFoldOn = settings.blockAutoFold
   let maxLines = Math.max(1, settings.blockMaxLines)
   let searchActive = false
+  // clear/cls 后暂停自动折叠：历史展开进 scrollback 可滚动回看，直到用户下次输入
+  let suppressUntilInput = false
 
   // tracker：切块方式/自定义正则变化时热重建（旧块随之作废重置）。
   // onReset 经闭包引用 foldStore（let 变量），重建后自动指向新实例。
@@ -179,8 +184,8 @@ export function attachBlockBar(
       maxVisibleLines: maxLines,
       // 缓存预算保证 visible + cached < scrollback（5000 − blockMaxLines − 1）
       maxCachedLines: TERMINAL_SCROLLBACK_LINES - maxLines - 1,
-      // 色条关闭/自动折叠关闭/搜索打开时都不折叠
-      shouldAutoFold: () => enabled && autoFoldOn && !searchActive,
+      // 色条关闭/自动折叠关闭/搜索打开/clear 后暂停折叠时都不折叠
+      shouldAutoFold: () => enabled && autoFoldOn && !searchActive && !suppressUntilInput,
     })
     foldStoreChangeSub = foldStore.onChange(scheduleRedraw)
   }
@@ -438,6 +443,13 @@ export function attachBlockBar(
     // tracker.onChange / foldStore.onChange 不在这里订阅：由各自专属 sub 独立管理（支持重建时更换）
     term.onScroll(scheduleRedraw),
     term.onWriteParsed(scheduleRedraw),
+    // 用户输入后恢复自动折叠（clear 暂停期间，下一个字符即解除）
+    term.onData(() => {
+      if (suppressUntilInput) {
+        suppressUntilInput = false
+        scheduleRedraw()
+      }
+    }),
     // 尺寸变化（字体/拖拽/fit）：reflow 会漂移行号，重绘即可——
     // unfold 必须发生在 fit 之前（savedLines 是旧列宽快照），由 useTerminals.fitTerminal 负责
     term.onResize(scheduleRedraw),
@@ -480,6 +492,9 @@ export function attachBlockBar(
     setSearchActive(active: boolean) {
       searchActive = active
     },
+    suppressAutoFoldUntilInput() {
+      suppressUntilInput = true
+    },
     hitTest,
     getSelection(): number[] {
       return [...selectedIds]
@@ -503,9 +518,9 @@ export function attachBlockBar(
       // 多块按块序拼接，块间空行分隔
       writeBlockClipboard(blocks.map(blockText).filter(Boolean).join('\n\n'))
     },
-    notifySubmit() {
+    notifySubmit(lines = 1) {
       // tracker 热重建后此处闭包引用的是最新实例（let tracker）
-      tracker.notifySubmit()
+      tracker.notifySubmit(lines)
     },
     dispose() {
       disposed = true

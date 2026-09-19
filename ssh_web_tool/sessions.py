@@ -27,6 +27,7 @@ from .session_log import (
     SessionLog,
     build_log_file,
     resolve_existing_log,
+    build_shell_meta,
 )
 from .ws_protocol import SERVER_SSH_CONNECTED
 
@@ -37,6 +38,11 @@ _patch_guard = threading.local()
 
 # 输入流中的 ANSI 转义序列（CSI / OSC），拼行前剥离（方向键、PSReadLine 行编辑序列等）
 _ANSI_SEQ_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b.")
+# 与 _ANSI_SEQ_RE 相同，但 CSI 分支额外接受 ~ 结尾（bash bracketed paste 包裹 \\x1b[200~...\\x1b[201~）
+_SSH_INPUT_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b.")
+
+# SFTP 流式传输块大小（4MB）：上传/下载逐块搬运，内存占用恒定
+SFTP_CHUNK_SIZE = 4 * 1024 * 1024
 
 
 class _DirectPtyWrapper:
@@ -239,6 +245,9 @@ class SSHSession:
         # 本地终端输入行缓冲：xterm 前端逐字符发送输入（回车是单独一条 "\r" 消息），
         # 服务端把可打印字符累积成整行，回车时交由 SSH 命令拦截解析（feed_local_input）
         self._local_input_line = ""
+        # SSH 会话当前目录（cd 命令跟踪，SFTP 打开时作为初始目录；None=未知）
+        self.current_dir: str | None = None
+        self._ssh_input_line = ""
         # 待处理的终端尺寸（resize 消息在 PTY 创建前到达时保存）
         self._pending_size: tuple[int, int] | None = None
         # resize 事件：PTY 创建后等待第一个 resize 消息，确保 shell 第一帧输出使用正确尺寸
@@ -511,7 +520,14 @@ class SSHSession:
             log_file = resolve_existing_log(self.session_id, target_dir) or build_log_file(
                 self.session_id, self.host, self.created_at, target_dir
             )
-        self._session_log.enable_with(log_file, target_dir, self._logger_cache)
+        # Shell 特性元信息（记录进日志文件头，防误操作）：本地 shell 激活时按实际
+        # shell 记录；否则按 SSH 远端会话记录
+        shell_key = "ssh-remote"
+        if self._local_proc is not None:
+            ls = (self._local_shell or "").lower().split("\\")[-1]
+            shell_key = ls if ls in ("cmd", "powershell", "pwsh") else "powershell"
+        meta = build_shell_meta(shell_key, self.host, self.session_id)
+        self._session_log.enable_with(log_file, target_dir, self._logger_cache, meta=meta)
 
     def note_local_command(self, typed: str) -> None:
         """本地 shell 回车成行（未被 SSH 拦截）时调用：交给 PSReadLine 采集器
@@ -980,6 +996,66 @@ class SSHSession:
     def reset_local_input_line(self):
         """清空本地输入行缓冲（切换/重启 shell 时调用，避免残留半个命令）"""
         self._local_input_line = ""
+
+    # ---------- SSH 会话当前目录跟踪（SFTP 打开定位初始目录） ----------
+
+    def feed_ssh_input(self, data: str) -> None:
+        """SSH 会话输入行缓冲：仅用于跟踪 cd 命令维护 current_dir，不拦截输入。
+
+        与 feed_local_input 不同——这里所有字符原样放行（真正写入由调用方完成），
+        本方法只同步维护行缓冲并在回车时解析 cd 命令更新 current_dir。
+        xterm 前端逐字符发送输入，回车是单独的 "\\r"。
+        """
+        # 剥离 ANSI 转义序列（粘贴时 bash 的 bracketed paste 会包裹
+        # \\x1b[200~...\\x1b[201~，逐字符输入可能夹带方向键等重绘序列；
+        # _ANSI_SEQ_RE 的 CSI 分支只认字母结尾，需补 ~ 结尾覆盖粘贴包裹）
+        data = _SSH_INPUT_ANSI_RE.sub("", data)
+        for ch in data:
+            if ch in ("\r", "\n"):
+                self._track_cd(self._ssh_input_line)
+                self._ssh_input_line = ""
+                continue
+            if ch in ("\x7f", "\b"):
+                self._ssh_input_line = self._ssh_input_line[:-1]
+                continue
+            if ch in ("\x03", "\x15"):  # Ctrl+C / Ctrl+U：清空当前行
+                self._ssh_input_line = ""
+                continue
+            if ord(ch) < 0x20:
+                continue
+            if len(self._ssh_input_line) < 4096:
+                self._ssh_input_line += ch
+
+    def _track_cd(self, line: str) -> None:
+        """解析 cd 命令更新 current_dir（仅跟踪纯 cd）。
+
+        - cd /path / cd rel → 规范化后记录
+        - cd 单独（回 home）、cd ~、cd -、复合命令（&&/;/|/>）→ 置 None（未知），
+          打开 SFTP 时回退默认目录，避免给出错误位置
+        """
+        line = (line or "").strip()
+        if not line.startswith("cd"):
+            return
+        rest = line[2:].strip()
+        if not rest:
+            self.current_dir = None  # cd 回 home：home 未知
+            return
+        if rest == "-" or rest.startswith("~") or rest.startswith("--"):
+            self.current_dir = None
+            return
+        if any(op in rest for op in ("&&", ";", "|", ">", "&")):
+            self.current_dir = None  # 复合命令不解析，避免误判
+            return
+        target = rest.split()[0]
+        if target.startswith("/"):
+            base = target
+        elif self.current_dir:
+            base = self.current_dir.rstrip("/") + "/" + target
+        else:
+            self.current_dir = None  # 相对 cd 但当前目录未知
+            return
+        import posixpath
+        self.current_dir = posixpath.normpath(base)
 
     def resize_local(self, cols: int, rows: int):
         """调整本地 shell 窗口尺寸（setwinsize 参数顺序 (rows, cols)）"""
@@ -1488,6 +1564,41 @@ class SSHSession:
             async with sftp.open(path, "w") as f:
                 await f.write(str(content))
         return True
+
+    async def write_file_stream(self, path: str, chunk_iter) -> int:
+        """流式写入远程文件：逐块经 SFTP 写入，内存占用恒定。
+        大文件上传专用——原实现将整个文件读入内存后一次性 write，
+        几百 MB 的文件会导致内存暴涨、事件循环阻塞甚至上传失败。"""
+        sftp = await self.get_sftp()
+        total = 0
+        async with sftp.open(path, "wb") as f:
+            async for chunk in chunk_iter:
+                if not chunk:
+                    continue
+                await f.write(chunk)
+                total += len(chunk)
+        return total
+
+    async def read_file_stream(self, path: str, chunk_size: int = SFTP_CHUNK_SIZE):
+        """流式读取远程文件（async 生成器），大文件下载不再整块进内存"""
+        sftp = await self.get_sftp()
+        async with sftp.open(path, "rb") as f:
+            while True:
+                chunk = await f.read(chunk_size)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8")
+                yield chunk
+
+    async def stat_file(self, path: str) -> int:
+        """返回文件大小（用于下载 Content-Length），失败返回 -1"""
+        try:
+            sftp = await self.get_sftp()
+            stat = await sftp.stat(path)
+            return stat.size or -1
+        except Exception:
+            return -1
 
     async def delete_file(self, path: str) -> bool:
         """删除文件或目录"""

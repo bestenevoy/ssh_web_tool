@@ -47,6 +47,7 @@ export interface TerminalInstance {
   terminal_name: string
   type: string
   shell_type: string  // 当前 shell 类型：shell / python / mysql / other
+  local_shell?: string  // 本地终端的具体 shell（cmd / powershell / pwsh），用于特性档案标注
   term: Terminal
   fitAddon: FitAddon
   ws: WebSocket | null
@@ -111,6 +112,7 @@ export interface TerminalInstanceSpec {
   terminal_name: string
   type: string
   shell_type: string
+  local_shell?: string  // 本地终端的具体 shell（cmd/powershell/pwsh）；远端/临时会话不传
   local_starting: boolean
   // 延迟连接：true 时不立即创建 WebSocket（先建 tab 显示"连接中"，HTTP 连接成功后
   // 由调用方关闭占位 tab 并另建真实实例）；省略/false 保持立即建连
@@ -153,6 +155,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     terminal_name,
     type,
     shell_type,
+    local_shell,
     local_starting,
     deferConnect,
     historyContent,
@@ -181,6 +184,9 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     lineHeight: 1.2,
     // 保留足够滚动历史：clear/连接时不丢之前内容（只能滚动回看）
     scrollback: TERMINAL_SCROLLBACK_LINES,
+    // xterm 6：ED2（\x1b[2J，clear/cls/Ctrl+L）把被擦除的视口内容推入
+    // scrollback 而非直接清空（PuTTY 式"窗口上移"），历史可滚动回看
+    scrollOnEraseInDisplay: true,
     // xterm 6.0：自绘滚动条宽度（收窄到 6px；默认 14px）。滑块颜色在 getTerminalTheme
     overviewRuler: { width: 6 },
     // addon-search 的 decorations（总览标尺匹配标记 + onDidChangeResults 计数）依赖
@@ -327,6 +333,9 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
   setupTerminalCopy(term, copyShortcut, () => onCtrlF(session_id), () => onCtrlB(session_id))
 
   // 采用"先声明后赋值"：connectWs 异步执行时 instance 已就绪
+  // 跨块缓冲：clear 序列（\x1b[2J / \x1b[3J）可能被 feeder 分块拆分，
+  // 保留块尾的不完整 CSI 序列，与下一块拼接后再做替换
+  let pendingTail = ''
   const instance: TerminalInstance = {
     session_id,
     host_id,
@@ -334,6 +343,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     terminal_name,
     type,
     shell_type,
+    local_shell,
     term,
     fitAddon,
     ws: null,
@@ -347,7 +357,26 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     ssh_exited: false,
     local_starting,
     feeder: createOutputFeeder({
-      write: (data, cb) => term.write(data, cb),
+      // clear/cls/Ctrl+L：先展开全部折叠（fold 的 savedLines 在内存里，滚动条
+      // 不可见），让历史回到 buffer/scrollback；再由 scrollOnEraseInDisplay
+      // 把视口内容推入 scrollback——clear 只是窗口上移、内容可滚动回看。
+      // CSI 3 J 会清空整个 scrollback，与"保留历史"冲突，直接剥掉。
+      // 跨块缓冲处理 feeder 分块拆分 clear 序列。
+      write: (data, cb) => {
+        const full = pendingTail + data
+        if (full.includes('\x1b[2J')) {
+          // clear：先展开全部折叠（fold 的 savedLines 在内存里、滚动条不可见），
+          // 并暂停自动折叠直到下次输入；随后 scrollOnEraseInDisplay 把视口内容
+          // 推入 scrollback——clear 只是窗口上移、历史可滚动回看
+          instance.blockBar?.unfoldAll()
+          instance.blockBar?.suppressAutoFoldUntilInput()
+        }
+        const cleaned = full.replace(/\x1b\[\s*3\s*J/g, '')
+        const tailMatch = cleaned.match(/\x1b\[[0-9;?]*$/)
+        pendingTail = tailMatch ? tailMatch[0] : ''
+        const toWrite = tailMatch ? cleaned.slice(0, cleaned.length - tailMatch[0].length) : cleaned
+        term.write(toWrite, cb)
+      },
       maxPendingBytes: MAX_PENDING_BYTES,
     }),
     ssh_conn,

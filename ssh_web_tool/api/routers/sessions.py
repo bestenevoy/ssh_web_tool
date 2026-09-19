@@ -36,9 +36,8 @@ async def api_create_session(req: CreateSessionRequest):
         # 外层总超时兜底：目标不可达/认证卡住时不至于让前端请求无限挂起
         async with asyncio.timeout(max(30.0, get_connect_timeout() * 3)):  # type: ignore[attr-defined]
             await session.connect(password=req.password, private_key=req.private_key, passphrase=req.passphrase)
-            # 自动启动交互式 shell，使用默认尺寸 120x40
-            # 这样通过 API 创建的会话也会显示在 Web UI 中
-            await session.start_interactive_shell(cols=120, rows=40)
+            # 不在此启动交互式 shell：shell 由前端 WebSocket 连接后启动
+            # （listener 先注册再启动），否则 banner/MOTD 会广播给空监听器而丢失
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
@@ -69,7 +68,7 @@ async def api_create_raw_session(req: CreateRawSessionRequest):
         # 外层总超时兜底：重连目标不可达时不至于让前端请求无限挂起
         async with asyncio.timeout(max(30.0, get_connect_timeout() * 3)):  # type: ignore[attr-defined]
             await session.connect(password=req.password or None)
-            await session.start_interactive_shell(cols=120, rows=40)
+            # shell 由前端 WebSocket 连接后启动（保证登录 banner 不丢失）
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
@@ -108,8 +107,7 @@ async def api_create_session_from_host(req: CreateSessionFromHostRequest):
                 private_key=host.get("private_key") or None,
                 passphrase=host.get("passphrase") or None,
             )
-            # 自动启动交互式 shell，使用默认尺寸 120x40
-            await session.start_interactive_shell(cols=120, rows=40)
+            # shell 由前端 WebSocket 连接后启动（保证登录 banner 不丢失）
     except Exception as e:
         await session_manager.remove_session(session_id)
         raise HTTPException(status_code=400, detail=f"SSH 连接失败: {e!s}")
@@ -388,6 +386,19 @@ async def api_get_session_states(session_ids: list[str]):
         state["connected"] = session.is_connected
         results[sid] = state
     return {"states": results}
+
+
+@router.get("/sessions/{session_id}/cwd")
+async def api_get_session_cwd(session_id: str):
+    """获取 SSH 会话当前目录（cd 命令跟踪；SFTP 打开时定位初始目录）
+
+    返回 None 表示未知（未 cd 过 / cd ~ / cd - / 复合命令），由前端回退默认目录。
+    """
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"cwd": getattr(session, "current_dir", None)}
 
 
 @router.get("/sessions/{session_id}/logs")

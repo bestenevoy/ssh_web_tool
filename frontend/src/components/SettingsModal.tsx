@@ -96,6 +96,7 @@ export function SettingsModal({
   onClose,
 }: Props) {
   const [cacheMsg, setCacheMsg] = useState('')
+  const [historyMsg, setHistoryMsg] = useState('')
   const [openDirMsg, setOpenDirMsg] = useState('')
   const [reloadMsg, setReloadMsg] = useState('')
   const doneBtnRef = useRef<HTMLButtonElement>(null)
@@ -166,6 +167,15 @@ export function SettingsModal({
   const handleClearCache = () => {
     const n = clearFrontendCache()
     setCacheMsg(n > 0 ? `已清理 ${n} 项临时缓存（布局宽度等），重新打开页面后生效` : '没有可清理的临时缓存')
+  }
+
+  const handleClearHistory = async () => {
+    try {
+      const r = await api.clearHistory()
+      setHistoryMsg(r.cleared > 0 ? `已清除 ${r.cleared} 条命令历史记录` : '没有可清除的命令历史记录')
+    } catch {
+      setHistoryMsg('清除失败，请稍后重试')
+    }
   }
 
   /** 在系统文件管理器中打开配置文件所在目录（后端 os.startfile / xdg-open） */
@@ -592,6 +602,11 @@ export function SettingsModal({
             <button className="btn btn-secondary btn-sm" onClick={handleClearCache}>清理</button>
           </div>
           {cacheMsg && <div className="settings-modal-hint">{cacheMsg}</div>}
+          <div className="settings-modal-row">
+            <label title="终端中输入过的命令（跨会话共享，含已忽略的）；清除后无法恢复">命令历史记录</label>
+            <button className="btn btn-secondary btn-sm" onClick={handleClearHistory}>清除</button>
+          </div>
+          {historyMsg && <div className="settings-modal-hint">{historyMsg}</div>}
         </div>
         )}
 
