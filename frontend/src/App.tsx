@@ -31,7 +31,7 @@ import { SearchBar } from './components/SearchBar'
 import { FileEditor } from './components/FileEditor'
 import HistorySearchModal from './components/HistorySearchModal'
 
-type PanelTab = 'quick' | 'sftp' | 'transfers'
+type PanelTab = 'sessions' | 'quick' | 'sftp' | 'transfers'
 
 // ---- 布局宽度持久化 ----
 const LAYOUT_KEY_PREFIX = 'ssh-web-tool-layout-'
@@ -54,8 +54,9 @@ function App() {
   const [connectTimeout, setConnectTimeout] = useState(10)
   const [configFile, setConfigFile] = useState('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  // 右侧面板互斥显示：sessions=会话列表 / tools=工具面板(快速指令/SFTP)，同时只显示一个
-  const [rightMode, setRightMode] = useState<'none' | 'sessions' | 'tools'>('tools')
+  // 右侧面板互斥显示：none=隐藏 / tools=工具面板（会话/快速指令/SFTP/传输 四个 tab）；
+  // 显示与关闭都走顶栏「📋 面板」按钮切换，面板自身不再带标题栏/关闭叉号
+  const [rightMode, setRightMode] = useState<'none' | 'tools'>('tools')
   // 会话列表 / tab 栏共用排序：组间自定义顺序（localStorage 持久化，拖拽更新）
   const [customOrder, setCustomOrder] = useState<string[]>(loadOrder)
   // 分屏（窗口模型）：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗口）；
@@ -71,7 +72,6 @@ function App() {
   // 布局宽度（侧栏/右面板可拖拽调宽，localStorage 持久化；终端是核心区，宽度自适应）
   const [sidebarWidth, setSidebarWidth] = useState(() => loadLayoutWidth('sidebar', 240, 180, 440))
   const [panelWidth, setPanelWidth] = useState(() => loadLayoutWidth('panel', 320, 260, 600))
-  const [sessionPanelWidth, setSessionPanelWidth] = useState(() => loadLayoutWidth('sessionPanel', 240, 200, 480))
   const [panelTab, setPanelTab] = useState<PanelTab>('quick')
   const [modalOpen, setModalOpen] = useState(false)
   const [editingHost, setEditingHost] = useState<Host | null>(null)
@@ -112,21 +112,19 @@ function App() {
     [terminals.terminals]
   )
 
-  // 拖拽调宽：sidebar 向右拖变宽，panel/sessionPanel 向左拖变宽；松开时持久化
-  const startResize = useCallback((side: 'sidebar' | 'panel' | 'sessionPanel') => (e: React.MouseEvent) => {
+  // 拖拽调宽：sidebar 向右拖变宽，panel 向左拖变宽；松开时持久化
+  const startResize = useCallback((side: 'sidebar' | 'panel') => (e: React.MouseEvent) => {
     e.preventDefault()
     const isSidebar = side === 'sidebar'
-    const isSession = side === 'sessionPanel'
     const startX = e.clientX
-    const startW = isSidebar ? sidebarWidth : isSession ? sessionPanelWidth : panelWidth
-    const min = isSidebar ? 180 : isSession ? 200 : 260
-    const max = isSidebar ? 440 : isSession ? 480 : 600
+    const startW = isSidebar ? sidebarWidth : panelWidth
+    const min = isSidebar ? 180 : 260
+    const max = isSidebar ? 440 : 600
     const dir = isSidebar ? 1 : -1
     let last = startW
     const onMove = (ev: MouseEvent) => {
       last = Math.min(max, Math.max(min, startW + dir * (ev.clientX - startX)))
       if (isSidebar) setSidebarWidth(last)
-      else if (isSession) setSessionPanelWidth(last)
       else setPanelWidth(last)
     }
     const onUp = () => {
@@ -138,7 +136,7 @@ function App() {
     document.body.style.cursor = 'col-resize'
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [sidebarWidth, panelWidth, sessionPanelWidth])
+  }, [sidebarWidth, panelWidth])
 
   // 设置快捷键处理函数（Alt+R 打开历史搜索）
   useEffect(() => {
@@ -847,6 +845,19 @@ function App() {
 
   const renderPanelContent = () => {
     switch (panelTab) {
+      case 'sessions':
+        // 会话列表并入工具面板 tab：按主机组聚合，点击切换、支持拖拽排序
+        return (
+          <SessionPanel
+            terminals={terminals.terminals}
+            hosts={hosts}
+            activeId={terminals.activeId}
+            customOrder={customOrder}
+            onOrderChange={setCustomOrder}
+            onSwitch={handleSwitchTerminal}
+            onClose={handleCloseTerminal}
+          />
+        )
       case 'quick':
         return (
           <QuickCommands
@@ -963,14 +974,9 @@ function App() {
         </div>
         <div className="topbar-divider" />
         <button
-          className={`btn btn-sm ${rightMode === 'sessions' ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setRightMode((m) => (m === 'sessions' ? 'none' : 'sessions'))}
-          title="显示/折叠右侧会话列表"
-        >🗂 会话</button>
-        <button
           className={`btn btn-sm ${rightMode === 'tools' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => setRightMode((m) => (m === 'tools' ? 'none' : 'tools'))}
-          title="显示/折叠右侧工具面板（快速指令/SFTP）"
+          title="显示/折叠右侧工具面板（会话/快速指令/SFTP/传输）"
         >📋 面板</button>
         <button
           className={`btn btn-sm ${editorOpen ? 'btn-primary' : 'btn-secondary'}`}
@@ -1116,35 +1122,13 @@ function App() {
           )}
         </div>
 
-        {/* 右侧会话列表（顺序与顶部 tab 一致，宽度可拖拽调整；与工具面板互斥显示） */}
-        {rightMode === 'sessions' && (
-          <div className="session-panel" style={{ width: sessionPanelWidth }}>
-            <div className="resizer session-panel-resizer" onMouseDown={startResize('sessionPanel')} title="拖拽调整宽度" />
-            <div className="session-panel-header">
-              <span className="title">会话列表</span>
-              <button className="btn btn-secondary btn-sm" onClick={() => setRightMode('none')}>✕</button>
-            </div>
-            <SessionPanel
-              terminals={terminals.terminals}
-              hosts={hosts}
-              activeId={terminals.activeId}
-              customOrder={customOrder}
-              onOrderChange={setCustomOrder}
-              onSwitch={handleSwitchTerminal}
-              onClose={handleCloseTerminal}
-            />
-          </div>
-        )}
-
-        {/* 右侧工具面板（宽度可拖拽调整；与会话列表互斥显示） */}
+        {/* 右侧工具面板（宽度可拖拽调整；显示/关闭走顶栏「📋 面板」按钮）
+            标题栏已去除：tab 栏（会话/快速指令/SFTP/传输）本身即导航，避免与标题重复 */}
         {rightMode === 'tools' && (
           <div className="panel" style={{ width: panelWidth }}>
             <div className="resizer panel-resizer" onMouseDown={startResize('panel')} title="拖拽调整宽度" />
-            <div className="panel-header">
-              <span className="title">工具面板</span>
-              <button className="btn btn-secondary btn-sm" onClick={() => setRightMode('none')}>✕</button>
-            </div>
             <div className="panel-tabs">
+              <div className={`panel-tab${panelTab === 'sessions' ? ' active' : ''}`} onClick={() => setPanelTab('sessions')}>🗂 会话</div>
               <div className={`panel-tab${panelTab === 'quick' ? ' active' : ''}`} onClick={() => setPanelTab('quick')}>⚡ 快速指令</div>
               <div
                 className={`panel-tab${panelTab === 'sftp' ? ' active' : ''}${sftpTabBlocked ? ' panel-tab-disabled' : ''}`}
@@ -1153,7 +1137,8 @@ function App() {
               >📁 SFTP</div>
               <div className={`panel-tab${panelTab === 'transfers' ? ' active' : ''}`} onClick={() => setPanelTab('transfers')}>⇅ 传输</div>
             </div>
-            <div className="panel-body">{renderPanelContent()}</div>
+            {/* 会话 tab 内容自带 padding/滚动，外层去掉内边距避免双重留白 */}
+            <div className={`panel-body${panelTab === 'sessions' ? ' panel-body-flush' : ''}`}>{renderPanelContent()}</div>
           </div>
         )}
       </div>
