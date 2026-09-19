@@ -13,7 +13,6 @@ import {
 import { api } from '../lib/api'
 import { DirPickerModal } from './DirPickerModal'
 import { EventLog } from './EventLog'
-import { ApiDocs } from './ApiDocs'
 import type { EventLogItem } from '../types'
 
 interface Props {
@@ -45,12 +44,12 @@ const SHELL_LABELS: Record<string, string> = {
 type SectionId = 'appearance' | 'blocks' | 'highlight' | 'shortcuts' | 'logs' | 'cache'
 
 const SECTIONS: { id: SectionId; label: string }[] = [
-  { id: 'appearance', label: '基本设置' },
-  { id: 'blocks', label: '命令块' },
-  { id: 'highlight', label: '关键字高亮' },
-  { id: 'shortcuts', label: '快捷键' },
-  { id: 'logs', label: '日志与 API' },
-  { id: 'cache', label: '缓存' },
+  { id: 'appearance', label: '🛠️ 基本设置' },
+  { id: 'blocks', label: '🧱 命令块' },
+  { id: 'highlight', label: '🖍️ 关键字高亮' },
+  { id: 'shortcuts', label: '⌨️ 快捷键' },
+  { id: 'logs', label: '📜 日志' },
+  { id: 'cache', label: '🗑️ 缓存' },
 ]
 
 /** 快捷键列表（设置页展示；与实际拦截逻辑保持同步） */
@@ -348,7 +347,7 @@ export function SettingsModal({
           </div>
 
           {/* 日志记录：归属基本设置（开关入口在终端右键菜单，这里只放默认行为配置） */}
-          <div className="settings-modal-title" style={{ marginTop: 14 }}>日志记录</div>
+          <div className="settings-modal-title settings-modal-title-sub">日志记录</div>
           <div className="settings-modal-hint">
             终端默认不记录日志；在终端右键菜单选择「开始记录日志」后才开始写入。
           </div>
@@ -399,7 +398,7 @@ export function SettingsModal({
           )}
 
           {/* 本机终端：归属基本设置 */}
-          <div className="settings-modal-title" style={{ marginTop: 14 }}>本机终端</div>
+          <div className="settings-modal-title settings-modal-title-sub">本机终端</div>
           <div className="settings-modal-row">
             <label title="左侧「默认终端」条目打开的 shell，也是 SSH 断开后自动进入的 shell">默认 shell</label>
             <select value={fallbackShell} onChange={(e) => onSetFallbackShell(e.target.value)}>
@@ -584,13 +583,11 @@ export function SettingsModal({
         </div>
         )}
 
-        {/* 日志与 API：活动日志 + API 文档（原右侧面板「日志」tab 迁入） */}
+        {/* 日志：活动日志（原右侧面板「日志」tab 迁入） */}
         {section === 'logs' && (
         <div className="settings-modal-section">
           <div className="settings-modal-title">活动日志</div>
           <EventLog events={events} onClear={onClearEvents} />
-          <div className="settings-modal-title" style={{ marginTop: 14 }}>API 文档</div>
-          <ApiDocs />
         </div>
         )}
 
