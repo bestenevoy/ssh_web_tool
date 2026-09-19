@@ -1370,10 +1370,12 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 }
 .sftp-wb-title { font-size: calc(14px * var(--ui-fs-scale)); font-weight: 600; color: var(--accent); letter-spacing: .3px; }
 .sftp-wb-close {
-  background: transparent; border: none; cursor: pointer; color: var(--text-secondary);
-  font-size: calc(15px * var(--ui-fs-scale)); padding: 4px 10px; border-radius: 6px; line-height: 1;
+  display: inline-flex; align-items: center; gap: 4px;
+  background: transparent; border: 1px solid var(--border-color); cursor: pointer; color: var(--text-secondary);
+  font-size: calc(12px * var(--ui-fs-scale)); font-family: inherit; padding: 4px 12px; border-radius: var(--r-md); line-height: 1.4;
+  transition: background .12s, color .12s, border-color .12s;
 }
-.sftp-wb-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+.sftp-wb-close:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-light); }
 .sftp-wb-body {
   display: flex; flex-direction: row; flex: 1; min-height: 0; /* 左右分栏 */
 }

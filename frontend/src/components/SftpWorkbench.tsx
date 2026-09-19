@@ -331,8 +331,8 @@ export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: P
       <div className="sftp-wb">
         <div className="sftp-wb-header">
           <span className="sftp-wb-title">🗂 SFTP 双窗工作台</span>
-          <button className="sftp-wb-close" onClick={onClose} title="关闭 (ESC)">
-            ✕
+          <button className="sftp-wb-close" onClick={onClose} title="返回 (ESC)">
+            ← 返回
           </button>
         </div>
         <div className="sftp-wb-body">
