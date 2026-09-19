@@ -207,6 +207,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   const handleTerminalInput = useCallback((session_id: string, data: string) => {
     const inst = terminalsRef.current.get(session_id)
     if (!inst) return
+    // 重连建立中：不接受任何用户输入（disableStdin 挡键盘，这里兜底挡粘贴等路径）
+    if (inst.reconnecting) return
 
     // 回车：先由前端按键盘输入即时记录（兜底，保证任何 PS1 环境下都有历史），
     // 后端随后解析终端回显行（含 Tab 补全/历史翻查后的真实命令）：
@@ -576,6 +578,13 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   }, [])
 
   const setReconnecting = useCallback((session_id: string, value: boolean) => {
+    // 重连期间该会话只读：终端不盖遮罩（历史保持可见），键盘/粘贴输入全部屏蔽，
+    // 进度与结果由终端内 [重连] 提示呈现
+    const inst = terminalsRef.current.get(session_id)
+    if (inst) {
+      inst.reconnecting = value
+      inst.term.options.disableStdin = value
+    }
     setTerminals((prev) => {
       const cur = prev.get(session_id)
       if (!cur || cur.reconnecting === value) return prev

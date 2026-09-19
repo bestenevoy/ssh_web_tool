@@ -42,7 +42,7 @@ export interface WsSwitchedToLocal {
 }
 
 export interface WsSshDisconnected {
-  type: 'ssh_disconnected' // SSH 传输层断开（不切本机）：通知后服务端关闭 WebSocket
+  type: 'ssh_disconnected' // SSH 已断开（仅页面重开恢复路径）：服务端发送后关闭 WebSocket，前端 onclose 走断开态
   data: string
 }
 

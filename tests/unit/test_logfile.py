@@ -160,7 +160,9 @@ def test_feed_log_flush_threshold(tmp_path):
     assert s._log_buf == ""  # 已同步 flush
     with open(s._log_file, encoding="utf-8") as f:
         content = f.read()
-    assert content.count("x") == s.LOG_FLUSH_MAX + 100
+    # 跳过会话元信息头再计数：头部文案也含字母 x，全文 count 会因头部变化而误报
+    body = content[content.find("=" * 46) + 46 :]
+    assert body.count("x") == s.LOG_FLUSH_MAX + 100
 
 
 def test_get_history_logs_flushes_before_read(tmp_path):

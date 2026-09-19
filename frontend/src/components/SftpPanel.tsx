@@ -40,7 +40,13 @@ export function SftpPanel({ sessionId }: Props) {
   }
 
   useEffect(() => {
-    if (sessionId) loadList('/')
+    if (!sessionId) return
+    // 打开/切换会话时默认定位到当前终端所在目录（cd 跟踪；未知或失败回退根目录）
+    let alive = true
+    api.getSessionCwd(sessionId)
+      .then((r) => { if (alive) loadList(r.cwd || '/') })
+      .catch(() => { if (alive) loadList('/') })
+    return () => { alive = false }
   }, [sessionId])
 
   useEffect(() => {

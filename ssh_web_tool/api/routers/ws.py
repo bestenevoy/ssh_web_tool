@@ -18,6 +18,7 @@ from ssh_web_tool.ws_protocol import (
     SERVER_INFO,
     SERVER_OUTPUT,
     SERVER_PONG,
+    SERVER_SSH_CONNECTED,
     SERVER_SSH_DISCONNECTED,
     SERVER_SWITCHED_TO_LOCAL,
 )
@@ -104,13 +105,8 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             "terminal_name": f"本机 {label}",
                         }
                     )
-                # SSH 断开通知（不切本机终端）：推送后关闭 WebSocket，
-                # 前端 onclose 走断开态（Tab 划线 + 重连按钮），由用户手动重连
-                disconnect = session.take_disconnect_notice()
-                if disconnect:
-                    await websocket.send_json({"type": SERVER_SSH_DISCONNECTED, "data": disconnect})
-                    await websocket.close()
-                    return
+                # 注：传输层断开不再在此发送 ssh_disconnected——由全局监控自动切回本机
+                # shell（走上方 switched_to_local）；ssh_disconnected 仅页面重开恢复时使用
                 # SSH 连接成功通知（手动重连 API 触发 switch_to_ssh 后写入）：
                 # 推送 ssh_connected，前端据此更新终端类型/标签/重连凭据（复用当前实例）
                 conn_info = session.take_ssh_connected_notice()

@@ -13,6 +13,7 @@ from ssh_web_tool.api.models import (
     RunCommandRequest,
     SessionRecordRequest,
 )
+from ssh_web_tool.api.routers.ws import _ACTIVE_WS
 from ssh_web_tool.config import (
     get_connect_timeout,
     get_fallback_local_shell,
@@ -24,7 +25,6 @@ from ssh_web_tool.deps import get_event_bus, get_history_db, get_session_manager
 router = APIRouter(prefix="/api", tags=["sessions"])
 
 
-from ssh_web_tool.api.routers.ws import _ACTIVE_WS
 @router.post("/sessions")
 async def api_create_session(req: CreateSessionRequest):
     """创建 SSH 会话并连接，自动启动交互式 shell（会显示在 Web UI 中）"""

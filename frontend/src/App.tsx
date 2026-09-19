@@ -74,7 +74,7 @@ function App() {
   const [panelTab, setPanelTab] = useState<PanelTab>('quick')
   const [modalOpen, setModalOpen] = useState(false)
   const [editingHost, setEditingHost] = useState<Host | null>(null)
-  const [status, setStatus] = useState('就绪')
+  const [status, setStatus] = useState('')
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sprofOpen, setSprofOpen] = useState(false) // 终端特性档案弹窗（顶栏 📋）
@@ -476,7 +476,6 @@ function App() {
     if (!target) {
       // 无凭据：终端提示原因，保持断开态（与断开流程一致的收尾）
       inst.term.write('\r\n\x1b[31m[重连] 找不到该终端的主机连接信息，无法重连\x1b[0m\r\n')
-      setStatus('重新连接失败：找不到主机连接信息')
       return
     }
 
@@ -484,7 +483,6 @@ function App() {
     const port = target.kind === 'raw' ? target.conn.port : target.host.port
     terminals.setReconnecting(session_id, true)
     inst.term.write(`\r\n\x1b[33m[重连] 正在连接 ${target.display}:${port} ...\x1b[0m\r\n`)
-    setStatus(`正在重新连接 ${target.display}...`)
 
     try {
       // ③ 密码解析：未保存密码且无私钥 → 弹窗输入（取消则按断开流程收尾）
@@ -496,7 +494,6 @@ function App() {
         const pw = await askPassword(`连接 ${target.display}`)
         if (pw === null) {
           inst.term.write('\r\n\x1b[33m[重连] 已取消连接\x1b[0m\r\n')
-          setStatus('已取消重连')
           return
         }
         password = pw
@@ -523,7 +520,6 @@ function App() {
       // ⑤ 失败统一走断开流程：终端写失败原因、保持断开态（重连按钮可用），不弹 alert
       const msg = (e as Error)?.message || '未知错误'
       inst.term.write(`\r\n\x1b[31m[重连] 连接失败：${msg}\x1b[0m\r\n`)
-      setStatus(`重新连接失败：${msg}`)
     } finally {
       terminals.setReconnecting(session_id, false)
     }

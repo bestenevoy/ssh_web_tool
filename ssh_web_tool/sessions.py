@@ -26,8 +26,8 @@ from .ps_history import PSReadlineTailer, TailerLike
 from .session_log import (
     SessionLog,
     build_log_file,
-    resolve_existing_log,
     build_shell_meta,
+    resolve_existing_log,
 )
 from .ws_protocol import SERVER_SSH_CONNECTED
 
@@ -277,10 +277,6 @@ class SSHSession:
         # WebSocket read_output 循环取出后发送 switched_to_local 消息给前端，
         # 前端据此更新终端类型和 UI 状态（如隐藏断开按钮）
         self._switch_notice: str | None = None
-        # SSH 断开通知（不切本机终端）：全局监控检测到传输层断开时设置，
-        # WebSocket read_output 循环取出后发送 ssh_disconnected 消息并关闭连接，
-        # 前端走断开态（Tab 划线 + 重连按钮），由用户手动重连
-        self._disconnect_notice: str | None = None
         self._closed_notice: str | None = None  # 会话关闭通知（本机终端 exit 等）
 
     # ---------- 日志文件命名/生命周期（逻辑在 SessionLog 组件） ----------
@@ -348,16 +344,6 @@ class SSHSession:
         """取出并清空 SSH 连接成功通知（WebSocket read_output 循环调用）"""
         n = self._ssh_connected_notice
         self._ssh_connected_notice = None
-        return n
-
-    def set_disconnect_notice(self, msg: str) -> None:
-        """设置 SSH 断开通知（不切本机 shell，仅通知前端走断开态：Tab 划线 + 重连按钮）"""
-        self._disconnect_notice = msg
-
-    def take_disconnect_notice(self) -> str | None:
-        """取出并清空 SSH 断开通知（read_output 循环调用，只取一次）"""
-        n = getattr(self, "_disconnect_notice", None)
-        self._disconnect_notice = None
         return n
 
     @property
@@ -1068,6 +1054,7 @@ class SSHSession:
             self.current_dir = None  # 相对 cd 但当前目录未知
             return
         import posixpath
+
         self.current_dir = posixpath.normpath(base)
 
     def resize_local(self, cols: int, rows: int):

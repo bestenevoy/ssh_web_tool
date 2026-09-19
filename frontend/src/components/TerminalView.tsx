@@ -104,11 +104,12 @@ export function TerminalView({
             onMouseDown={(e) => { if (e.button === 0 && idx >= 0) onPaneClick?.(idx as PaneIndex, t.session_id) }}
             onContextMenu={(e) => onTerminalContextMenu?.(t.session_id, e)}
           >
-            {(t.pending || t.reconnecting || t.local_starting) && (
+            {/* 重连不盖遮罩（历史内容需可见、进度提示在终端内），仅初始连接/启动本机终端时遮罩 */}
+            {(t.pending || t.local_starting) && (
               <div className="terminal-starting">
                 <div className="terminal-starting-spinner" />
                 <div className="terminal-starting-text">
-                  {t.pending ? '正在连接，请稍候…' : t.reconnecting ? '正在重新连接，请稍候…' : '正在启动本机终端…'}
+                  {t.pending ? '正在连接，请稍候…' : '正在启动本机终端…'}
                 </div>
               </div>
             )}
