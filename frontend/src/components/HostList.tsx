@@ -262,7 +262,8 @@ export const HostList = memo(function HostList({ hosts, groups, activeHostId, de
                         </div>
                       )}
                     </div>
-                    {h.terminal_count && h.terminal_count > 0 && (
+                    {/* 注意：不能写 a && a>0 && <jsx>——a 为 0 时短路结果是数字 0，React 会渲染出「0」 */}
+                    {(h.terminal_count ?? 0) > 0 && (
                       <span className="term-count">{h.terminal_count}</span>
                     )}
                   </div>

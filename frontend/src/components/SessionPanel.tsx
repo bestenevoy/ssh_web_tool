@@ -3,6 +3,7 @@ import type { TerminalInstance } from '../lib/useTerminals'
 import type { Host } from '../types'
 import { groupKeyOf, groupLabelOf } from '../lib/sessionOrder'
 import { profileOf } from '../lib/shellProfiles'
+import { sessionConnState } from '../lib/terminalDisconnect'
 
 interface Props {
   terminals: Map<string, TerminalInstance>
@@ -103,49 +104,33 @@ export function SessionPanel({ terminals, hosts, activeId, customOrder, onOrderC
     )
   }
 
-  // 会话条目标题（区分同 ip:port 不同用户 / ssh 链接会话 + shell 特性）
-  const itemTitle = (t: TerminalInstance, hostMap: Map<string, Host>): string => {
-    const parts: string[] = []
-    if (t.ssh_conn) {
-      // ssh 链接会话：完整连接信息
-      parts.push(`ssh ${t.ssh_conn.username}:${t.ssh_conn.password ? '***' : ''}@${t.ssh_conn.host}:${t.ssh_conn.port}`)
-    } else if (t.type !== 'local') {
-      const h = hostMap.get(t.host_id)
-      parts.push(`${h?.username || ''}@${h?.host || t.host_name}${h?.port && h.port !== 22 ? `:${h.port}` : ''}`)
-    }
-    parts.push(t.terminal_name)
-    if (t.reconnecting) parts.push('（重连中…）')
-    if (t.pending) parts.push('（连接中…）')
-    if (t.disconnected) parts.push('（已断开）')
-    const p = profileOf(t)
-    return parts.join(' · ') + `\nShell: ${p.label}（${p.summary}）\n清屏: ${p.clearCmd}\n退出: ${p.exitCmd}`
-  }
-  // 条目主文本：ssh 链接会话显示完整「ssh user:pass@ip:port」；已保存主机会话显示
-  // username@host（同 ip:port 不同用户可区分）；本地显示 terminal_name
-  const itemText = (t: TerminalInstance): string => {
-    if (t.ssh_conn) return `ssh ${t.ssh_conn.username}:${t.ssh_conn.password}@${t.ssh_conn.host}:${t.ssh_conn.port}`
-    if (t.type !== 'local' && !t.host_id) return t.host_name || t.terminal_name
-    return t.terminal_name
-  }
-
   const hostMap = new Map(hosts.map((h) => [h.id, h]))
+  // 条目主文本：「链接类型 · ip:port」（默认 ssh；本机终端为 local）。
+  // ip:port 依次取：本地拦截 ssh 的原始连接信息 → 已保存主机配置 → host_name 兜底。
+  // 不再展示 user:pass（密码明文进列表有泄露风险，且过长挤压名称显示）
+  const itemText = (t: TerminalInstance): string => {
+    if (!t.ssh_conn && t.type === 'local') return `local · ${t.terminal_name}`
+    const h = hostMap.get(t.host_id)
+    const ip = t.ssh_conn?.host || h?.host || t.host_name
+    const port = t.ssh_conn?.port ?? h?.port ?? 22
+    return `ssh · ${ip}:${port}`
+  }
 
   // 会话条目：状态点 + 名称 + shell 徽标 + 关闭（两处渲染共用）
   const renderItem = (t: TerminalInstance) => {
     const p = profileOf(t)
+    const conn = sessionConnState(t)
     return (
       <div
         key={t.session_id}
         className={`session-item${t.session_id === activeId ? ' active' : ''}`}
         onClick={() => onSwitch(t.session_id)}
-        title={itemTitle(t, hostMap)}
       >
-        <span className={`status-dot${t.disconnected ? ' disconnected' : t.reconnecting || t.pending ? ' reconnecting' : ''}`} />
+        <span className={`status-dot${conn === 'disconnected' ? ' disconnected' : conn === 'connecting' ? ' reconnecting' : ''}`} />
         <span className="sess-name">{itemText(t)}</span>
         <span
           className="sess-shell"
           style={{ color: p.badgeColor, background: p.badgeBg }}
-          title={`${p.label}（${p.summary}）`}
         >{p.badge}</span>
         <span
           className="sess-close"
