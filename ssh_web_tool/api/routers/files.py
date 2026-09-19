@@ -5,6 +5,7 @@
 - 编码：utf-8 → gbk → latin-1 依次探测；写回使用读入时探测到的编码
 """
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -51,6 +52,7 @@ async def api_read_file(path: str, start_line: int = 0, max_lines: int = MAX_PAG
     - 返回 readonly 标记：文件 > 20MB 时只读（前端切分页查看模式）
     - 大文件按行分页：start_line 起最多返回 max_lines 行（上限 5000），has_more 表示还有更多
     - 返回探测到的 encoding，前端保存时原样传回以保持编码一致
+    - 文件 IO（全量读入/逐行扫描/解码）是同步阻塞操作，放入工作线程，避免卡事件循环
     """
     p = _resolve_path(path)
     if not p.exists():
@@ -62,49 +64,7 @@ async def api_read_file(path: str, start_line: int = 0, max_lines: int = MAX_PAG
     max_lines = max(1, min(int(max_lines), MAX_PAGE_LINES))
     start_line = max(0, int(start_line))
     try:
-        with open(p, "rb") as f:
-            sample = f.read(8192)
-            if b"\x00" in sample:
-                raise HTTPException(status_code=400, detail="二进制文件不支持在编辑器中打开")
-            encoding = _detect_encoding(sample)
-            f.seek(0)
-            if not readonly:
-                # 小文件：全量读入（universal newlines 统一 \r\n → \n）
-                content = f.read().decode(encoding)
-                lines = content.split("\n")
-                # split 会把结尾换行多切一个空元素：去掉以保真行数
-                if lines and lines[-1] == "":
-                    lines.pop()
-                return {
-                    "path": str(p),
-                    "size": size,
-                    "readonly": False,
-                    "encoding": "utf-8" if encoding == "utf-8" else encoding,
-                    "content": "\n".join(lines),
-                    "start_line": 0,
-                    "lines_returned": len(lines),
-                    "has_more": False,
-                }
-            # 大文件：跳过 start_line 行后读 max_lines 行（流式，不全量加载）
-            buf: list[str] = []
-            pos = 0
-            with open(p, encoding=encoding, errors="replace", newline=None) as tf:
-                for line in tf:
-                    if pos >= start_line and len(buf) < max_lines:
-                        buf.append(line.rstrip("\n").rstrip("\r"))
-                    elif pos >= start_line:
-                        break
-                    pos += 1
-            return {
-                "path": str(p),
-                "size": size,
-                "readonly": True,
-                "encoding": encoding,
-                "content": "\n".join(buf),
-                "start_line": start_line,
-                "lines_returned": len(buf),
-                "has_more": pos > start_line + len(buf),
-            }
+        return await asyncio.to_thread(_read_file_sync, p, size, readonly, start_line, max_lines)
     except HTTPException:
         raise
     except PermissionError:
@@ -113,12 +73,60 @@ async def api_read_file(path: str, start_line: int = 0, max_lines: int = MAX_PAG
         raise HTTPException(status_code=500, detail=f"读取文件失败: {e}")
 
 
+def _read_file_sync(p: Path, size: int, readonly: bool, start_line: int, max_lines: int) -> dict:
+    """同步读取文件（在工作线程内执行；HTTPException 照常向上抛出由 FastAPI 处理）"""
+    with open(p, "rb") as f:
+        sample = f.read(8192)
+        if b"\x00" in sample:
+            raise HTTPException(status_code=400, detail="二进制文件不支持在编辑器中打开")
+        encoding = _detect_encoding(sample)
+        f.seek(0)
+        if not readonly:
+            # 小文件：全量读入（universal newlines 统一 \r\n → \n）
+            content = f.read().decode(encoding)
+            lines = content.split("\n")
+            # split 会把结尾换行多切一个空元素：去掉以保真行数
+            if lines and lines[-1] == "":
+                lines.pop()
+            return {
+                "path": str(p),
+                "size": size,
+                "readonly": False,
+                "encoding": "utf-8" if encoding == "utf-8" else encoding,
+                "content": "\n".join(lines),
+                "start_line": 0,
+                "lines_returned": len(lines),
+                "has_more": False,
+            }
+        # 大文件：跳过 start_line 行后读 max_lines 行（流式，不全量加载）
+        buf: list[str] = []
+        pos = 0
+        with open(p, encoding=encoding, errors="replace", newline=None) as tf:
+            for line in tf:
+                if pos >= start_line and len(buf) < max_lines:
+                    buf.append(line.rstrip("\n").rstrip("\r"))
+                elif pos >= start_line:
+                    break
+                pos += 1
+        return {
+            "path": str(p),
+            "size": size,
+            "readonly": True,
+            "encoding": encoding,
+            "content": "\n".join(buf),
+            "start_line": start_line,
+            "lines_returned": len(buf),
+            "has_more": pos > start_line + len(buf),
+        }
+
+
 @router.post("/write")
 async def api_write_file(req: FileWriteRequest):
     """写入本地文件（编辑器保存）
 
     - 已存在且 > 20MB 的文件拒绝写入（只读查看场景）
     - encoding 限定白名单（与读取探测一致），保持文件原编码
+    - 同步写盘放入工作线程，避免大内容写阻塞事件循环
     """
     p = _resolve_path(req.path)
     if p.exists() and p.stat().st_size > MAX_EDIT_SIZE:
@@ -127,14 +135,19 @@ async def api_write_file(req: FileWriteRequest):
     if len(req.content.encode(encoding, errors="replace")) > MAX_EDIT_SIZE:
         raise HTTPException(status_code=413, detail="保存内容过大（>20MB）")
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w", encoding=encoding, newline="") as f:
-            f.write(req.content)
-        return {"path": str(p), "size": p.stat().st_size, "encoding": encoding}
+        return await asyncio.to_thread(_write_file_sync, p, req.content, encoding)
     except PermissionError:
         raise HTTPException(status_code=403, detail="没有写入该文件的权限")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"写入文件失败: {e}")
+
+
+def _write_file_sync(p: Path, content: str, encoding: str) -> dict:
+    """同步写入文件（在工作线程内执行）"""
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding=encoding, newline="") as f:
+        f.write(content)
+    return {"path": str(p), "size": p.stat().st_size, "encoding": encoding}
 
 
 @router.get("/list")

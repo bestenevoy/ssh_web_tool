@@ -6,13 +6,15 @@ flush 策略：静默期（flush_delay）或缓冲超阈值（flush_max）时一
 只记录最终显示内容——输出流由 TerminalMirror（pyte 终端镜像）回放到虚拟
 屏幕，flush 时提取屏幕上新显示的行（与终端显示构造性一致：退格/\\r 覆盖/
 光标重绘自然收敛，bell 等控制字符不进入文本，滚出行与 clear 被擦内容先转录，
-alt-screen 全屏应用内容不混入）。
+alt-screen 全屏应用内容不混入）。镜像仅在开启记录时回放；未开启时输出存入
+有界近期环，首次开启时回放进镜像，保证连接 banner 等早期输出仍随日志落盘。
 
 逻辑原为 SSHSession 中的日志一节；SSHSession 保留 LOG_DIR/_logger_cache 等
 兼容属性并在 __init__ 装配本组件（测试隔离依赖这些类属性）。
 """
 
 import asyncio
+import collections
 import datetime
 import logging
 import os
@@ -23,6 +25,9 @@ from .terminal_mirror import TerminalMirror
 
 _LOG_NAME_SAFE_RE = re.compile(r"[^\w.\-]")
 _LOG_TIME_FMT = "%Y%m%d-%H%M%S"
+# 未开启记录时的近期输出环上限（字符）：开启记录时回放以保留 banner/MOTD，
+# 有界内存，不随会话时长增长
+_RING_CHARS = 256 * 1024
 
 
 def sanitize_host(host: str) -> str:
@@ -60,7 +65,6 @@ def build_log_file(session_id: str, host: str, created_at: float, log_dir: str) 
     """新会话日志文件名：{host}_{start}_running_{session_id}.log"""
     start = fmt_time(created_at)
     return os.path.join(log_dir, f"{sanitize_host(host)}_{start}_running_{session_id}.log")
-
 
 
 # 每种终端/Shell 的特性要点（与前端 shellProfiles.ts 对应）。写入会话日志文件头，
@@ -142,9 +146,12 @@ class SessionLog:
         self._ever_enabled = False  # 是否开启过记录（区分首次开启与暂停后恢复）
         self._flush_task: asyncio.Task | None = None
         # 终端镜像：输出流回放到虚拟屏幕，flush 时提取"新显示"的行。
-        # 会话创建起就持续 feed（不依赖 enabled）：开启记录晚于连接时，连接
-        # 信息 banner 等早期输出随首次 flush 进入日志（用户明确要求保留）
+        # 仅在开启记录时回放；未开启时最近输出进入有界环 _ring，首次开启
+        # （enable_with）时先回放进镜像再 flush——连接 banner 等早期输出仍能
+        # 入日志（用户明确要求保留），而长会话不记录时不空转 pyte 回放
         self._mirror = TerminalMirror()
+        self._ring: collections.deque[str] = collections.deque()
+        self._ring_size = 0  # 环内总字符数（O(1) 淘汰判断）
 
     def enable_with(
         self, log_file: str, log_dir: str, cache: dict[str, logging.Logger], meta: list[str] | None = None
@@ -159,10 +166,22 @@ class SessionLog:
             # 暂停后恢复：暂停期间累积的镜像行不转录（与"暂停期输出被丢弃"一致），
             # drain 丢弃返回值即可——屏幕快照保留，恢复后只记录新行不重复
             self._mirror.drain()
+        first_enable = not self._ever_enabled
         self._ever_enabled = True
         self.log_file = log_file
         self._logger = self.get_or_create_logger(self._session_id, log_file, log_dir, cache)
         self.enabled = True
+        # 环只在首次开启时回放进镜像（banner/MOTD 随立即转录入日志）；
+        # 暂停后恢复不回放（暂停期输出按语义丢弃），两种场景都清环释放内存
+        if self._ring:
+            if first_enable:
+                try:
+                    for chunk in self._ring:
+                        self._mirror.feed(chunk)
+                except Exception:
+                    pass
+            self._ring.clear()
+            self._ring_size = 0
         # 会话元信息头部（Shell 特性 / 防误操作）：仅在新文件（空文件）时写一次，
         # 恢复/重连续写旧文件不重复写头部
         if meta:
@@ -265,24 +284,34 @@ class SessionLog:
             self.flush_now()  # 先落盘暂停前的尾部，再停
             self.enabled = False
             self.buffer = ""
+            self._ring.clear()  # 已开启过：镜像即当前状态，停记后无需再囤近期输出
+            self._ring_size = 0
 
     def feed(self, data: str) -> None:
         """输出进入日志管道：镜像屏幕回放 + 聚合缓冲触发（替代逐块落盘）
 
-        镜像始终 feed（与是否开启记录无关）：连接信息等早期输出在开启记录时
-        也能进入日志；未开启时只累积不落盘、不触发 flush 调度。
+        开启记录时回放镜像；未开启时只存有界近期环（banner/MOTD 供首次开启时
+        回放），不做 pyte 回放——长会话不记录时输出热路径只剩 O(1) 追加。
         """
+        if not self.enabled:
+            self._ring_append(data)
+            return
         try:
             self._mirror.feed(data)
         except Exception:
             pass  # 镜像回放失败不影响主流程（输出仍会广播给前端）
-        if not self.enabled:
-            return
         self.buffer += data
         if len(self.buffer) >= self.flush_max:
             self.flush_now()
         else:
             self._schedule_flush()
+
+    def _ring_append(self, data: str) -> None:
+        """未开启记录时把输出存入有界近期环（超上限淘汰最旧），供首次开启回放"""
+        self._ring.append(data)
+        self._ring_size += len(data)
+        while self._ring_size > _RING_CHARS and self._ring:
+            self._ring_size -= len(self._ring.popleft())
 
     def _schedule_flush(self) -> None:
         """有新输出进入日志缓冲时调度一次延迟 flush（已调度则不重复）"""
@@ -343,7 +372,9 @@ class SessionLog:
     # ---------- 历史读取 ----------
 
     def resize(self, cols: int, rows: int) -> None:
-        """终端尺寸变化时同步镜像屏幕（未开启记录也同步，保证镜像就绪）"""
+        """终端尺寸变化时同步镜像屏幕（未开启记录时镜像尚未回放，跳过）"""
+        if not self.enabled and not self._ever_enabled:
+            return  # 环中近期输出稍后按当前尺寸回放到镜像，无需提前 resize
         try:
             self._mirror.resize(cols, rows)
         except Exception:

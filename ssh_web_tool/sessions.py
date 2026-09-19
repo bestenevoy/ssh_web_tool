@@ -110,6 +110,11 @@ class _DirectPtyWrapper:
             return None
 
 
+# AttachConsole/FreeConsole 是进程级状态：多会话同时注入 Ctrl+C 时必须串行，
+# 否则线程 A 的控制台挂卸会破坏线程 B 正在进行的 attach/取句柄流程
+_ctrl_c_console_lock = threading.Lock()
+
+
 def _send_ctrl_c_to_console(child_pid: int) -> bool:
     """向本地 shell 的控制台发送真实 Ctrl+C（winpty issue #116 的修复方式）
 
@@ -937,6 +942,12 @@ class SSHSession:
             self._local_reader_task.cancel()
             self._local_reader_task = None
 
+    @staticmethod
+    def _inject_ctrl_c(child_pid: int) -> bool:
+        """在工作线程中向本地 shell 控制台注入 Ctrl+C（加锁串行，见 _ctrl_c_console_lock）"""
+        with _ctrl_c_console_lock:
+            return _send_ctrl_c_to_console(child_pid)
+
     async def write_local(self, data: str):
         """向前台本地 shell 写入输入（转码为 str；WinPTY 期望 str）"""
         if self._local_proc is not None:
@@ -944,8 +955,10 @@ class SSHSession:
                 # Ctrl+C：WinPTY 写入 \x03 只会转成 GenerateConsoleCtrlEvent，无法打断
                 # cmd/PSReadLine 的 ReadConsole（无 ^C 回显、不清除当前行、无新提示符）。
                 # 优先向控制台窗口发送真实 Ctrl+C 键事件（winpty issue #116 修复方式）；
-                # 失败（如无控制台权限）则回退写入 \x03（agent 仍会触发运行中程序的中断）
-                if "\x03" in data and _send_ctrl_c_to_console(getattr(self._local_proc, "pid", 0)):
+                # 失败（如无控制台权限）则回退写入 \x03（agent 仍会触发运行中程序的中断）。
+                # 注入含 SendMessageTimeout（最长 2s×4）与控制台挂卸，属阻塞调用，
+                # 必须移入线程执行，避免卡住事件循环（按键实时路径）
+                if "\x03" in data and await asyncio.to_thread(self._inject_ctrl_c, getattr(self._local_proc, "pid", 0)):
                     data = data.replace("\x03", "")
                 # 回退路径：\x03 写入时给 PSReadLine 的输入缓冲残留一个字面量 'c'，
                 # 补退格吃掉残留字符；cmd 无此问题
@@ -1152,7 +1165,8 @@ class SSHSession:
         self.reset_local_input_line()
         if self._local_proc is not None:
             try:
-                self._local_proc.terminate(force=True)
+                # terminate 内含 time.sleep，放入线程避免卡事件循环
+                await asyncio.to_thread(self._local_proc.terminate, True)
             except Exception:
                 pass
             self._local_proc = None
@@ -1200,7 +1214,7 @@ class SSHSession:
         self.reset_local_input_line()
         if self._local_proc is not None:
             try:
-                self._local_proc.terminate(force=True)
+                await asyncio.to_thread(self._local_proc.terminate, True)  # 含 sleep，勿卡事件循环
             except Exception:
                 pass
             self._local_proc = None
@@ -1882,7 +1896,7 @@ class SSHSession:
         await self.close_sftp()
         if self._local_proc is not None:
             try:
-                self._local_proc.terminate(force=True)
+                await asyncio.to_thread(self._local_proc.terminate, True)  # 含 sleep，勿卡事件循环
             except Exception:
                 pass
             self._local_proc = None
