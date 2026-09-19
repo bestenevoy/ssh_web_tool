@@ -42,6 +42,7 @@ self.process.change_terminal_size(cols, rows)  # ✓ 正确（和文档相反）
 1. **xterm.js 自动换行被禁用**：`term.reset()` 可能重置 DECSET 模式，需要发送 `\x1b[?7h` 重新启用
 2. **PTY 创建时用默认尺寸**：WebSocket 连接时先等待前端的 resize 消息，再启动 shell
 3. **前端容器 display:none 时 fit 计算错误**：终端激活后重新 fit + resync
+4. **窗口缩放终端不跟随**：pywebview 最大化/还原不一定派发 `window.resize`，重 fit 信号统一来自终端容器的 ResizeObserver（防 churn 要点见 frontend-dev.md 关键设计点 4）
 
 ## 修复检查清单
 
