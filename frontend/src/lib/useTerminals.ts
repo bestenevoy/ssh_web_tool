@@ -390,14 +390,17 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, sendInput, ensureFit])
 
   const restoreTerminals = useCallback(async () => {
+    if (typeof document !== 'undefined' && document.hidden) return
     try {
       const { terminals: active } = await api.listActiveTerminals()
       const s = settingsRef.current
       // 并行恢复所有终端（原 for...of 串行创建，3 个终端延迟累加）
       const toRestore = active.filter(t => {
+        if (t.ws_active) return false
         return !knownTerminalSessions.has(t.session_id) && !terminalsRef.current.has(t.session_id)
       })
       await Promise.all(toRestore.map(async (t) => {
+        knownTerminalSessions.add(t.session_id)  // 立即登记，防并发 restore 重复建实例
         // 统一工厂（P0-③）：与 createTerminal 同一套装配（xterm/WS/消息路由/洪水供给器），
         // restore 与新建行为一致；历史由 factory 在 ws.onopen 中按 historyLimit 回放
         const instance = createTerminalInstance({
@@ -448,6 +451,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     restoreTerminals()
     const timer = setInterval(() => {
       syncActiveSessions()
+      if (document.hidden) return
       restoreTerminals()
     }, 10000)
     return () => clearInterval(timer)

@@ -518,9 +518,9 @@ export function attachBlockBar(
       // 多块按块序拼接，块间空行分隔
       writeBlockClipboard(blocks.map(blockText).filter(Boolean).join('\n\n'))
     },
-    notifySubmit(lines = 1) {
+    notifySubmit() {
       // tracker 热重建后此处闭包引用的是最新实例（let tracker）
-      tracker.notifySubmit(lines)
+      tracker.notifySubmit()
     },
     dispose() {
       disposed = true

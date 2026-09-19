@@ -55,6 +55,8 @@ export interface Session {
   has_shell: boolean
   created_at: number
   last_active: number
+  // 该会话当前是否有活跃 WebSocket（其他页面正在使用）：restore 时跳过，避免抢占连接
+  ws_active?: boolean
 }
 
 export interface ActiveTerminal {
@@ -69,7 +71,9 @@ export interface ActiveTerminal {
   // 本地终端拦截 SSH 命令建立的会话（无已保存主机）：原始连接信息，重连凭据
   ssh_conn?: { host: string; port: number; username: string; password: string } | null
   created_at: number
-  last_active: number
+  last_active: number
+  // 该会话当前是否有活跃 WebSocket（其他页面正在使用）：restore 时跳过，避免抢占连接
+  ws_active?: boolean
 }
 
 // 快捷指令预操作（执行命令前依次执行）
