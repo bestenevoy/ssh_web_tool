@@ -11,6 +11,9 @@ def _make_fake_session():
             self.is_connected = True
             self.written = []  # [(path, content)]
 
+        def is_local(self):
+            return False  # 模拟远程会话（SFTP 路由对 local 会话直接 400）
+
         async def write_file(self, path, content):
             self.written.append((path, content))
             return True

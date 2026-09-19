@@ -198,3 +198,55 @@ def test_close_session_route(fake_sessions, shell_session):
         r = c.delete("/api/sessions/sess-1")
     assert r.status_code == 200
     assert fake_sessions.get_session("sess-1") is None
+
+
+# ---------- cwd 端点（SFTP 首次打开定位终端目录） ----------
+
+
+def test_cwd_uses_cd_tracking(shell_session):
+    """cd 跟踪有值时优先返回跟踪值"""
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    shell_session.current_dir = "/opt/app"
+    with TestClient(app) as c:
+        r = c.get("/api/sessions/sess-1/cwd")
+    assert r.status_code == 200
+    assert r.json()["cwd"] == "/opt/app"
+
+
+def test_cwd_falls_back_to_remote_home(shell_session, monkeypatch):
+    """未 cd 过（current_dir None）：用 SFTP getcwd() 取 shell 工作目录（新连接=home）"""
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    class FakeSftp:
+        async def getcwd(self):
+            return "/root"
+
+    async def fake_get_sftp():
+        return FakeSftp()
+
+    monkeypatch.setattr(shell_session, "get_sftp", fake_get_sftp)
+    with TestClient(app) as c:
+        r = c.get("/api/sessions/sess-1/cwd")
+    assert r.status_code == 200
+    assert r.json()["cwd"] == "/root"
+
+
+def test_cwd_fallback_failure_returns_none(shell_session, monkeypatch):
+    """SFTP 取不到（未连接/异常）时不炸：返回 None 由前端回退默认目录"""
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    async def boom():
+        raise RuntimeError("SFTP 不可用")
+
+    monkeypatch.setattr(shell_session, "get_sftp", boom)
+    with TestClient(app) as c:
+        r = c.get("/api/sessions/sess-1/cwd")
+    assert r.status_code == 200
+    assert r.json()["cwd"] is None

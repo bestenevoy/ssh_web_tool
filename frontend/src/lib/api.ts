@@ -19,6 +19,24 @@ export interface UiSettingsPayload {
   log_record_no_ask: boolean
 }
 
+// SFTP 传输任务（后端 transfer_registry；前端 1s 轮询渲染传输列表）
+export interface SftpTransfer {
+  id: string
+  session_id: string
+  direction: 'upload' | 'download'
+  filename: string
+  src: string
+  dst: string
+  // 远端主机显示名 user@host（上传=目标主机，下载=来源主机）
+  host: string
+  total: number // -1 表示未知
+  done: number
+  status: 'running' | 'done' | 'failed' | 'canceled'
+  error: string
+  started_at: number
+  finished_at: number
+}
+
 // ---- 编辑器文件接口 ----
 export interface FileReadResult {
   path: string
@@ -259,6 +277,16 @@ export const api = {
     }),
   sftpDownloadUrl: (session_id: string, path: string) =>
     `/api/sftp/${session_id}/download?path=${encodeURIComponent(path)}`,
+  // 传输任务列表（活动在前）与取消
+  listTransfers: (sessionId?: string | null) =>
+    request<{ transfers: SftpTransfer[] }>(
+      `/api/sftp/transfers${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
+    ),
+  cancelTransfer: (id: string) =>
+    request<{ status: string }>(`/api/sftp/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  // 下载任务完成后打开本机目录并选中文件（仅本机路径的任务可用）
+  revealTransfer: (id: string) =>
+    request<{ status: string; path: string }>(`/api/sftp/transfers/${encodeURIComponent(id)}/reveal`, { method: 'POST' }),
   // 上传本地文件到远端（multipart，XHR 以支持上传进度回调）
   sftpUpload: (session_id: string, remote_path: string, file: File, onProgress?: (pct: number) => void) =>
     new Promise<{ status: string; path: string; size: number }>((resolve, reject) => {

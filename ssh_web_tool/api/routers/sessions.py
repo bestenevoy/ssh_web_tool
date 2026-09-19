@@ -431,13 +431,25 @@ async def api_get_session_states(session_ids: list[str]):
 async def api_get_session_cwd(session_id: str):
     """获取 SSH 会话当前目录（cd 命令跟踪；SFTP 打开时定位初始目录）
 
-    返回 None 表示未知（未 cd 过 / cd ~ / cd - / 复合命令），由前端回退默认目录。
+    cd 跟踪为 None（未 cd 过 / cd 回 home / 无法解析的复合命令）时，
+    用 SFTP getcwd() 取 shell 工作目录（新连接即远端 home）作回退；
+    仍失败返回 None，由前端回退默认目录。
     """
     session_manager = get_session_manager()
     session = session_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return {"cwd": getattr(session, "current_dir", None)}
+    cwd = getattr(session, "current_dir", None)
+    if cwd is None and session.is_connected and not session.is_local():
+        try:
+            sftp = await session.get_sftp()
+            # 注意：asyncssh 2.24 的 SFTPClient 没有 normalize()，用 getcwd()
+            home = await sftp.getcwd()
+            if home:
+                cwd = home
+        except Exception:
+            pass  # 取不到保持 None，前端走默认目录回退
+    return {"cwd": cwd}
 
 
 @router.get("/sessions/{session_id}/logs")

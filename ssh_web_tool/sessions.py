@@ -43,6 +43,9 @@ _SSH_INPUT_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\
 
 # SFTP 流式传输块大小（4MB）：上传/下载逐块搬运，内存占用恒定
 SFTP_CHUNK_SIZE = 4 * 1024 * 1024
+# SFTP 通道空闲自动关闭时限：通道复用 SSH 连接，长期空闲会一直占着服务端
+# sftp-server 进程/通道；监控循环发现超过该时长无操作即关闭，下次用到自动重开。
+SFTP_IDLE_TIMEOUT = 300
 
 
 class _DirectPtyWrapper:
@@ -211,6 +214,8 @@ class SSHSession:
         self.conn: asyncssh.SSHClientConnection | None = None
         self.process: asyncssh.SSHClientProcess | None = None
         self._sftp = None
+        self._sftp_last_used = 0.0  # 最近一次取用通道的时间（空闲自动关闭判断）
+        self._sftp_inuse = 0  # 进行中的流式传输数：传输期间通道不可被空闲关闭
         self.created_at = time.time()
         self.last_active = time.time()
         self._connected = False
@@ -1521,12 +1526,13 @@ class SSHSession:
     # ============ SFTP 文件管理 ============
 
     async def get_sftp(self):
-        """获取或创建 SFTP 客户端"""
+        """获取或创建 SFTP 客户端（复用 SSH 连接上的通道；每次取用刷新活动时间）"""
         if not self.is_connected:
             raise RuntimeError("SSH 未连接")
         if self._sftp is None:
             assert self.conn is not None
             self._sftp = await self.conn.start_sftp_client()
+        self._sftp_last_used = time.time()
         return self._sftp
 
     async def list_directory(self, path: str = "/") -> list[dict]:
@@ -1619,25 +1625,36 @@ class SSHSession:
         几百 MB 的文件会导致内存暴涨、事件循环阻塞甚至上传失败。"""
         sftp = await self.get_sftp()
         total = 0
-        async with sftp.open(path, "wb") as f:
-            async for chunk in chunk_iter:
-                if not chunk:
-                    continue
-                await f.write(chunk)
-                total += len(chunk)
+        # 整个传输期间通道视为活动中，防止被空闲自动关闭
+        self._sftp_inuse += 1
+        try:
+            async with sftp.open(path, "wb") as f:
+                async for chunk in chunk_iter:
+                    if not chunk:
+                        continue
+                    await f.write(chunk)
+                    total += len(chunk)
+        finally:
+            self._sftp_inuse -= 1
+            self._sftp_last_used = time.time()
         return total
 
     async def read_file_stream(self, path: str, chunk_size: int = SFTP_CHUNK_SIZE):
         """流式读取远程文件（async 生成器），大文件下载不再整块进内存"""
         sftp = await self.get_sftp()
-        async with sftp.open(path, "rb") as f:
-            while True:
-                chunk = await f.read(chunk_size)
-                if not chunk:
-                    break
-                if isinstance(chunk, str):
-                    chunk = chunk.encode("utf-8")
-                yield chunk
+        self._sftp_inuse += 1
+        try:
+            async with sftp.open(path, "rb") as f:
+                while True:
+                    chunk = await f.read(chunk_size)
+                    if not chunk:
+                        break
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    yield chunk
+        finally:
+            self._sftp_inuse -= 1
+            self._sftp_last_used = time.time()
 
     async def stat_file(self, path: str) -> int:
         """返回文件大小（用于下载 Content-Length），失败返回 -1"""
@@ -1669,6 +1686,20 @@ class SSHSession:
             except Exception:
                 pass
             self._sftp = None
+
+    async def close_sftp_if_idle(self, timeout: float = SFTP_IDLE_TIMEOUT) -> bool:
+        """空闲超过 timeout 秒则关闭 SFTP 通道（下次用到自动重开），返回是否关闭了
+
+        空闲判断容易：每次经 get_sftp() 取通道都刷新 _sftp_last_used，监控循环
+        每 15s 检查一次。难点只有一个——流式传输全程只取一次通道，靠 _sftp_inuse
+        计数跳过关闭，大文件传输不会被误杀。"""
+        if self._sftp is None or self._sftp_inuse > 0:
+            return False
+        if time.time() - self._sftp_last_used < timeout:
+            return False
+        await self.close_sftp()
+        print(f"[Monitor] SFTP 空闲超 {int(timeout)}s，通道已关闭: {self.session_id}")
+        return True
 
     def is_alive(self) -> bool:
         """检测连接是否真的活着（不只是标志位）；本地 shell 检查 WinPTY 进程"""
@@ -2043,6 +2074,8 @@ class SessionManager:
                 await asyncio.sleep(15)
                 for session in list(self._sessions.values()):
                     try:
+                        # SFTP 通道空闲超时自动关闭（本地/未建通道/传输中均不受影响）
+                        await session.close_sftp_if_idle()
                         shell_dead = session._has_shell and not session.is_shell_alive()
                         if getattr(session, "_external", False):
                             # 外部镜像会话（paramiko/asyncssh 劫持）：保持原有行为

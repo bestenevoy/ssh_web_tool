@@ -376,9 +376,33 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 }
 .panel-header .title { font-size: calc(13px * var(--ui-fs-scale)); font-weight: 600; color: var(--text-secondary); flex: 1; }
 .panel-tabs { display: flex; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap; }
+
+/* ---- SFTP 传输任务列表（⇅ 传输 tab） ---- */
+.tl-wrap { display: flex; flex-direction: column; gap: 6px; }
+.tl-empty { color: var(--text-muted); font-size: calc(12px * var(--ui-fs-scale)); padding: 12px 4px; text-align: center; }
+.tl-section-title { font-size: calc(11px * var(--ui-fs-scale)); color: var(--text-secondary); font-weight: 600; margin-top: 4px; }
+.tl-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; background: var(--bg-hover); border-radius: 6px; }
+.tl-row.tl-failed { border-left: 3px solid var(--accent); }
+.tl-row.tl-canceled { opacity: .65; }
+.tl-dir { font-size: calc(14px * var(--ui-fs-scale)); line-height: 1.3; flex-shrink: 0; }
+.tl-dir.tl-upload { color: #4fc3f7; }
+.tl-dir.tl-download { color: #81c784; }
+.tl-main { flex: 1; min-width: 0; }
+.tl-name { font-size: calc(12px * var(--ui-fs-scale)); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-host { font-size: calc(11px * var(--ui-fs-scale)); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.tl-bar { height: 4px; border-radius: 2px; background: var(--bg-active); margin: 5px 0 3px; overflow: hidden; }
+.tl-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .4s linear; }
+.tl-meta { font-size: calc(11px * var(--ui-fs-scale)); color: var(--text-tertiary); word-break: break-all; }
+.tl-row.tl-failed .tl-meta { color: var(--accent); }
+.tl-cancel { flex-shrink: 0; border: none; background: transparent; color: var(--text-muted); cursor: pointer; font-size: calc(12px * var(--ui-fs-scale)); padding: 2px 4px; border-radius: 4px; }
+.tl-cancel:hover { color: var(--accent); background: var(--bg-active); }
+.tl-reveal { flex-shrink: 0; border: none; background: transparent; color: var(--text-muted); cursor: pointer; font-size: calc(13px * var(--ui-fs-scale)); padding: 2px 4px; border-radius: 4px; }
+.tl-reveal:hover { color: var(--accent); background: var(--bg-active); }
 .panel-tab { padding: 4px 10px; font-size: calc(12px * var(--ui-fs-scale)); color: var(--text-tertiary); cursor: pointer; border-radius: 6px; }
 .panel-tab:hover { color: var(--text-secondary); }
 .panel-tab.active { background: var(--bg-active); color: var(--accent); }
+.panel-tab-disabled { opacity: .4; cursor: not-allowed; }
+.panel-tab-disabled:hover { color: var(--text-tertiary); }
 .panel-body { flex: 1; overflow-y: auto; padding: 10px; }
 .panel-body::-webkit-scrollbar { width: 5px; }
 .panel-body::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }

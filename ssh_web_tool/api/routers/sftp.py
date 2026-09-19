@@ -1,5 +1,7 @@
 """SFTP 域路由：远程文件管理 + 预操作上传 + scripts 目录"""
 
+import subprocess
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -14,6 +16,7 @@ from ssh_web_tool.api.models import (
 )
 from ssh_web_tool.deps import get_app_dir_fn, get_event_bus, get_session_manager
 from ssh_web_tool.sessions import SFTP_CHUNK_SIZE
+from ssh_web_tool.transfers import TransferCanceled, transfer_registry
 
 router = APIRouter(prefix="/api", tags=["sftp"])
 
@@ -23,7 +26,37 @@ def _get_connected_session(session_id: str):
     session = session_manager.get_session(session_id)
     if not session or not session.is_connected:
         raise HTTPException(status_code=404, detail="会话不存在或未连接")
+    if session.is_local():
+        # 本机终端会话没有 SSH 传输层（conn=None），SFTP 无从谈起；明确拒绝而非 500
+        raise HTTPException(status_code=400, detail="本机终端会话不支持 SFTP，请连接到远程主机后再使用文件功能")
     return session
+
+
+def _basename(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1] or "download"
+
+
+def _host_label(session) -> str:
+    """传输列表显示用主机标识：user@host"""
+    try:
+        return f"{session.username}@{session.host}"
+    except Exception:
+        return ""
+
+
+async def _safe_remote_remove(session, path: str) -> None:
+    """取消上传后尽力删除远端半成品；失败忽略（可能根本没建出来）。"""
+    try:
+        await session.delete_file(path)
+    except Exception:
+        pass
+
+
+async def _safe_local_remove(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 @router.post("/sftp/{session_id}/list")
@@ -62,12 +95,22 @@ async def api_sftp_download(session_id: str, path: str):
     session = _get_connected_session(session_id)
     try:
         size = await session.stat_file(path)
-        filename = path.split("/")[-1] or "download"
+        filename = _basename(path)
+        task = transfer_registry.create(
+            session_id, "download", filename, path, "浏览器下载", host=_host_label(session), total=size
+        )
 
         async def gen():
-            # 流式转发：读取异常时中断响应（流已开始后无法改状态码）
-            async for chunk in session.read_file_stream(path):
-                yield chunk
+            # 流式转发：读取异常/取消时中断响应（流已开始后无法改状态码，结果记在任务上）
+            try:
+                async for chunk in session.read_file_stream(path):
+                    task.add_done(len(chunk))
+                    yield chunk
+                task.finish("done")
+            except TransferCanceled:
+                task.finish("canceled", "已取消")
+            except Exception as e:
+                task.finish("failed", str(e))
 
         headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
         if size >= 0:
@@ -120,13 +163,30 @@ async def api_sftp_download_to(session_id: str, req: SftpDownloadToRequest):
         raise HTTPException(status_code=400, detail=f"本地目录不存在: {req.local_dir}")
     dest = local_dir / filename
     total = 0
+    task = transfer_registry.create(
+        session_id,
+        "download",
+        filename,
+        req.remote_path,
+        str(dest),
+        host=_host_label(session),
+        total=await session.stat_file(req.remote_path),
+    )
     try:
         with open(dest, "wb") as f:
             # 分块流式写入：磁盘写 4MB 耗时可忽略，不整块进内存
             async for chunk in session.read_file_stream(req.remote_path):
+                task.add_done(len(chunk))
                 f.write(chunk)
                 total += len(chunk)
+        task.finish("done")
+    except TransferCanceled:
+        await _safe_local_remove(dest)
+        task.finish("canceled", "已取消")
+        return {"status": "canceled", "path": req.remote_path}
     except Exception as e:
+        await _safe_local_remove(dest)
+        task.finish("failed", str(e))
         raise HTTPException(status_code=500, detail=f"下载失败: {e!s}")
     await get_event_bus().publish(
         "sftp_download",
@@ -158,6 +218,15 @@ async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = 
     大文件（几百 MB+）内存暴涨导致上传失败。改为 4MB 分块流式写入。
     """
     session = _get_connected_session(session_id)
+    task = transfer_registry.create(
+        session_id,
+        "upload",
+        _basename(remote_path),
+        "本机上传",
+        remote_path,
+        host=_host_label(session),
+        total=file.size if file.size and file.size > 0 else -1,
+    )
 
     async def req_chunks():
         # UploadFile 内部 spool 到临时文件，分块读取不会占用大量内存
@@ -165,10 +234,12 @@ async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = 
             chunk = await file.read(SFTP_CHUNK_SIZE)
             if not chunk:
                 break
+            task.add_done(len(chunk))  # 已请求取消时抛 TransferCanceled 中断
             yield chunk
 
     try:
         total = await session.write_file_stream(remote_path, req_chunks())
+        task.finish("done")
         await get_event_bus().publish(
             "sftp_upload",
             "api",
@@ -178,7 +249,12 @@ async def api_sftp_upload(session_id: str, remote_path: str, file: UploadFile = 
             size=total,
         )
         return {"status": "uploaded", "path": remote_path, "size": total}
+    except TransferCanceled:
+        await _safe_remote_remove(session, remote_path)
+        task.finish("canceled", "已取消")
+        return {"status": "canceled", "path": remote_path}
     except Exception as e:
+        task.finish("failed", str(e))
         raise HTTPException(status_code=500, detail=f"上传失败: {e!s}")
     finally:
         await file.close()
@@ -207,6 +283,15 @@ async def api_preop_upload(req: PreopUploadRequest):
             src = get_app_dir_fn_() / "scripts" / src
     if not src.is_file():
         raise HTTPException(status_code=404, detail=f"源文件不存在: {source}")
+    task = transfer_registry.create(
+        req.session_id,
+        "upload",
+        src.name,
+        str(src),
+        req.remote,
+        host=_host_label(session),
+        total=src.stat().st_size,
+    )
 
     async def local_chunks():
         # 本地磁盘分块读（4MB 一次，耗时可忽略）；源文件再大也不整块进内存
@@ -215,13 +300,67 @@ async def api_preop_upload(req: PreopUploadRequest):
                 chunk = f.read(SFTP_CHUNK_SIZE)
                 if not chunk:
                     break
+                task.add_done(len(chunk))  # 已请求取消时抛 TransferCanceled 中断
                 yield chunk
 
     try:
         total = await session.write_file_stream(req.remote, local_chunks())
+        task.finish("done")
         return {"status": "uploaded", "source": str(src), "path": req.remote, "size": total}
+    except TransferCanceled:
+        await _safe_remote_remove(session, req.remote)
+        task.finish("canceled", "已取消")
+        return {"status": "canceled", "path": req.remote}
     except Exception as e:
+        task.finish("failed", str(e))
         raise HTTPException(status_code=500, detail=f"上传失败: {e!s}")
+
+
+@router.get("/sftp/transfers")
+async def api_sftp_transfers(session_id: str | None = None):
+    """传输任务列表（活动在前，完成按时间倒序）；前端 1s 轮询渲染传输列表"""
+    return {"transfers": [t.to_dict() for t in transfer_registry.list(session_id)]}
+
+
+@router.post("/sftp/transfers/{task_id}/cancel")
+async def api_sftp_transfer_cancel(task_id: str):
+    """请求取消传输：置标志位，分块循环下一次迭代生效并清理半成品"""
+    ok, reason = transfer_registry.cancel(task_id)
+    if not ok:
+        raise HTTPException(status_code=404 if reason == "任务不存在" else 409, detail=reason)
+    return {"status": "canceling"}
+
+
+def _reveal_in_file_manager(path: Path) -> None:
+    """在系统文件管理器中打开并选中该文件（Server 与本机同机运行，可直接拉起窗口）"""
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", f"/select,{path}"])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path.parent)])
+
+
+@router.post("/sftp/transfers/{task_id}/reveal")
+async def api_sftp_transfer_reveal(task_id: str):
+    """下载任务完成后打开本机目录并选中文件
+
+    只揭示任务自带的 dst 路径（不接受任意路径入参，防目录注入）；
+    浏览器下载（dst 是占位符）与上传任务没有本机文件，拒绝。
+    """
+    task = transfer_registry.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.direction != "download" or task.dst == "浏览器下载":
+        raise HTTPException(status_code=400, detail="该任务没有本机文件")
+    target = Path(task.dst)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="文件已不存在（可能已被删除或移动）")
+    try:
+        _reveal_in_file_manager(target)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开目录失败: {e!s}")
+    return {"status": "revealed", "path": str(target)}
 
 
 @router.get("/scripts")
