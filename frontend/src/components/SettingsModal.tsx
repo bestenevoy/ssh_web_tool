@@ -13,7 +13,7 @@ import {
 import { api } from '../lib/api'
 import { DirPickerModal } from './DirPickerModal'
 import { EventLog } from './EventLog'
-import type { EventLogItem } from '../types'
+import { useEventList, clearEvents } from '../lib/useEvents'
 
 interface Props {
   settings: TerminalSettings
@@ -25,9 +25,6 @@ interface Props {
   onSetConnectTimeout: (seconds: number) => Promise<void>
   configFile: string
   onReloadConfig: () => Promise<void>
-  /** 活动日志（从右侧面板迁入设置页）：App 持续采集，弹窗只负责展示 */
-  events: EventLogItem[]
-  onClearEvents: () => void
   onClose: () => void
 }
 
@@ -90,10 +87,10 @@ export function SettingsModal({
   onSetConnectTimeout,
   configFile,
   onReloadConfig,
-  events,
-  onClearEvents,
   onClose,
 }: Props) {
+  // 活动日志：直接订阅事件 store（不经 App props，避免每条事件重渲染整个应用）
+  const events = useEventList()
   const [cacheMsg, setCacheMsg] = useState('')
   const [historyMsg, setHistoryMsg] = useState('')
   const [openDirMsg, setOpenDirMsg] = useState('')
@@ -587,7 +584,7 @@ export function SettingsModal({
         {section === 'logs' && (
         <div className="settings-modal-section">
           <div className="settings-modal-title">活动日志</div>
-          <EventLog events={events} onClear={onClearEvents} />
+          <EventLog events={events} onClear={clearEvents} />
         </div>
         )}
 

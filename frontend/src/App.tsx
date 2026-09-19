@@ -9,7 +9,6 @@ import { ContextMenu } from './components/ContextMenu'
 import type { CtxMenuItem } from './components/ContextMenu'
 import { useTerminals } from './lib/useTerminals'
 import { writeClipboardText } from './lib/terminalCopy'
-import { useEvents } from './lib/useEvents'
 import { useSettings, FONT_OPTIONS } from './lib/useSettings'
 import { HostList } from './components/HostList'
 import { GroupManager } from './components/GroupManager'
@@ -105,7 +104,6 @@ function App() {
   const { settings, toggleTheme, setFontFamily, setFontSize, updateSettings } = useSettings()
   const terminals = useTerminals(settings)
   const { focusActiveTerminal } = terminals
-  const events = useEvents()
 
   // 编辑器广播目标候选会话（终端实例 Map → 精简列表；Map 状态变化即重新派生）
   const editorSessions: EditorSessionInfo[] = useMemo(
@@ -1081,7 +1079,6 @@ function App() {
             focusedPane={focusedPane}
             hosts={hosts}
             order={sortedSessionIds}
-            hostTypes={hostTypes}
             registerContainer={terminals.registerContainer}
             onSwitch={handleSwitchTerminal}
             onClose={handleCloseTerminal}
@@ -1236,8 +1233,6 @@ function App() {
           onSetConnectTimeout={handleSetConnectTimeout}
           configFile={configFile}
           onReloadConfig={handleReloadConfig}
-          events={events.events}
-          onClearEvents={events.clearEvents}
           onClose={() => { setSettingsOpen(false); focusActiveTerminal() }}
         />
       )}

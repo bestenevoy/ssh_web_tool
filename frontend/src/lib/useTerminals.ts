@@ -533,6 +533,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     inst.feeder?.dispose()
     inst.resizeObserver?.disconnect()
     inst.resizeObserver = null
+    inst.resizeObservedEl = null
     inst.blockBar?.dispose()
     inst.highlight?.dispose()
     // state_timer 已改为批量轮询，不再需要单独清理
@@ -657,17 +658,28 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   const registerContainer = useCallback((session_id: string, el: HTMLDivElement | null) => {
     if (el) {
       containersRef.current.set(session_id, el)
-      const inst = terminals.get(session_id)
+      // 经 terminalsRef 读取（而非 terminals state）：registerContainer 身份保持稳定，
+      // 下游 TerminalView 的行内 ref 不再随每次轮询/toast 重渲染而反复 detach/attach
+      const inst = terminalsRef.current.get(session_id)
       // 容器尺寸观察器：window.resize 在 pywebview 窗口最大化/还原时不一定派发，
-      // 改为观察容器自身尺寸（rAF 防抖），任何布局变化都重 fit 并向后端上报新尺寸
-      if (inst) {
+      // 改为观察容器自身尺寸（rAF 防抖）。仅容器元素变化时重建（避免 React ref
+      // 重挂导致观察器销毁重建 + observe 初始回调对全部终端重 fit 的风暴）；
+      // 以当前尺寸为基线，尺寸真实变化才执行 fit + 上报 cols/rows
+      if (inst && (!inst.resizeObserver || inst.resizeObservedEl !== el)) {
         inst.resizeObserver?.disconnect()
         let raf = 0
+        let lastW = el.clientWidth
+        let lastH = el.clientHeight
         const ro = new ResizeObserver(() => {
           if (raf) return
           raf = requestAnimationFrame(() => {
             raf = 0
-            if (inst.container && inst.container.clientWidth > 0) {
+            const w = el.clientWidth
+            const h = el.clientHeight
+            if (w === lastW && h === lastH) return
+            lastW = w
+            lastH = h
+            if (inst.container && w > 0) {
               fitTerminal(inst)
               sendResize(inst.term, inst.ws)
             }
@@ -675,6 +687,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         })
         ro.observe(el)
         inst.resizeObserver = ro
+        inst.resizeObservedEl = el
       }
       if (inst && !inst.container) {
         inst.term.open(el)
@@ -720,7 +733,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     } else {
       containersRef.current.delete(session_id)
     }
-  }, [terminals, fitTerminal, sendResize, resyncTerminal])
+  }, [fitTerminal, sendResize, resyncTerminal])
 
   // 窗口大小变化时调整终端
   useEffect(() => {
