@@ -75,7 +75,16 @@ function App() {
   const [panelTab, setPanelTab] = useState<PanelTab>('quick')
   const [modalOpen, setModalOpen] = useState(false)
   const [editingHost, setEditingHost] = useState<Host | null>(null)
-  const [status, setStatus] = useState('')
+  // 浮动提示：所有提示信息统一走 toast（顶栏不承载信息）。多条向下堆叠，
+  // 每条独立显示 3.2s 后消失，最多同时 5 条；setStatus 签名不变，调用点无需感知
+  const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([])
+  const toastIdRef = useRef(0)
+  const setStatus = useCallback((msg: string) => {
+    if (!msg) return
+    const id = ++toastIdRef.current
+    setToasts((list) => [...list.slice(-4), { id, msg }])
+    window.setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), 3200)
+  }, [])
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sprofOpen, setSprofOpen] = useState(false) // 终端特性档案弹窗（顶栏 📋）
@@ -889,7 +898,6 @@ function App() {
       <div className="topbar">
         <button className="btn btn-secondary btn-sm" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} title="显示/折叠主机列表（Ctrl+B）">☰</button>
         <span className="logo">SSH Web Tool</span>
-        <span className="status">{status}</span>
         {terminals.activeId && (() => {
           const activeInst = terminals.terminals.get(terminals.activeId!)
           // 占位连接中的 tab：无连接可断开，不显示操作按钮（状态在 tab/终端遮罩内呈现）
@@ -1104,6 +1112,14 @@ function App() {
               />
             ) : null
           })()}
+          {/* 浮动消息提示堆叠（fixed 定位脱离终端区，SFTP 工作台等全屏覆盖层之上也可见） */}
+          {toasts.length > 0 && (
+            <div className="toast-stack">
+              {toasts.map((t) => (
+                <div key={t.id} className="toast-item">{t.msg}</div>
+              ))}
+            </div>
+          )}
           {/* 编辑器覆盖层：盖住终端区（终端保持挂载，切回时无需重建 xterm） */}
           {editorOpen && (
             <div className="editor-overlay">
@@ -1200,6 +1216,7 @@ function App() {
         <SftpWorkbench
           sessionId={terminals.activeId}
           initialRemote={sftpInitialRemote}
+          onNotify={setStatus}
           onClose={() => { setSftpInitialRemote(null); setSftpWbOpen(false) }}
         />
       )}

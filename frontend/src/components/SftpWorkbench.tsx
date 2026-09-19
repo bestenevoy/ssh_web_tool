@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import type { FileListEntry } from '../lib/api'
 import type { SftpItem } from '../types'
@@ -7,6 +7,8 @@ interface Props {
   sessionId: string
   /** 打开时的初始远程目录（当前终端 cd 跟踪）；null/缺省走保存或默认 / */
   initialRemote?: string | null
+  /** 全局浮动提示通道（App 的 toast）：传输/删除等反馈同步弹出 */
+  onNotify?: (msg: string) => void
   onClose: () => void
 }
 
@@ -50,7 +52,7 @@ const remoteParent = (path: string) => {
   return idx <= 0 ? '/' : trimmed.slice(0, idx)
 }
 
-export function SftpWorkbench({ sessionId, initialRemote, onClose }: Props) {
+export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: Props) {
   // 上次会话的本地/远程目录（localStorage 持久化：关闭再打开恢复原状态）
   const savedPath = (() => {
     try {
@@ -64,8 +66,17 @@ export function SftpWorkbench({ sessionId, initialRemote, onClose }: Props) {
   // 路径输入框草稿（回车跳转，独立于加载完成的真实路径）
   const [localInput, setLocalInput] = useState(savedPath.local || '~')
   const [remoteInput, setRemoteInput] = useState(savedPath.remote || '/')
-  // 底部状态栏：传输中/结果/错误
-  const [status, setStatus] = useState<{ text: string; kind: 'info' | 'error' } | null>(null)
+  // 底部状态栏：传输中/结果/错误。setStatus 同时把信息推给全局 toast 浮动提示；
+  // onNotify 存 ref 保证 setStatus 引用稳定（各传输回调的依赖数组不受影响）
+  const [status, setStatusRaw] = useState<{ text: string; kind: 'info' | 'error' } | null>(null)
+  const onNotifyRef = useRef(onNotify)
+  useEffect(() => {
+    onNotifyRef.current = onNotify
+  }, [onNotify])
+  const setStatus = useCallback((s: { text: string; kind: 'info' | 'error' } | null) => {
+    setStatusRaw(s)
+    if (s) onNotifyRef.current?.(s.text)
+  }, [])
   const [dragOver, setDragOver] = useState<'local' | 'remote' | null>(null)
   const [busy, setBusy] = useState(false)
   // 拖拽悬停的目标文件夹（文件夹行高亮 + 放下后作为传输目标目录）

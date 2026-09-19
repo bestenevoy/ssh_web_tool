@@ -70,11 +70,6 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   display: flex; align-items: center; padding: 0 12px; gap: 8px; flex-shrink: 0;
 }
 .topbar .logo { font-size: calc(16px * var(--ui-fs-scale)); font-weight: 600; color: var(--accent); letter-spacing: .5px; flex-shrink: 0; }
-/* 状态文字：空间不足时收缩截断，不挤压右侧按钮 */
-.topbar .status {
-  font-size: calc(13px * var(--ui-fs-scale)); color: var(--text-tertiary); margin-left: 8px;
-  min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 /* 顶栏按钮/字号文字比正文略小半档即可，随全局放大一档（仅顶栏，不影响其他区域 btn-sm） */
 .topbar .btn-sm, .topbar .settings-btn { font-size: calc(12px * var(--ui-fs-scale)); }
 .topbar .settings-font-size { font-size: calc(13px * var(--ui-fs-scale)); }
@@ -314,6 +309,27 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 
 /* ---- 终端内容搜索条（Ctrl+F，右上浮层） ---- */
 .terminal-area { position: relative; }
+/* 浮动消息提示：顶栏不再承载提示信息，统一在此 toast 堆叠（新消息向下追加，
+   每条独立定时消失）。fixed 定位 + z-index 高于各全屏覆盖层（设置页 900、
+   SFTP 工作台 955），任何界面状态下都可见；pointer-events none 不挡操作 */
+.toast-stack {
+  position: fixed; top: 84px; left: 50%; transform: translateX(-50%);
+  z-index: 2000; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.toast-item {
+  max-width: min(560px, 80vw); padding: 7px 16px;
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  border: 1px solid var(--border-light); border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .3);
+  color: var(--text-primary); font-size: calc(12px * var(--ui-fs-scale));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  animation: toast-in .18s ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
 .terminal-search-bar {
   position: absolute; top: 8px; right: 18px; z-index: 12;
   display: flex; align-items: center; gap: 4px;
