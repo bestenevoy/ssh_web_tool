@@ -24,6 +24,12 @@ from ssh_web_tool.ws_protocol import (
 
 router = APIRouter(prefix="", tags=["websocket"])
 
+# 同会话唯一 WebSocket 连接表：同一 session_id 新连接建立时主动关闭旧连接。
+# 原因：旧的 read_output 循环阻塞在 listener.get() 上，浏览器关闭 socket 也不会退出，
+# 若存在多个循环，switch/ssh_connected 等"单次 take"通知会被残留循环竞争取走，
+# 前端（活跃连接）反而收不到，表现为断开后顶栏不变、重连后 UI 不更新。
+_ACTIVE_WS: dict[str, WebSocket] = {}
+
 
 async def _await_first_resize(websocket: WebSocket) -> tuple[int, int, str | None]:
     """等待前端发来的首个消息（最多 500ms）：resize 则取尺寸，否则原文返回待处理。
@@ -52,6 +58,15 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
     """
     session_manager = get_session_manager()
     await websocket.accept()
+
+    # 同会话已有连接：关闭旧的（其 read_output 循环在下次 send 时失败自然退出）
+    prev = _ACTIVE_WS.get(session_id)
+    if prev is not None:
+        try:
+            await prev.close()
+        except Exception:
+            pass
+    _ACTIVE_WS[session_id] = websocket
 
     session = session_manager.get_session(session_id)
     if not session:
@@ -96,6 +111,11 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                     await websocket.send_json({"type": SERVER_SSH_DISCONNECTED, "data": disconnect})
                     await websocket.close()
                     return
+                # SSH 连接成功通知（手动重连 API 触发 switch_to_ssh 后写入）：
+                # 推送 ssh_connected，前端据此更新终端类型/标签/重连凭据（复用当前实例）
+                conn_info = session.take_ssh_connected_notice()
+                if conn_info:
+                    await websocket.send_json({"type": SERVER_SSH_CONNECTED, **conn_info})
                 # 会话关闭通知（本机终端 exit 等）：推送 closed 后结束输出转发，
                 # 前端收到后关闭标签与连接
                 closed = session.take_closed_notice()
@@ -233,16 +253,10 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             raise RuntimeError("终端 shell 尚未就绪，请稍候再输入")
                         stdin = session.process.stdin
                         if getattr(stdin, "is_closing", None) and stdin.is_closing():
-                            # 通道已关闭（连接断开，监控周期未到）：不写死通道，广播断开提示，
-                            # 通知前端走断开态（不切本机终端），由用户点击「重连」手动恢复
-                            try:
-                                await session._broadcast_output(
-                                    "\r\n\x1b[33m[SSH 连接已断开，可点击界面重连按钮恢复]\x1b[0m\r\n"
-                                )
-                            except Exception:
-                                pass
-                            session.set_disconnect_notice("SSH 连接已断开")
-                            raise RuntimeError("SSH 连接已断开")
+                            # 通道已关闭（连接断开，监控周期未到）：不写死通道，
+                            # 自动切回本机终端（用户需求：断开即回本地，不留断态）
+                            await session._auto_switch_to_local("SSH 连接已断开")
+                            raise RuntimeError("SSH 连接已断开，已切换到本机终端")
                         stdin.write(data)
                         # 行缓冲跟踪 cd 命令（不拦截输入，仅维护 current_dir 供 SFTP 初始目录）
                         try:
@@ -288,6 +302,9 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
             pass
         # 移除监听器，但不停止输出读取器（可能有其他监听器如 CLI 注入捕获）
         session.remove_output_listener(listener)
+        # 清理活跃连接记录（仅当仍指向本连接时）
+        if _ACTIVE_WS.get(session_id) is websocket:
+            _ACTIVE_WS.pop(session_id, None)
         # 注意：不关闭 session，由后端统一维护，24小时无活动自动清理
 
 

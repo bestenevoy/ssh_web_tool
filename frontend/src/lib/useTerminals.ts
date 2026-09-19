@@ -34,8 +34,13 @@ function getShellTypeLabel(state: any): string {
   return 'other'
 }
 
+// 页面生命周期内已在前端建过实例的会话 id（createTerminal / restoreTerminals 均登记）。
+// 用于 restoreTerminals 防重：React state/ref 存在时序窗口（setState 后到渲染前 ref 未同步），
+// 仅靠 terminalsRef.has() 会漏判，导致同一会话被重复恢复（重复 ws → 后端关闭旧连接 → 误标断开）。
+const knownTerminalSessions = new Set<string>()
+
 export function useTerminals(settings: TerminalSettings) {
-  const [terminals, setTerminals] = useState<Map<string, TerminalInstance>>(new Map())
+  const [terminals, setTerminalsRaw] = useState<Map<string, TerminalInstance>>(new Map())
   const [activeId, setActiveId] = useState<string | null>(null)
   // 终端内内容搜索（Ctrl+F）打开中的会话 id；null = 未打开
   const [searchOpenId, setSearchOpenId] = useState<string | null>(null)
@@ -52,6 +57,19 @@ export function useTerminals(settings: TerminalSettings) {
   // 保存最新的 terminals 引用，用于回调中（解决闭包捕获旧状态导致 input_buffer 不记录的问题）
   const terminalsRef = useRef(terminals)
   terminalsRef.current = terminals
+  // 包装 setTerminals：同步维护 terminalsRef，防止 restoreTerminals 在 setState 后
+  // 下次渲染前读到过期 ref，对同一 session_id 重复创建实例（重复 ws → 后端关闭旧
+  // 连接 → 前端误标 disconnected，顶栏误显重连、输入失效）
+  const setTerminals = useCallback(
+    (arg: React.SetStateAction<Map<string, TerminalInstance>>) => {
+      setTerminalsRaw((prev) => {
+        const next = typeof arg === 'function' ? (arg as (p: Map<string, TerminalInstance>) => Map<string, TerminalInstance>)(prev) : arg
+        terminalsRef.current = next
+        return next
+      })
+    },
+    []
+  )
   // 保存最新的 activeId 引用，避免 restoreTerminals 依赖 activeId 导致定时器频繁重建
   const activeIdRef = useRef<string | null>(null)
   activeIdRef.current = activeId
@@ -292,6 +310,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         next.set(session_id, instance)
         return next
       })
+      knownTerminalSessions.add(session_id)
       setActiveId(session_id)
       return session_id
     }
@@ -326,6 +345,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
 
     try {
       const result = await api.connectHost(host.id, terminal_name, password)
+      // 先登记会话防重（restore 定时可能在 closeTerminalRef 期间读到 active 列表而重复创建）
+      knownTerminalSessions.add(result.session_id)
       // 连接成功：关闭占位 tab（keepActive 防止 activeId 闪跳到其他标签），另建真实实例
       await closeTerminalRef.current!(pendingId, true)
       const instance = createTerminalInstance({
@@ -349,6 +370,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         next.set(result.session_id, instance)
         return next
       })
+      knownTerminalSessions.add(result.session_id)
       setActiveId(result.session_id)
       return result.session_id
     } catch (e) {
@@ -372,7 +394,9 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       const { terminals: active } = await api.listActiveTerminals()
       const s = settingsRef.current
       // 并行恢复所有终端（原 for...of 串行创建，3 个终端延迟累加）
-      const toRestore = active.filter(t => !terminalsRef.current.has(t.session_id))
+      const toRestore = active.filter(t => {
+        return !knownTerminalSessions.has(t.session_id) && !terminalsRef.current.has(t.session_id)
+      })
       await Promise.all(toRestore.map(async (t) => {
         // 统一工厂（P0-③）：与 createTerminal 同一套装配（xterm/WS/消息路由/洪水供给器），
         // restore 与新建行为一致；历史由 factory 在 ws.onopen 中按 historyLimit 回放
@@ -404,6 +428,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
 
         setTerminals((prev) => {
           const next = new Map(prev)
+        knownTerminalSessions.add(t.session_id)
           next.set(t.session_id, instance)
           return next
         })
@@ -521,20 +546,31 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   const disconnectTerminal = useCallback(async (session_id: string) => {
     const inst = terminals.get(session_id)
     if (!inst || inst.disconnected) return
-    try { await api.closeSession(session_id) } catch {}
-    if (inst.ws) { try { inst.ws.close() } catch {} }
-    inst.feeder?.dispose()
-    // state_timer 已改为批量轮询，不再需要单独清理
-    setTerminals((prev) => {
-      const next = new Map(prev)
-      const cur = next.get(session_id)
-      if (cur) next.set(session_id, { ...cur, disconnected: true, ws: null })
-      return next
-    })
+    try { await api.disconnectToLocal(session_id) } catch {}
+    // 不关 ws、不标断态：后端 _auto_switch_to_local 关闭 SSH 通道并推送
+    // switched_to_local 通知，前端收到后把当前终端切回本机 shell
+    // （ssh_exited: true, shell_type: 'local'，保留 host_id 供重连复用会话）。
+    // 会话不删除，重连时复用同一 session 保留全部历史。
   }, [terminals])
 
   // 重连中状态标记：统一重连流程入口置 true，成功/失败后置 false
   // （Tab/终端遮罩显示"连接中"，期间重复点击重连被 App 层拦截）
+  // 重连后恢复：清除断开/exit 标记，ws 已死（意外断开置空）时重建 WebSocket 连接。
+  // ws 仍存活（手动断开切本地，通道复用）则仅重置状态；App 重连成功后调用。
+  const reconnectWs = useCallback((session_id: string) => {
+    setTerminals((prev) => {
+      const cur = prev.get(session_id)
+      if (!cur) return prev
+      const next = new Map(prev)
+      next.set(session_id, { ...cur, disconnected: false, ssh_exited: false, reconnecting: false })
+      return next
+    })
+    const inst = terminalsRef.current.get(session_id)
+    if (inst && (!inst.ws || inst.ws.readyState === WebSocket.CLOSED) && typeof inst.reconnectWs === 'function') {
+      inst.reconnectWs()
+    }
+  }, [])
+
   const setReconnecting = useCallback((session_id: string, value: boolean) => {
     setTerminals((prev) => {
       const cur = prev.get(session_id)
@@ -687,6 +723,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     closeTerminal,
     disconnectTerminal,
     setReconnecting,
+    reconnectWs,
     sendCommand,
     sendCommandTo,
     readBufferTail,

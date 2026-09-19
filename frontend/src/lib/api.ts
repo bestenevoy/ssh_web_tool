@@ -168,6 +168,12 @@ export const api = {
       body: JSON.stringify({ shell }),
     }),
   closeSession: (session_id: string) => request(`/api/sessions/${session_id}`, { method: 'DELETE' }),
+  // 手动断开 SSH 并切回本机终端（顶部「断开」按钮）
+  // 手动重连：复用当前终端会话从本机 shell 切回 SSH（历史/日志不丢）
+  reconnectSession: (session_id: string, payload: { host: string; port: number; username: string; password?: string | null; private_key?: string | null; passphrase?: string | null }) =>
+    request<{ status: string }>(`/api/sessions/${session_id}/reconnect`, { method: 'POST', body: JSON.stringify(payload) }),
+  disconnectToLocal: (session_id: string) =>
+    request<{ status: string }>(`/api/sessions/${session_id}/disconnect`, { method: 'POST' }),
   runCommand: (session_id: string, command: string, timeout = 30) =>
     request<CommandResult>(`/api/sessions/${session_id}/run`, {
       method: 'POST',

@@ -270,6 +270,9 @@ class SSHSession:
         # 会话级通知（如 shell 异常提示）：由全局监控协程写入，WebSocket read_output 循环取出推送。
         # 不直接走 _broadcast_output，避免提示文本混入 run_command 的注入捕获/echo 解析
         self._shell_notice: str | None = None
+        # 会话级 SSH 连接成功通知（重连 API 触发 switch_to_ssh 后写入）：
+        # WebSocket read_output 循环取出后发送 ssh_connected 消息，前端据此更新终端类型/凭据
+        self._ssh_connected_notice: dict | None = None
         # 会话级切换通知：SSH 退出/断开自动切换到本机 shell 时设置，
         # WebSocket read_output 循环取出后发送 switched_to_local 消息给前端，
         # 前端据此更新终端类型和 UI 状态（如隐藏断开按钮）
@@ -335,6 +338,16 @@ class SSHSession:
         """取出并清空会话关闭通知（read_output 循环调用，只取一次）"""
         n = self._closed_notice
         self._closed_notice = None
+        return n
+
+    def set_ssh_connected_notice(self, info: dict) -> None:
+        """设置 SSH 连接成功通知（重连 API 触发 switch_to_ssh 后写入）"""
+        self._ssh_connected_notice = info
+
+    def take_ssh_connected_notice(self) -> dict | None:
+        """取出并清空 SSH 连接成功通知（WebSocket read_output 循环调用）"""
+        n = self._ssh_connected_notice
+        self._ssh_connected_notice = None
         return n
 
     def set_disconnect_notice(self, msg: str) -> None:
@@ -1097,7 +1110,17 @@ class SSHSession:
         self.reset_local_input_line()
         await self.start_local_shell(shell, cols, rows)
 
-    async def switch_to_ssh(self, host: str, port: int, username: str, password: str, cols: int = 0, rows: int = 0):
+    async def switch_to_ssh(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        private_key: str | None = None,
+        passphrase: str | None = None,
+        cols: int = 0,
+        rows: int = 0,
+    ):
         """从本地 shell 切换到 SSH 远端 shell（用户在本地终端输入 ssh user:pass@host 时触发）
 
         先建立 SSH 连接并启动远端 shell，成功后才关闭本地 shell（连接失败时本地终端
@@ -1115,7 +1138,11 @@ class SSHSession:
         self.username = username
         try:
             # 建立 SSH 连接（失败抛异常，本地 shell 保留）
-            await self.connect(password=password or None)
+            await self.connect(
+                password=password or None,
+                private_key=private_key,
+                passphrase=passphrase,
+            )
             await self.start_interactive_shell(cols=cols, rows=rows)
         except BaseException:
             # 连接/shell 启动失败或被取消（Ctrl+C 中止连接）：恢复本地 shell 读取
@@ -1140,6 +1167,40 @@ class SSHSession:
         self._connected = True
         self._has_shell = True
         self._local_shell = ""
+
+    async def reconnect_ssh(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str | None,
+        private_key: str | None = None,
+        passphrase: str | None = None,
+    ) -> str:
+        """手动重连：从本机 shell 切回 SSH（复用当前会话，历史/日志/广播结构不丢）
+
+        与本地拦截 SSH 同路径（switch_to_ssh 复用会话），成功后写入 ssh_connected 通知，
+        由 WebSocket 循环推送 ssh_connected 消息，前端更新终端类型与重连凭据。
+        返回 'already_ssh' / 'connected' / 'failed'。
+        """
+        if not self.is_local():
+            return "already_ssh"
+        try:
+            await self.switch_to_ssh(host, port, username, password or "", private_key, passphrase)
+            self.terminal_name = f"{username}@{host}"
+            self.set_ssh_connected_notice(
+                {
+                    "host": host,
+                    "port": port,
+                    "username": username,
+                    "password": password or "",
+                    "terminal_name": self.terminal_name,
+                }
+            )
+            return "connected"
+        except Exception as e:
+            print(f"[Reconnect] 切换 SSH 失败: {e}")
+            return "failed"
 
     async def restart_local_shell(self, cols: int = 0, rows: int = 0):
         """本机 shell 已退出时重启（沿用原 shell 类型与最近尺寸）"""
@@ -2019,17 +2080,10 @@ class SessionManager:
                                 print(f"[Monitor] SSH shell 已退出，自动切换本机 shell: {session.session_id}")
                                 await session._auto_switch_to_local()
                             else:
-                                # SSH 连接断开（网络异常/服务器重启/静默断线）：不切本机终端，
-                                # 广播断开提示后通知前端走断开态（Tab 划线 + 重连按钮），
-                                # 由用户点击「重连」按钮手动恢复
-                                print(f"[Monitor] SSH 连接断开，通知前端: {session.session_id}")
-                                try:
-                                    await session._broadcast_output(
-                                        "\r\n\x1b[33m[SSH 连接已断开，可点击界面重连按钮恢复]\x1b[0m\r\n"
-                                    )
-                                except Exception:
-                                    pass
-                                session.set_disconnect_notice("SSH 连接已断开")
+                                # SSH 连接断开（网络异常/服务器重启/静默断线）：自动切回本机
+                                # 终端，保证终端始终可用（用户需求：断开即回本地，不留断态）
+                                print(f"[Monitor] SSH 连接断开，自动切换本机 shell: {session.session_id}")
+                                await session._auto_switch_to_local("SSH 连接已断开")
                     except Exception as e:
                         print(f"[Monitor] 监控异常 {session.session_id}: {e}")
         except asyncio.CancelledError:

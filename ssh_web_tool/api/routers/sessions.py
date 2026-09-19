@@ -286,6 +286,43 @@ async def api_delete_session(session_id: str):
     return {"status": "deleted"}
 
 
+@router.post("/sessions/{session_id}/disconnect")
+async def api_disconnect_session(session_id: str):
+    """手动断开 SSH 连接并自动切回本机终端（顶部「断开」按钮）
+
+    与连接意外断开同路径（_auto_switch_to_local → switch_to_local）：
+    关闭 SSH 连接/进程，启动本地 shell，广播切换提示并通知前端更新 UI。
+    """
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if session.is_local():
+        return {"status": "already_local"}
+    await session._auto_switch_to_local("SSH 连接已断开")
+    return {"status": "switched_local"}
+
+
+@router.post("/sessions/{session_id}/reconnect")
+async def api_reconnect_session(session_id: str, req: CreateSessionRequest):
+    """手动重连：从本机 shell 切回 SSH（复用当前会话，终端历史/日志不丢）
+
+    与本地拦截 SSH 同路径（switch_to_ssh 复用会话）；连接结果经 WebSocket 推送
+    ssh_connected / 失败提示，前端更新终端类型与重连凭据，不重建终端实例。
+    """
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    status = await session.reconnect_ssh(
+        req.host, req.port, req.username, req.password, req.private_key, req.passphrase
+    )
+    if status == "failed":
+        # 连接失败：本地 shell 保持可用（switch_to_ssh 已恢复），前端提示失败原因
+        raise HTTPException(status_code=400, detail="重连失败，请检查主机/凭据后重试")
+    return {"status": status}
+
+
 @router.post("/sessions/{session_id}/run")
 async def api_run_command(session_id: str, req: RunCommandRequest):
     """执行命令
