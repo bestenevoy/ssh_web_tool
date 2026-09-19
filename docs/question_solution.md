@@ -83,6 +83,7 @@
 6. **活动日志移出渲染路径**：`useEvents.ts` 改为模块级外部 store（`useSyncExternalStore`），WS 懒建连/3s 重连/上限 500 条，设置页内部订阅，不再走 App props 管道（dfd46d3）。
 7. **后端事件循环阻塞纪律**：所有路由都是 `async def`，同步阻塞调用一律 `asyncio.to_thread`——Ctrl+C 控制台注入（Win32 SendMessageTimeout，进程级 AttachConsole 用全局锁 `_ctrl_c_console_lock` 串行）、本机 PTY terminate（含 time.sleep）、编辑器文件全量读写（62686ca）。
 8. **会话日志两不变量**（`session_log.py`，语义相反勿串台）：首次开启记录前，未开启期间的近期输出存 256KB 有界环并在开启时回放，**banner 必须入日志**；暂停后恢复则**丢弃暂停期输出**（不回放、只清环）。未开启记录时不做 pyte 镜像回放（62686ca 前的设计是无条件恒 feed，已改）。
+9. **SFTP 初始目录 = 回显驱动 cd 跟踪 + home 种子**（`sessions.py`）：SFTP 子系统通道的 cwd 协议上恒等于登录 home，与交互 shell 的 cd 无关，所以"终端当前目录"只能靠跟踪 cd 命令。驱动源是 **EchoParser 从输出流解析的"提示符后最终命令"**（`_parse_echo_line`→`_track_cd`，与历史命令记录同一机制）——**不能**用按键回缓冲：Tab 补全/方向键历史发生在远端，按键侧只见补全前内容，且双源重放相对 cd 序列会错乱。home 基准：远端 shell 启动后后台取一次 SFTP `getcwd()` 种入 `_home_dir`（协议上恒等于登录 home，bytes 归一化为 str），使**首个相对 cd**（如 `cd workspace/`）与 `cd ~/x` 可解析；裸 `cd`/`cd ~`/`cd -`/复合命令（&&/;/|/>）置未知，由 `/cwd` 接口回退（优先缓存 `_home_dir`，再现场 getcwd）。剩余盲区：提示符模式不被 EchoParser 识别的冷门 shell、别名/shell 函数内部 cd。单元测试 `tests/unit/test_cd_tracking.py`（含 Tab 补全回显端到端用例）。
 
 ## 四、验证基线
 

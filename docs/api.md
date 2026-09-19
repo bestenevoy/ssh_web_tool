@@ -20,7 +20,7 @@ API 文档（Swagger UI）：**http://127.0.0.1:8765/docs**
 | POST | `/api/sessions/{id}/run` | 在会话中执行命令（AI/CLI 调用） |
 | GET | `/api/sessions/{id}/state` | 获取终端状态（shell 类型检测） |
 | POST | `/api/sessions/states` | 批量获取多终端状态（前端轮询合并为单请求） |
-| GET | `/api/sessions/{id}/cwd` | SSH 会话当前目录（cd 跟踪，None 时回退 SFTP getcwd=远端 home） |
+| GET | `/api/sessions/{id}/cwd` | SSH 会话当前目录（cd 跟踪，基准 home 于连接后由 SFTP getcwd 种入；None 时回退缓存 home→现场 getcwd=远端 home） |
 | GET | `/api/sessions/{id}/logs` | 获取终端历史日志（分页，含未 flush 缓冲） |
 | GET | `/api/logs/{session_id}` | 按日志文件读取完整历史（会话删除后仍可读，重连回放用） |
 | GET | `/api/sessions/{id}/record` | 查询会话日志记录开关 |

@@ -431,8 +431,8 @@ async def api_get_session_states(session_ids: list[str]):
 async def api_get_session_cwd(session_id: str):
     """获取 SSH 会话当前目录（cd 命令跟踪；SFTP 打开时定位初始目录）
 
-    cd 跟踪为 None（未 cd 过 / cd 回 home / 无法解析的复合命令）时，
-    用 SFTP getcwd() 取 shell 工作目录（新连接即远端 home）作回退；
+    cd 跟踪为 None（未跟踪到有效路径）时，优先用连接后种入的登录 home（_home_dir，
+    来自 SFTP getcwd，协议上恒等于登录 home）；尚未种上则现场取一次 getcwd；
     仍失败返回 None，由前端回退默认目录。
     """
     session_manager = get_session_manager()
@@ -440,6 +440,8 @@ async def api_get_session_cwd(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
     cwd = getattr(session, "current_dir", None)
+    if cwd is None and session.is_connected and not session.is_local():
+        cwd = getattr(session, "_home_dir", None)
     if cwd is None and session.is_connected and not session.is_local():
         try:
             sftp = await session.get_sftp()

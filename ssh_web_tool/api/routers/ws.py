@@ -254,11 +254,6 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             await session._auto_switch_to_local("SSH 连接已断开")
                             raise RuntimeError("SSH 连接已断开，已切换到本机终端")
                         stdin.write(data)
-                        # 行缓冲跟踪 cd 命令（不拦截输入，仅维护 current_dir 供 SFTP 初始目录）
-                        try:
-                            session.feed_ssh_input(data)
-                        except Exception:
-                            pass
                         session.last_active = time.time()
                 except Exception as e:
                     # 不再自动重连：重连会中断正在运行的全屏程序（如 vi/vim），

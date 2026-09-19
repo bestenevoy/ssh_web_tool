@@ -38,8 +38,6 @@ _patch_guard = threading.local()
 
 # 输入流中的 ANSI 转义序列（CSI / OSC），拼行前剥离（方向键、PSReadLine 行编辑序列等）
 _ANSI_SEQ_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b.")
-# 与 _ANSI_SEQ_RE 相同，但 CSI 分支额外接受 ~ 结尾（bash bracketed paste 包裹 \\x1b[200~...\\x1b[201~）
-_SSH_INPUT_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b.")
 
 # SFTP 流式传输块大小（4MB）：上传/下载逐块搬运，内存占用恒定
 SFTP_CHUNK_SIZE = 4 * 1024 * 1024
@@ -257,7 +255,10 @@ class SSHSession:
         self._local_input_line = ""
         # SSH 会话当前目录（cd 命令跟踪，SFTP 打开时作为初始目录；None=未知）
         self.current_dir: str | None = None
-        self._ssh_input_line = ""
+        # 登录 home（远端 shell 启动后由 SFTP getcwd 后台种入；协议上恒等于登录 home）。
+        # cd 跟踪解析首个相对 cd 与 ~/ 前缀的基准；None=尚未种上，跟踪置未知由接口回退兜底
+        self._home_dir: str | None = None
+        self._home_seed_task: asyncio.Task | None = None
         # 待处理的终端尺寸（resize 消息在 PTY 创建前到达时保存）
         self._pending_size: tuple[int, int] | None = None
         # resize 事件：PTY 创建后等待第一个 resize 消息，确保 shell 第一帧输出使用正确尺寸
@@ -431,6 +432,11 @@ class SSHSession:
         # 返回后才终止），start_output_reader 会误判为本地 shell，
         # 导致 SSH 输出永远无人读取（连接成功但终端无任何输出/回显）
         self._start_ssh_reader()
+        # 新 shell 恒从登录 home 起步：重置 cd 跟踪状态，并后台取 SFTP getcwd
+        # 种入 home 基准，使连接后的第一个相对 cd（如 `cd workspace/`）也能被跟踪
+        self.current_dir = None
+        self._home_dir = None
+        self._schedule_home_seed()
         return self.process
 
     # ============ 输出广播机制（逻辑在 OutputBus 组件） ============
@@ -459,6 +465,11 @@ class SSHSession:
         if not self._has_shell or self.process is None:
             return
         for cmd in self._echo_parser.feed(data):
+            # cd 跟踪权威修正：回显行是 Tab 补全/历史翻查后的最终命令，
+            # 输入侧按键缓冲只见补全前内容（含 Tab 的行已跳过缓冲解析）；
+            # 本机会话无 SFTP 需求不跟踪，避免本地 shell 回显干扰
+            if not self.is_local():
+                self._track_cd(cmd)
             try:
                 self._echo_task = asyncio.create_task(self._record_echo(cmd))
             except Exception:
@@ -1016,63 +1027,63 @@ class SSHSession:
 
     # ---------- SSH 会话当前目录跟踪（SFTP 打开定位初始目录） ----------
 
-    def feed_ssh_input(self, data: str) -> None:
-        """SSH 会话输入行缓冲：仅用于跟踪 cd 命令维护 current_dir，不拦截输入。
+    def _schedule_home_seed(self) -> None:
+        """后台取 SFTP getcwd 种入登录 home（重新调度前取消旧的未完成任务）"""
+        if self._home_seed_task is not None and not self._home_seed_task.done():
+            self._home_seed_task.cancel()
+        self._home_seed_task = asyncio.create_task(self._seed_home_dir())
 
-        与 feed_local_input 不同——这里所有字符原样放行（真正写入由调用方完成），
-        本方法只同步维护行缓冲并在回车时解析 cd 命令更新 current_dir。
-        xterm 前端逐字符发送输入，回车是单独的 "\\r"。
-        """
-        # 剥离 ANSI 转义序列（粘贴时 bash 的 bracketed paste 会包裹
-        # \\x1b[200~...\\x1b[201~，逐字符输入可能夹带方向键等重绘序列；
-        # _ANSI_SEQ_RE 的 CSI 分支只认字母结尾，需补 ~ 结尾覆盖粘贴包裹）
-        data = _SSH_INPUT_ANSI_RE.sub("", data)
-        for ch in data:
-            if ch in ("\r", "\n"):
-                self._track_cd(self._ssh_input_line)
-                self._ssh_input_line = ""
-                continue
-            if ch in ("\x7f", "\b"):
-                self._ssh_input_line = self._ssh_input_line[:-1]
-                continue
-            if ch in ("\x03", "\x15"):  # Ctrl+C / Ctrl+U：清空当前行
-                self._ssh_input_line = ""
-                continue
-            if ord(ch) < 0x20:
-                continue
-            if len(self._ssh_input_line) < 4096:
-                self._ssh_input_line += ch
+    async def _seed_home_dir(self) -> None:
+        try:
+            sftp = await self.get_sftp()
+            home = await sftp.getcwd()
+            if isinstance(home, bytes):  # asyncssh 未指定编码时 getcwd 可能返回 bytes
+                home = home.decode("utf-8", "replace")
+            if home:
+                self._home_dir = home
+        except Exception:
+            pass  # 取不到保持未知：相对 cd 置未知，由 cwd 接口 getcwd 回退兜底
 
     def _track_cd(self, line: str) -> None:
         """解析 cd 命令更新 current_dir（仅跟踪纯 cd）。
 
-        - cd /path / cd rel → 规范化后记录
-        - cd 单独（回 home）、cd ~、cd -、复合命令（&&/;/|/>）→ 置 None（未知），
-          打开 SFTP 时回退默认目录，避免给出错误位置
+        唯一驱动源是 EchoParser 从输出回显提取的最终命令文本（含 Tab 补全、
+        方向键历史翻查后的完整内容）——按键侧只见补全前的原始输入，不做跟踪。
+
+        - cd /path / cd rel → 规范化后记录；首个相对 cd 以种入的 home（_home_dir）为基准
+        - cd ~/x → home + /x；cd 单独（回 home）、cd ~、cd -、~user、
+          复合命令（&&/;/|/>）→ 置 None（未知），打开 SFTP 时由接口回退 home，
+          避免给出错误位置
         """
+        import posixpath
+
         line = (line or "").strip()
-        if not line.startswith("cd"):
-            return
+        if not line.startswith("cd") or (len(line) > 2 and line[2] not in " \t"):
+            return  # 非 cd 命令（含 cdx 之类前缀撞车）一律忽略，维持当前跟踪值
         rest = line[2:].strip()
-        if not rest:
-            self.current_dir = None  # cd 回 home：home 未知
-            return
-        if rest == "-" or rest.startswith("~") or rest.startswith("--"):
-            self.current_dir = None
-            return
         if any(op in rest for op in ("&&", ";", "|", ">", "&")):
             self.current_dir = None  # 复合命令不解析，避免误判
+            return
+        if not rest or rest == "-" or rest.startswith("--"):
+            self.current_dir = None  # 回 home / 前次目录：home 由接口 getcwd 回退兜底
+            return
+        if rest.startswith("~"):
+            if rest == "~":
+                self.current_dir = None  # 回 home，接口回退已是 home
+            elif rest.startswith("~/") and self._home_dir:
+                self.current_dir = posixpath.normpath(self._home_dir + rest[1:])
+            else:
+                self.current_dir = None  # ~user 等无可靠解析途径
             return
         target = rest.split()[0]
         if target.startswith("/"):
             base = target
-        elif self.current_dir:
-            base = self.current_dir.rstrip("/") + "/" + target
         else:
-            self.current_dir = None  # 相对 cd 但当前目录未知
-            return
-        import posixpath
-
+            base_dir = self.current_dir or self._home_dir
+            if not base_dir:
+                self.current_dir = None  # home 尚未种上，相对 cd 无基准
+                return
+            base = base_dir.rstrip("/") + "/" + target
         self.current_dir = posixpath.normpath(base)
 
     def resize_local(self, cols: int, rows: int):
