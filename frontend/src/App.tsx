@@ -25,7 +25,6 @@ import { HostModal } from './components/HostModal'
 import { QuickCommandModal } from './components/QuickCommandModal'
 import { PasswordModal } from './components/PasswordModal'
 import { SettingsModal } from './components/SettingsModal'
-import { ShellProfileModal } from './components/ShellProfileModal'
 import { DirPickerModal } from './components/DirPickerModal'
 import { SearchBar } from './components/SearchBar'
 import { FileEditor } from './components/FileEditor'
@@ -87,7 +86,6 @@ function App() {
   }, [])
   const [historySearchOpen, setHistorySearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [sprofOpen, setSprofOpen] = useState(false) // 终端特性档案弹窗（顶栏 📋）
   // 编辑器页：打开后替换中间终端区（终端实例保持挂载，仅隐藏容器）
   const [editorOpen, setEditorOpen] = useState(false)
   const [sftpWbOpen, setSftpWbOpen] = useState(false)
@@ -1020,16 +1018,8 @@ function App() {
         >
           🗂 SFTP
         </button>
-        {/* 应用级入口（特性档案 / 设置）与工具开关分组隔开 */}
+        {/* 应用级入口（设置）与工具开关分组隔开 */}
         <div className="topbar-divider" />
-        {/* 终端特性档案入口：每种 shell 的特性与注意事项（防误操作） */}
-        <button
-          className="btn btn-secondary btn-sm settings-btn"
-          onClick={() => setSprofOpen(true)}
-          title="终端特性档案：每种 shell 的清屏/退出/特性与注意事项"
-        >
-          📖
-        </button>
         {/* 检查配置入口已移入设置页「本机终端」分区 */}
         {/* 设置入口：顶栏最右上角，打开整页设置 */}
         <button
@@ -1233,9 +1223,6 @@ function App() {
           onCancel={() => setRecordDirModal(null)}
         />
       )}
-
-      {/* 终端特性档案（整页覆盖）：每种 shell 的特性与注意事项 */}
-      {sprofOpen && <ShellProfileModal onClose={() => setSprofOpen(false)} />}
 
       {/* 设置页（整页覆盖）：本机终端 / 命令块 / 字体主题 / 关键字高亮 / 缓存清理 */}
       {settingsOpen && (
