@@ -481,9 +481,10 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 }
 .session-item:hover { background: var(--bg-hover); }
 .session-item.active { background: var(--bg-active); color: var(--accent); }
-.session-item .status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: #4caf50; }
-.session-item .status-dot.disconnected { background: var(--danger); }
-.session-item .status-dot.reconnecting { background: #ffb74d; animation: tab-connecting-blink 1.1s ease-in-out infinite; }
+/* 连接状态点（会话列表 + 终端 tab 共用配色）：绿=已连接 / 红=已断开 / 橙=连接中·重连中闪烁 */
+.session-item .status-dot, .tab .status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: #4caf50; }
+.session-item .status-dot.disconnected, .tab .status-dot.disconnected { background: var(--danger); }
+.session-item .status-dot.reconnecting, .tab .status-dot.reconnecting { background: #ffb74d; animation: tab-connecting-blink 1.1s ease-in-out infinite; }
 .session-item .sess-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .session-item .sess-close { opacity: .4; font-size: calc(12px * var(--ui-fs-scale)); padding: 0 2px; border-radius: 2px; }
 .session-item .sess-close:hover { opacity: 1; background: var(--accent); color: #fff; }

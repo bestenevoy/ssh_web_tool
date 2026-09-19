@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import type { TerminalInstance } from '../lib/useTerminals'
-import type { Host, HostType } from '../types'
+import type { Host } from '../types'
 import type { PaneIndex } from './TerminalView'
 import { profileOf } from '../lib/shellProfiles'
+import { sessionConnState } from '../lib/terminalDisconnect'
 
 interface Props {
   /** 窗口索引（分屏时 0/1；单屏恒为 0） */
@@ -14,7 +15,6 @@ interface Props {
   /** 是否焦点窗口（点击/拖拽目标时聚焦） */
   focused: boolean
   terminals: Map<string, TerminalInstance>
-  hostTypes: HostType[]
   hosts: Host[]
   onSwitch: (id: string) => void
   onClose: (id: string) => void
@@ -44,11 +44,9 @@ function hideDefaultDragImage(e: React.DragEvent) {
 
 export function TerminalWindow({
   windowIndex, sessions, activeId, focused,
-  terminals, hostTypes, hosts, inSplit,
+  terminals, hosts, inSplit,
   onSwitch, onClose, onNew, onMoveTabToWindow, onFocusWindow, onPaneClick,
 }: Props) {
-  const getTypeColor = (key: string) => hostTypes.find((t) => t.key === key)?.color || '#999'
-
   const hostById = new Map(hosts.map((h) => [h.id, h]))
   // 会话 ip：ssh 链接会话用原始 host，已保存主机查配置，本地会话显示「本地」
   const hostIpOf = (t: TerminalInstance): string =>
@@ -60,7 +58,9 @@ export function TerminalWindow({
   const renderTab = (t: TerminalInstance, i: number) => {
     const profile = profileOf(t)
     const ip = hostIpOf(t)
-    const stateHint = t.pending ? '（连接中…）' : t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : ''
+    // 连接状态点判定见 sessionConnState：主动断开/SSH exit 走 ssh_exited（自动切回本机 shell）
+    const conn = sessionConnState(t)
+    const stateHint = t.pending ? '（连接中…）' : t.reconnecting ? '（重连中…）' : t.disconnected ? '（已断开）' : t.ssh_exited ? '（SSH 已断开，自动切回本机 shell）' : ''
     return (
       <div
         key={t.session_id}
@@ -71,7 +71,10 @@ export function TerminalWindow({
         onDragEnd={() => setDragSid(null)}
         title={`${i + 1} · ${ip} · ${t.terminal_name}${stateHint}\nShell: ${profile.label}（${profile.summary}）\n清屏: ${profile.clearCmd}\n退出: ${profile.exitCmd}`}
       >
-        <span className="type-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: getTypeColor(t.type), display: 'inline-block' }} />
+        <span
+          className={`status-dot${conn === 'disconnected' ? ' disconnected' : conn === 'connecting' ? ' reconnecting' : ''}`}
+          title={conn === 'disconnected' ? '已断开' : conn === 'connecting' ? '连接中' : '已连接'}
+        />
         <span className="tab-title">{t.pending ? `${ip} · 连接中` : `${i + 1} · ${ip}`}</span>
         <span
           className="shell-type-badge"

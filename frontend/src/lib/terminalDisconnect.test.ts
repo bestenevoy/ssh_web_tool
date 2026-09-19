@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { markDisconnected } from './terminalDisconnect'
+import { markDisconnected, sessionConnState } from './terminalDisconnect'
 
 interface FakeTerm {
   disconnected: boolean
@@ -52,5 +52,26 @@ describe('markDisconnected', () => {
       }),
     ).not.toThrow()
     expect(map.size).toBe(0)
+  })
+})
+
+describe('sessionConnState', () => {
+  const base = { disconnected: false, ssh_exited: false, pending: false, reconnecting: false }
+
+  it('全 false = 已连接（本机终端/正常 SSH）', () => {
+    expect(sessionConnState(base)).toBe('connected')
+  })
+
+  it('pending 或 reconnecting = 连接中（优先于其他标记）', () => {
+    expect(sessionConnState({ ...base, pending: true })).toBe('connecting')
+    expect(sessionConnState({ ...base, reconnecting: true })).toBe('connecting')
+  })
+
+  it('disconnected = 已断开', () => {
+    expect(sessionConnState({ ...base, disconnected: true })).toBe('disconnected')
+  })
+
+  it('ssh_exited（主动断开自动切回本机 shell）也算已断开——只看 disconnected 会误标绿', () => {
+    expect(sessionConnState({ ...base, ssh_exited: true })).toBe('disconnected')
   })
 })

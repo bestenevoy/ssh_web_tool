@@ -1,6 +1,6 @@
 import { TerminalWindow } from './TerminalWindow'
 import type { TerminalInstance } from '../lib/useTerminals'
-import type { Host, HostType } from '../types'
+import type { Host } from '../types'
 
 // 分屏模式：none 单屏 / h 左右均分 / v 上下均分（固定 2 窗口，不做拖拽分割树）
 export type SplitMode = 'none' | 'h' | 'v'
@@ -17,7 +17,6 @@ interface Props {
   windowActive: [string | null, string | null]
   /** 焦点窗口索引 */
   focusedPane: PaneIndex
-  hostTypes: HostType[]
   hosts: Host[]
   /** 会话显示顺序（单屏时窗口0 的 tab 顺序 = 会话列表顺序；缺省 = 创建顺序） */
   order?: string[]
@@ -36,7 +35,7 @@ interface Props {
 
 export function TerminalView({
   terminals, activeId, splitMode, windowSessions, windowActive, focusedPane,
-  hostTypes, hosts, order, registerContainer,
+  hosts, order, registerContainer,
   onSwitch, onClose, onNew, onMoveTabToWindow, onFocusWindow,
   onTerminalContextMenu, onPaneClick,
 }: Props) {
@@ -79,7 +78,6 @@ export function TerminalView({
           activeId={w.active}
           focused={!inSplit || w.idx === focusedPane}
           terminals={terminals}
-          hostTypes={hostTypes}
           hosts={hosts}
           onSwitch={onSwitch}
           onClose={onClose}
