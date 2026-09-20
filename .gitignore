@@ -53,6 +53,7 @@ config.json
 _wstool_update.log
 
 # 临时文件（调试截图 / commit message 等）
+.shots/
 _commit_msg.txt
 _menu_*.bmp
 .catpaw/
