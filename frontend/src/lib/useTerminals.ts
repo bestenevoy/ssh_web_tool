@@ -5,7 +5,6 @@ import type { FitAddon } from '@xterm/addon-fit'
 import type { Host } from '../types'
 import { api } from './api'
 import type { TerminalSettings } from './useSettings'
-import { setupCopyOnSelect } from './terminalCopy'
 import { editLineBuffer, isEnter } from './lineEditor'
 import { createTerminalInstance, getTerminalTheme } from './terminalInstance'
 import type { TerminalInstance, SshConnInfo } from './terminalInstance'
@@ -692,8 +691,6 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       if (inst && !inst.container) {
         inst.term.open(el)
         inst.container = el
-        // 选中即复制：鼠标拖选松开即写入系统剪贴板（绑定到容器 mouseup）
-        setupCopyOnSelect(inst.term, el)
         // 命令块渲染层（左侧色条 + 遮罩折叠）：xterm 打开后才有几何信息可测
         if (!inst.blockBar) inst.blockBar = attachBlockBar(inst.term, el, settingsRef.current)
         // 关键字高亮装饰层（rssh 同款）：xterm 打开后创建（同 blockBar 模式），

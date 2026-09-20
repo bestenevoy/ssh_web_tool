@@ -56,7 +56,7 @@ const SHORTCUTS: { keys: string; desc: string }[] = [
   { keys: 'Alt R', desc: '历史命令搜索' },
   { keys: 'Ctrl C', desc: '有选区时复制选中内容（无选区时发送中断信号）' },
   { keys: 'Ctrl V', desc: '粘贴（多行自动包裹防误执行）' },
-  { keys: '鼠标拖选', desc: '选中即复制到系统剪贴板' },
+  { keys: '鼠标拖选', desc: '仅选择文本，不再自动复制；Ctrl+C 复制到剪贴板' },
   { keys: '双击色条', desc: '折叠 / 展开命令块' },
 ]
 

@@ -6,8 +6,8 @@
  * 修复：keydown 只 return false（阻止 xterm 发送 ^V），不 preventDefault（让浏览器
  * 产生 paste 事件）；粘贴统一由 textarea capture 阶段拦截处理，单一路径。
  *
- * 复制：支持「选中即复制」（copy-on-select，见 setupCopyOnSelect）与「Ctrl+C 有选区
- * 时复制」两种入口，统一走 writeClipboardText 三级 fallback：
+ * 复制：入口为「Ctrl+C 有选区时复制」（选中不再自动复制，见 SHORTCUTS 说明），
+ * 统一走 writeClipboardText 三级 fallback：
  *   1) pywebview 原生剪贴板桥（WebView2 下 navigator.clipboard.writeText 常被
  *      安全策略/焦点要求拒绝而静默失败 → 优先原生，稳定写入系统剪贴板）
  *   2) navigator.clipboard.writeText（secure context：http(s)://127.0.0.1/localhost）
@@ -72,7 +72,7 @@ function copySelection(term: Terminal): Promise<boolean> {
   })
 }
 
-/** 复制功能的容器绑定（mouseup 有选区即复制）+ 快捷键（Ctrl+C 复制 / Ctrl+V 粘贴 / Alt+R 历史搜索 / Ctrl+F 内容搜索 / Ctrl+B 折叠主机列表） */
+/** 终端快捷键绑定（Ctrl+C 有选区时复制 / Ctrl+V 粘贴 / Alt+R 历史搜索 / Ctrl+F 内容搜索 / Ctrl+B 折叠主机列表） */
 export function setupTerminalCopy(term: Terminal, onAltR?: () => void, onCtrlF?: () => void, onCtrlB?: () => void) {
   // 1) Ctrl+C：有选区时复制并阻止发送（避免打断远端正在运行的命令）
   //    Ctrl+V：不 preventDefault（让浏览器产生 paste 事件），return false 阻止 xterm
@@ -141,21 +141,4 @@ function preparePasteText(term: Terminal, text: string): string {
   const bracketed = !!(term as any).modes?.bracketedPasteMode
   const normalized = text.replace(/\r?\n/g, '\r')
   return bracketed ? `\x1b[200~${normalized}\x1b[201~` : normalized
-}
-
-/**
- * copy-on-select：左键拖选文本，松开鼠标即复制到系统剪贴板（终端用户最常见操作）。
- * 绑定在终端容器（registerContainer 传入的 .terminal-instance div）的 mouseup 上；
- * 仅响应左键（button===0），避免破坏右键/中键行为。
- */
-export function setupCopyOnSelect(term: Terminal, container: HTMLElement) {
-  if ((container as any).__wstoolCopyOnSelectBound) return
-  ;(container as any).__wstoolCopyOnSelectBound = true
-  container.addEventListener('mouseup', (e: MouseEvent) => {
-    if (e.button !== 0) return
-    // 保持选区（不清除）：复制后用户仍可看到;再次 Ctrl+C 仍会中断命令
-    if (term.hasSelection()) {
-      copySelection(term)
-    }
-  })
 }

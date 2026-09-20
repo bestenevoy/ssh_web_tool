@@ -710,10 +710,12 @@ function App() {
   const handleReorderHosts = useCallback(async (ids: string[]) => {
     try {
       await api.reorderHosts(ids)
+      // 与分组排序同口径：保存后立即回读一次，列表及时反映新顺序
+      loadHosts()
     } catch (e) {
       console.error('保存主机排序失败', e)
     }
-  }, [])
+  }, [loadHosts])
 
   const handleSendQuickCommand = useCallback((qc: QuickCommand) => {
     executeQuickCommand(qc, null)

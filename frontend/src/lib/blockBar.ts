@@ -6,7 +6,8 @@
  *   - 色条：每块一条左侧色条，折叠态虚线描边（rssh 同款）、选中态加描边光环；
  *   - 徽标：折叠块在命令行右端叠加行末角标「⋯ 已折叠 N 行」（rssh 同款）；
  *   - 交互：单击色条选中块（rssh Finder 风格：Shift 范围 / Ctrl 切换）、
- *     点徽标展开、双击色条切换折叠/展开（复制走单击选中 + Ctrl+C 或右键菜单）、
+ *     点徽标展开、双击色条切换折叠/展开（复制走单击选中 + Ctrl+C 或右键菜单，
+ *     折叠/展开切换后清除块选中——行号已平移，选区过期）、
  *     折叠/展开也可走终端右键菜单（hitTest + toggleFold 供 App 层菜单使用）。
  *
  * 不变量与私有 API 全部收口在 folds.ts（本文件零私有 API，只用
@@ -401,14 +402,26 @@ export function attachBlockBar(
     writeClipboardText(text)
   }
 
+  /** 折叠态切换后清掉块选中：行号已平移，色条光环与 singleSelect 顺带选中的文本都过期了 */
+  function clearFoldSelection() {
+    term.clearSelection()
+    clearSelection()
+  }
+
   /** 双击色条 / 右键菜单共用：切换折叠态（已折叠展开；未折叠且已关闭块则折叠） */
   function toggleFoldById(id: number) {
     if (!foldStore) return
     const b = tracker.blocks.find((x) => x.id === id)
     if (!b || b.start.isDisposed) return
-    if (foldStore.isFolded(id)) foldStore.unfold(id)
+    if (foldStore.isFolded(id)) {
+      foldStore.unfold(id)
+      clearFoldSelection()
+    }
     // 仅已关闭块可折叠——运行中块终点会漂移，抽不住
-    else if (b.end && !b.end.isDisposed) foldStore.fold(id)
+    else if (b.end && !b.end.isDisposed) {
+      foldStore.fold(id)
+      clearFoldSelection()
+    }
   }
 
   const onClick = (ev: MouseEvent) => {
@@ -416,8 +429,9 @@ export function attachBlockBar(
     if (!el) return
     const id = Number(el.getAttribute('data-block'))
     if (el.classList.contains('block-fold-badge')) {
-      // 点徽标 → 展开
+      // 点徽标 → 展开（同样取消该块残留的选中态）
       foldStore?.unfold(id)
+      clearFoldSelection()
       return
     }
     const b = tracker.blocks.find((x) => x.id === id)
