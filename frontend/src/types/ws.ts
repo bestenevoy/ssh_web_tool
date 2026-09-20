@@ -33,6 +33,7 @@ export interface WsSshConnected {
   username: string
   password: string
   terminal_name: string
+  host_id?: string // 拦截连接匹配到已保存主机时下发（列表计数/单击轮换跟随挂载）
 }
 
 export interface WsSwitchedToLocal {

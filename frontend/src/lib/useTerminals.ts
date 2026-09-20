@@ -319,7 +319,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     // ---- 已保存主机 SSH：先建占位 tab（显示"连接中"），HTTP 连接成功后关闭占位、
     //      另建真实实例接管（并发友好：不同主机可同时建立连接，状态在各自 tab 内呈现）----
     if (!host) throw new Error('缺少主机连接信息')
-    const display = `${host.username}@${host.host}:${host.port}`
+    // 建占位前的活动会话：连接失败关闭占位后焦点回退到它（同窗口原位回退，不跳转）
+    const prevActiveId = activeIdRef.current
     const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const pending = createTerminalInstance({
       session_id: pendingId,
@@ -375,17 +376,11 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       setActiveId(result.session_id)
       return result.session_id
     } catch (e) {
-      // 连接失败：占位 tab 保留（置为断开态划线，顶部出现「重连」按钮可手动重试，
-      // 也可手动关闭），不再自动关闭；"退到本地终端"由调用方（App）负责
-      const msg = (e as Error)?.message || '未知错误'
-      setTerminals((prev) => {
-        const cur = prev.get(pendingId)
-        if (!cur) return prev
-        const next = new Map(prev)
-        next.set(pendingId, { ...cur, pending: false, disconnected: true, terminal_name: '连接失败' })
-        return next
-      })
-      pending.term.write(`\r\n\x1b[31m[SSH 连接失败] ${display}\r\n原因: ${msg}\x1b[0m\r\n`)
+      // 连接失败：直接关闭占位 tab（失败原因由调用方 toast 呈现），焦点回退到建占位前
+      // 的活动会话；不再保留不可操作的"连接失败"tab，也不跳转/新建其他终端
+      await closeTerminalRef.current!(pendingId, true)
+      if (prevActiveId && terminalsRef.current.has(prevActiveId)) setActiveId(prevActiveId)
+      else if (activeIdRef.current === pendingId) setActiveId(null)
       throw e
     }
   }, [fitTerminal, sendResize, resyncTerminal, handleTerminalInput, sendInput, ensureFit])

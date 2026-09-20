@@ -530,8 +530,8 @@ function App() {
   }, [terminals, hosts, loadHosts, askPassword])
 
   // ---- 主机连接入口（单击复用 / 双击新建）----
-  // 新建连接：先建 tab 显示"连接中"，成功后接管显示；失败退到本地终端并写入失败原因
-  // （占位 tab 的失败信息由 useTerminals 写入并延迟自动关闭）。连接状态不再进顶栏 status
+  // 新建连接：先建 tab 显示"连接中"，成功后接管显示；失败关闭占位 tab（useTerminals 负责
+  // 原位回退焦点），失败原因走 toast——不跳转其他终端、不新建本机 tab
   const connectHostWithFallback = useCallback((host: Host) => {
     return terminals.createTerminal(host)
       .then(() => {
@@ -539,19 +539,10 @@ function App() {
         setTimeout(() => loadHosts(), 800)
       })
       .catch((e) => {
-        const failText = `\r\n\x1b[31m[SSH 连接失败] ${host.username}@${host.host}:${host.port} - ${(e as Error)?.message || '未知错误'}\x1b[0m\r\n`
-        const local = Array.from(terminals.terminals.values()).find((t) => t.type === 'local' && !t.disconnected)
-        if (local) {
-          terminals.switchTerminal(local.session_id)
-          local.term.write(failText)
-        } else {
-          terminals.openLocalTerminal(fallbackShell)
-            .then((sid) => { setTimeout(() => terminals.getTerminal(sid)?.term.write(failText), 50) })
-            .catch(() => alert('SSH连接失败: ' + (e as Error).message))
-        }
+        setStatus(`SSH 连接失败 ${host.username}@${host.host}:${host.port} - ${(e as Error)?.message || '未知错误'}`)
         loadHosts()
       })
-  }, [terminals, loadHosts, fallbackShell])
+  }, [terminals, loadHosts, setStatus])
 
   // 单击主机：不发起新连接。只在该主机的已连接会话间切换：
   // 当前激活不是该主机 → 选中分组内第一个（= 第一次连接的会话）；
@@ -1088,7 +1079,12 @@ function App() {
             onMoveTabToWindow={handleMoveTabToWindow}
             onFocusWindow={handleFocusWindow}
             onTerminalContextMenu={handleTerminalContextMenu}
-            onPaneClick={(idx) => setFocusedPane(idx)}
+            onPaneClick={(idx, sid) => {
+              // 点窗格 → 聚焦该窗口，并让活动会话跟随（分屏下命令搜索/快捷指令/Ctrl+F
+              // 均以 activeId 为目标，不跟随就会出现"输入不到光标所在窗口"）
+              setFocusedPane(idx)
+              if (sid && sid !== terminals.activeId) handleSwitchTerminal(sid)
+            }}
           />
           {/* 终端内容搜索条（Ctrl+F）：浮在活动终端右上角；切换活动终端时跟随显示对应实例 */}
           {terminals.searchOpenId && (() => {

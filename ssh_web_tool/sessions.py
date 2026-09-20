@@ -640,6 +640,8 @@ class SSHSession:
                     "username": ssh_user,
                     "password": ssh_pass,  # 本地工具：用户刚在终端输入过，带回供"重连"使用
                     "terminal_name": f"{ssh_user}@{ssh_host}",
+                    # 匹配到已保存主机时带上 host_id：前端实例同步挂载（单击主机轮换可覆盖该会话）
+                    "host_id": self.host_id,
                 }
             )
             await event_bus.publish(
@@ -1196,6 +1198,25 @@ class SSHSession:
         self._connected = True
         self._has_shell = True
         self._local_shell = ""
+        # 挂载到已保存主机：host+port+用户名精确匹配则复用其 host_id，不匹配清空（防错挂）。
+        # 本机终端输入 ssh 连出的会话由此计入主机列表的连接数/状态点（get_sessions_by_host）
+        self.host_id = self._match_saved_host()
+
+    def _match_saved_host(self) -> str:
+        """按 host+port+username 查找已保存主机，返回其 id；未找到/存储异常返回 "" """
+        try:
+            from .deps import get_storage
+
+            for h in get_storage().list_hosts():
+                if (
+                    h.get("host") == self.host
+                    and int(h.get("port") or 22) == self.port
+                    and h.get("username") == self.username
+                ):
+                    return str(h.get("id", ""))
+        except Exception:
+            pass
+        return ""
 
     async def reconnect_ssh(
         self,
@@ -1224,6 +1245,7 @@ class SSHSession:
                     "username": username,
                     "password": password or "",
                     "terminal_name": self.terminal_name,
+                    "host_id": self.host_id,  # switch_to_ssh 已按已保存主机匹配挂载
                 }
             )
             return "connected"

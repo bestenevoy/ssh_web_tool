@@ -295,7 +295,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
                 terminal_name: msg.terminal_name || cur.terminal_name,
                 type: 'ssh',
                 shell_type: 'shell',
-                host_id: cur.host_id || '',
+                host_id: msg.host_id || cur.host_id || '', // 后端按 host+port+user 匹配到已保存主机时下发
                 ssh_conn: {
                   host: msg.host,
                   port: msg.port,
