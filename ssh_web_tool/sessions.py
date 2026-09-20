@@ -41,8 +41,8 @@ _ANSI_SEQ_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1
 
 # SFTP 流式传输块大小（4MB）：上传/下载逐块搬运，内存占用恒定
 SFTP_CHUNK_SIZE = 4 * 1024 * 1024
-# SFTP 通道空闲自动关闭时限：通道复用 SSH 连接，长期空闲会一直占着服务端
-# sftp-server 进程/通道；监控循环发现超过该时长无操作即关闭，下次用到自动重开。
+# SFTP 空闲自动关闭时限：长期空闲会一直占着服务端 sftp-server 进程与传输独立
+# 连接（额外的 sshd 会话）；监控循环发现超过该时长无操作即关闭，下次用到懒建重开。
 SFTP_IDLE_TIMEOUT = 300
 
 
@@ -217,6 +217,10 @@ class SSHSession:
         self.conn: asyncssh.SSHClientConnection | None = None
         self.process: asyncssh.SSHClientProcess | None = None
         self._sftp = None
+        self._sftp_conn: asyncssh.SSHClientConnection | None = (
+            None  # SFTP 传输专用独立连接（与终端连接隔离，防传输数据挤占终端发送队列）
+        )
+        self._sftp_lock = asyncio.Lock()  # 并发取用时防止重复建传输连接/通道
         self._sftp_last_used = 0.0  # 最近一次取用通道的时间（空闲自动关闭判断）
         self._sftp_inuse = 0  # 进行中的流式传输数：传输期间通道不可被空闲关闭
         self.created_at = time.time()
@@ -370,14 +374,9 @@ class SSHSession:
     # 超时秒数从全局配置读取（config.json connect_timeout，1-300 默认 10）；
     # 认证阶段另有路由层外层总超时兜底
 
-    async def connect(self, password: str | None = None, private_key: str | None = None, passphrase: str | None = None):
-        """建立 SSH 连接（带 keepalive 防止空闲超时断开）"""
-        # 保存认证信息，用于自动重连
-        self._password = password
-        self._private_key = private_key
-        self._passphrase = passphrase
-
-        kwargs = {
+    def _ssh_connect_kwargs(self) -> dict:
+        """组装 asyncssh.connect 参数（终端连接与 SFTP 传输专用独立连接共用同一凭据）"""
+        kwargs: dict = {
             "host": self.host,
             "port": self.port,
             "username": self.username,
@@ -386,16 +385,27 @@ class SSHSession:
             "keepalive_count_max": 2,  # 2 次 keepalive 无响应（约 20s）即判定连接断开，快速发现静默断线
             "connect_timeout": get_connect_timeout(),  # TCP 建连超时（配置化），防不可达主机卡死
         }
-        if password:
-            kwargs["password"] = password
-        if private_key:
-            kwargs["client_keys"] = [asyncssh.import_private_key(private_key, passphrase)]  # type: ignore[list-item]
+        if self._password:
+            kwargs["password"] = self._password
+        if self._private_key:
+            kwargs["client_keys"] = [asyncssh.import_private_key(self._private_key, self._passphrase)]  # type: ignore[list-item]
+        return kwargs
+
+    async def connect(self, password: str | None = None, private_key: str | None = None, passphrase: str | None = None):
+        """建立 SSH 连接（带 keepalive 防止空闲超时断开）"""
+        # 保存认证信息，用于自动重连
+        self._password = password
+        self._private_key = private_key
+        self._passphrase = passphrase
+        # 先回收旧的 SFTP 通道/传输独立连接（首次连接为空操作；重连、切换主机也走这里，
+        # 目标与凭据可能已变，下次用到文件功能时懒建重建）
+        await self.close_sftp()
 
         # 标记为工具内部连接：劫持层（patch_asyncssh）看到该标记直接放行，
         # 不会把工具自身的连接重复注册为镜像会话
         _patch_guard.active = True
         try:
-            self.conn = await asyncssh.connect(**kwargs)
+            self.conn = await asyncssh.connect(**self._ssh_connect_kwargs())
         finally:
             _patch_guard.active = False
         self._connected = True
@@ -1105,6 +1115,8 @@ class SSHSession:
         """
         self._reconnecting = False
         self.stop_output_reader()
+        # 终端 SSH 连接即将关闭：SFTP 通道/传输独立连接一并回收，不留额外 sshd 会话
+        await self.close_sftp()
         if cols <= 0:
             cols = self._last_cols
         if rows <= 0:
@@ -1551,14 +1563,56 @@ class SSHSession:
     # ============ SFTP 文件管理 ============
 
     async def get_sftp(self):
-        """获取或创建 SFTP 客户端（复用 SSH 连接上的通道；每次取用刷新活动时间）"""
+        """获取或创建 SFTP 客户端（优先经传输专用独立连接，每次取用刷新活动时间）
+
+        背景：SFTP 曾与终端共用同一条 SSH 连接，而 SSH 信道没有优先级——上传时
+        传输数据灌满该连接的发送队列，同会话终端回显被队头阻塞、肉眼可见发卡。
+        现在传输走懒建的独立连接（用会话已存凭据静默重新认证，终端连接不再被
+        文件数据挤占）；无法重连的场景（2FA 动态口令、服务器连接数限制等）
+        自动回退旧的共享信道，保证文件功能可用。
+        """
         if not self.is_connected:
             raise RuntimeError("SSH 未连接")
+        if self._sftp is not None and self._sftp_conn_dead():
+            await self.close_sftp()  # 独立连接已静默断开（网络抖动/服务端掐线）：回收重建
         if self._sftp is None:
-            assert self.conn is not None
-            self._sftp = await self.conn.start_sftp_client()
+            async with self._sftp_lock:
+                if self._sftp is None:  # 双重检查：并发取用（home 种子+上传）只建一次
+                    self._sftp = await self._open_sftp_client()
         self._sftp_last_used = time.time()
         return self._sftp
+
+    def _sftp_conn_dead(self) -> bool:
+        """传输独立连接是否已断开；共享信道（_sftp_conn=None）不必判——终端连接存活由重连逻辑负责"""
+        if self._sftp_conn is None:
+            return False
+        try:
+            t = getattr(self._sftp_conn, "_transport", None)
+            if t is not None:
+                return bool(t.is_closing())
+            if hasattr(self._sftp_conn, "is_closing"):
+                return bool(self._sftp_conn.is_closing())  # type: ignore[attr-defined]
+        except Exception:
+            return True
+        return False
+
+    async def _open_sftp_client(self):
+        """建立 SFTP 客户端：优先独立传输连接，失败回退终端连接上的共享信道"""
+        # 无凭据（agent/免密登录的会话）时无法自动重认证，直接走共享信道
+        if self._password or self._private_key:
+            try:
+                _patch_guard.active = True  # 同 connect()：防被劫持层误注册为镜像会话
+                try:
+                    self._sftp_conn = await asyncssh.connect(**self._ssh_connect_kwargs())
+                finally:
+                    _patch_guard.active = False
+                return await self._sftp_conn.start_sftp_client()
+            except Exception as e:
+                # 建连或开 SFTP 子系统失败：已建出的半程连接要真关掉，不能只丢引用
+                await self.close_sftp()
+                print(f"[SFTP] 传输独立连接建立失败，回退终端连接信道: {self.session_id} ({e})")
+        assert self.conn is not None
+        return await self.conn.start_sftp_client()
 
     async def list_directory(self, path: str = "/") -> list[dict]:
         """列出目录内容
@@ -1704,16 +1758,22 @@ class SSHSession:
             raise RuntimeError(f"删除失败: {e}")
 
     async def close_sftp(self):
-        """关闭 SFTP 连接"""
+        """关闭 SFTP 通道；若建有传输专用独立连接，一并断开"""
         if self._sftp:
             try:
                 self._sftp.close()  # type: ignore[attr-defined]
             except Exception:
                 pass
             self._sftp = None
+        if self._sftp_conn:
+            try:
+                self._sftp_conn.close()
+            except Exception:
+                pass
+            self._sftp_conn = None
 
     async def close_sftp_if_idle(self, timeout: float = SFTP_IDLE_TIMEOUT) -> bool:
-        """空闲超过 timeout 秒则关闭 SFTP 通道（下次用到自动重开），返回是否关闭了
+        """空闲超过 timeout 秒则关闭 SFTP 通道与传输独立连接（下次用到自动重开），返回是否关闭了
 
         空闲判断容易：每次经 get_sftp() 取通道都刷新 _sftp_last_used，监控循环
         每 15s 检查一次。难点只有一个——流式传输全程只取一次通道，靠 _sftp_inuse
@@ -1723,7 +1783,7 @@ class SSHSession:
         if time.time() - self._sftp_last_used < timeout:
             return False
         await self.close_sftp()
-        print(f"[Monitor] SFTP 空闲超 {int(timeout)}s，通道已关闭: {self.session_id}")
+        print(f"[Monitor] SFTP 空闲超 {int(timeout)}s，通道/传输连接已关闭: {self.session_id}")
         return True
 
     def is_alive(self) -> bool:

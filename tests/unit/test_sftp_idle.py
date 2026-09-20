@@ -17,7 +17,7 @@ class _FakeSftp:
 
 def _sess():
     s = SSHSession("t1", "10.0.0.1", 22, "root")
-    s._sftp = _FakeSftp()
+    s._sftp = _FakeSftp()  # type: ignore[assignment]
     s._sftp_last_used = time.time()
     return s
 
@@ -35,7 +35,7 @@ async def test_idle_timeout_closes_channel():
     fake = s._sftp
     s._sftp_last_used = time.time() - SFTP_IDLE_TIMEOUT - 1
     assert await s.close_sftp_if_idle() is True
-    assert s._sftp is None and fake.closed is True
+    assert s._sftp is None and fake.closed is True  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
