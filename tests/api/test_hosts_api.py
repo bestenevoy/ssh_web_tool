@@ -6,6 +6,18 @@ def _hosts(client):
     return client.get("/api/hosts").json()["hosts"]
 
 
+def test_host_badge_online_and_total(client, fake_sessions):
+    """徽标数据：terminal_count=在线（is_alive 且非本机 shell），terminal_total=挂载总数（含断开的）"""
+    hid = client.post("/api/hosts", json={"name": "web1", "host": "10.0.0.1", "username": "root"}).json()["id"]
+    sid1 = fake_sessions.create_session("10.0.0.1", 22, "root", host_id=hid)
+    fake_sessions.create_session("10.0.0.1", 22, "root", host_id=hid)  # 会话 2：断开但保留归属
+    fake_sessions.sessions[sid1].is_alive = lambda: True  # 会话 1 在线；会话 2 断开（仍保留归属）
+    h = next(x for x in _hosts(client) if x["id"] == hid)
+    assert h["terminal_count"] == 1
+    assert h["terminal_total"] == 2
+    assert h["is_connected"] is True
+
+
 def test_host_crud_via_api(client):
     r = client.post("/api/hosts", json={"name": "web1", "host": "10.0.0.1", "username": "root", "group": "prod"})
     assert r.status_code == 200, r.text

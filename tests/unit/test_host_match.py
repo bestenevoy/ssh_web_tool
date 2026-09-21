@@ -72,3 +72,16 @@ async def test_switch_to_ssh_mounts_host_id(monkeypatch):
     # 切到未保存主机：host_id 清空，不会错挂在旧主机上
     await s.switch_to_ssh("192.168.1.5", 22, "guest", "pw")
     assert s.host_id == ""
+
+
+def test_manager_scan_follows_remount():
+    """host_id 换挂后按主机查询必须跟随新归属（曾有反向索引缓存，换挂后旧主机错计/新主机查不到）"""
+    from ssh_web_tool.sessions import SessionManager
+
+    mgr = SessionManager()
+    sid = mgr.create_session("10.0.0.1", 22, "root", host_id="h1")
+    s = mgr.get_session(sid)
+    assert [x.session_id for x in mgr.get_sessions_by_host("h1")] == [sid]
+    s.host_id = "h2"  # 模拟 switch_to_ssh 末尾换挂到另一台已保存主机
+    assert mgr.get_sessions_by_host("h1") == []
+    assert [x.session_id for x in mgr.get_sessions_by_host("h2")] == [sid]

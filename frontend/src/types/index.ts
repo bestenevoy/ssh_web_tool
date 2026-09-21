@@ -28,6 +28,8 @@ export interface Host {
   pw_success_selector?: string
   pw_headless?: boolean
   terminal_count?: number
+  // 挂载到该主机的会话总数（含断开后退回本机终端、仍保留归属的）；徽标显示"在线/总数"
+  terminal_total?: number
   is_connected?: boolean
   // 敏感字段已设置标记（密码等明文下发，便于前端展示/编辑确认）
   has_password?: boolean
@@ -71,7 +73,7 @@ export interface ActiveTerminal {
   // 本地终端拦截 SSH 命令建立的会话（无已保存主机）：原始连接信息，重连凭据
   ssh_conn?: { host: string; port: number; username: string; password: string } | null
   created_at: number
-  last_active: number
+  last_active: number
   // 该会话当前是否有活跃 WebSocket（其他页面正在使用）：restore 时跳过，避免抢占连接
   ws_active?: boolean
 }

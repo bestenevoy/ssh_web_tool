@@ -2038,28 +2038,13 @@ class SSHSession:
 class SessionManager:
     """SSH 会话池（后端统一维护所有连接，前端断开不影响）
 
-    优化：维护 host_id -> List[session_id] 反向索引，
-    get_sessions_by_host / get_host_terminal_count 从 O(N) 遍历降为 O(1) 查找。
+    主机会话查询按 host_id 实时扫描：会话数量级很小（用户手开的终端），
+    而 host_id 会在"本机终端 ssh 拦截/重连换挂主机"（switch_to_ssh）时改值，
+    缓存反向索引必然与真实挂载脱节（旧主机错计、新主机查不到），故不建索引。
     """
 
     def __init__(self):
         self._sessions: dict[str, SSHSession] = {}
-        # 反向索引：host_id -> set of session_id（加速 get_sessions_by_host / get_host_terminal_count）
-        self._host_index: dict[str, set] = {}
-
-    def _add_to_index(self, session: SSHSession):
-        """将会话加入反向索引"""
-        if session.host_id:
-            self._host_index.setdefault(session.host_id, set()).add(session.session_id)
-
-    def _remove_from_index(self, session: SSHSession):
-        """从反向索引移除会话"""
-        if session.host_id:
-            sids = self._host_index.get(session.host_id)
-            if sids:
-                sids.discard(session.session_id)
-                if not sids:
-                    del self._host_index[session.host_id]
 
     def create_session(self, host: str, port: int, username: str, host_id: str = "", terminal_name: str = "") -> str:
         """创建会话（仅分配 ID，尚未连接）"""
@@ -2069,7 +2054,6 @@ class SessionManager:
             terminal_name = self._get_next_terminal_name(host_id)
         session = SSHSession(session_id, host, port, username, host_id, terminal_name)
         self._sessions[session_id] = session
-        self._add_to_index(session)
         return session_id
 
     def create_session_with_id(
@@ -2082,7 +2066,6 @@ class SessionManager:
             terminal_name = self._get_next_terminal_name(host_id)
         session = SSHSession(session_id, host, port, username, host_id, terminal_name)
         self._sessions[session_id] = session
-        self._add_to_index(session)
         return session_id
 
     def _get_next_terminal_name(self, host_id: str) -> str:
@@ -2097,11 +2080,8 @@ class SessionManager:
         return self._sessions.get(session_id)
 
     def get_sessions_by_host(self, host_id: str) -> list[SSHSession]:
-        """获取某主机的所有会话（通过反向索引 O(1) 查找）"""
-        sids = self._host_index.get(host_id)
-        if not sids:
-            return []
-        return [self._sessions[sid] for sid in sids if sid in self._sessions]
+        """获取某主机的所有会话（含断开后已切回本机 shell 的：host_id 保留即仍归属该主机）"""
+        return [s for s in self._sessions.values() if s.host_id == host_id]
 
     def get_active_terminals(self) -> list[SSHSession]:
         """获取所有有交互式终端的活跃会话
@@ -2116,18 +2096,8 @@ class SessionManager:
         return result
 
     def get_host_terminal_count(self, host_id: str) -> int:
-        """获取某主机的活跃终端数（检测真实连接状态，不只是标志位）
-        优化：通过反向索引直接获取该主机会话，避免遍历全部会话
-        """
-        sids = self._host_index.get(host_id)
-        if not sids:
-            return 0
-        count = 0
-        for sid in sids:
-            s = self._sessions.get(sid)
-            if s and s.is_alive():
-                count += 1
-        return count
+        """获取某主机的活跃终端数（检测真实连接状态，不只是标志位）"""
+        return sum(1 for s in self._sessions.values() if s.host_id == host_id and s.is_alive())
 
     def list_sessions(self):
         """列出所有会话摘要"""
@@ -2232,7 +2202,6 @@ class SessionManager:
         """移除并关闭会话"""
         session = self._sessions.pop(session_id, None)
         if session:
-            self._remove_from_index(session)
             await session.close()
             return True
         return False
@@ -2245,7 +2214,6 @@ class SessionManager:
         """
         session = self._sessions.pop(session_id, None)
         if session:
-            self._remove_from_index(session)
             session._connected = False
             session.last_active = time.time()
             return True

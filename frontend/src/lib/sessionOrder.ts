@@ -29,12 +29,12 @@ export function saveOrder(order: string[]): void {
   }
 }
 
-/** 会话所属组 key：本地 / ssh 链接（本地终端 ssh 命令建立的会话，独立）/ 已保存主机 ip:port */
+/** 会话所属组 key：本地 / ssh 链接（未匹配到已保存主机的拦截会话）/ 已保存主机 ip:port */
 export function groupKeyOf(t: TerminalInstance, hostMap: Map<string, Host>): string {
   if (t.type === 'local') return '__local__'
-  // 本地终端 ssh 链接建立的会话：host_id 为空（不属于任何已保存主机会话），
-  // 独立成组；兼容历史数据（早期此类会话可能未带 ssh_conn 记录）
-  if (!t.host_id || t.ssh_conn) return '__tmp__'
+  // 有 host_id 即归入对应主机组（含本机终端 ssh 拦截后匹配到已保存主机的会话、
+  // 以及断开后退回本机 shell 但保留归属的会话）；未匹配的独立成「SSH 链接」组
+  if (!t.host_id) return '__tmp__'
   const h = hostMap.get(t.host_id)
   const ip = h?.host || t.host_name
   const port = h?.port ?? 22

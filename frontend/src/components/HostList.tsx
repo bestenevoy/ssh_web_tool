@@ -262,9 +262,16 @@ export const HostList = memo(function HostList({ hosts, groups, activeHostId, de
                         </div>
                       )}
                     </div>
-                    {/* 注意：不能写 a && a>0 && <jsx>——a 为 0 时短路结果是数字 0，React 会渲染出「0」 */}
-                    {(h.terminal_count ?? 0) > 0 && (
-                      <span className="term-count">{h.terminal_count}</span>
+                    {/* 会话数徽标：全部在线显示数字；有断开的显示「在线/总数」（断开会话仍归属该主机） */}
+                    {(h.terminal_total ?? 0) > 0 && (
+                      <span
+                        className={`term-count${(h.terminal_count ?? 0) < (h.terminal_total ?? 0) ? ' has-offline' : ''}`}
+                        title={`在线 ${h.terminal_count ?? 0} / 总数 ${h.terminal_total ?? 0}`}
+                      >
+                        {(h.terminal_count ?? 0) < (h.terminal_total ?? 0)
+                          ? `${h.terminal_count ?? 0}/${h.terminal_total}`
+                          : h.terminal_count}
+                      </span>
                     )}
                   </div>
                 ))}

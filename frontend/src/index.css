@@ -227,6 +227,10 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   padding: 0 6px; border-radius: 8px; min-width: 16px; text-align: center;
   line-height: 14px; flex-shrink: 0; font-variant-numeric: tabular-nums;
 }
+/* 有断开会话时（显示 在线/总数）：转中性色，提示该主机存在离线归属会话 */
+.host-item .term-count.has-offline {
+  color: var(--text-muted); background: var(--bg-hover); border-color: var(--border-light);
+}
 /* 主机条目操作已收编进右键菜单（原 hover 按钮组已移除） */
 
 /* 中间终端区域 */

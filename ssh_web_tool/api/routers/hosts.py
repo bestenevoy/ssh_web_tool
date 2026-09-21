@@ -26,6 +26,9 @@ async def api_list_hosts():
         # 不视为"已连接远程主机"，主机状态点只反映真实远程连接
         alive = [s for s in sessions if s.is_alive() and not s.is_local()]
         h["terminal_count"] = len(alive)
+        # 总数 = 挂载到该主机的全部会话（含断开后退回本机 shell、仍保留归属的）
+        # 前端徽标按"在线/总数"显示，断开不再让数字凭空消失（用户要求可识别归属）
+        h["terminal_total"] = len(sessions)
         h["is_connected"] = len(alive) > 0
         # 连接信息：最早创建且仍存活的会话时间作为"连接时间"
         sessions = session_manager.get_sessions_by_host(h["id"])

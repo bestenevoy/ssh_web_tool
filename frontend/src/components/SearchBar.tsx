@@ -29,23 +29,33 @@ export function SearchBar({ instance, onClose }: Props) {
   // 选项用 ref 保存：键盘/切换回调里拿到最新值，不依赖重渲染时序
   const caseSensitiveRef = useRef(false)
   const useRegexRef = useRef(false)
+  // instance 对象随每条 ws 消息重建（terminals Map 不可变更新产生新引用），只作
+  // 取数用；term/search/blockBar 子对象每会话创建一次、跨重建存活，可安全长期持有
+  const instRef = useRef(instance)
+  instRef.current = instance
 
-  // 挂载：展开全部折叠 + 暂停自动折叠 + 订阅结果计数 + 聚焦输入框
-  // （焦点必须在条内：xterm 吞 Esc 的坑见 SettingsModal 同款处理）
+  // 挂载（每个终端一次，父层按 session_id 加 key）：展开全部折叠 + 暂停自动折叠 +
+  // 订阅结果计数 + 聚焦输入框（焦点必须在条内：xterm 吞 Esc 的坑见 SettingsModal 同款处理）。
+  // ⚠️ 依赖必须为空数组：若依赖 instance，输出回显会让 effect 反复重跑——
+  // cleanup 的 clearDecorations 清掉高亮使下次搜索从头重数（"跳回第一个结果"），
+  // setup 的 focus() 又把焦点从终端抢回输入框（"输入跳进搜索框"），两个线上 bug 同源。
   useEffect(() => {
-    instance.blockBar?.setSearchActive(true)
-    instance.blockBar?.unfoldAll()
-    const sub = instance.search.onDidChangeResults((e) => {
+    const inst = instRef.current
+    inst.blockBar?.setSearchActive(true)
+    inst.blockBar?.unfoldAll()
+    const sub = inst.search.onDidChangeResults((e) => {
       setResults({ index: e.resultIndex, count: e.resultCount })
     })
     inputRef.current?.focus()
     return () => {
       sub.dispose()
-      instance.search.clearDecorations()
-      instance.blockBar?.setSearchActive(false)
-      instance.term.focus()
+      const cur = instRef.current
+      cur.search.clearDecorations()
+      cur.blockBar?.setSearchActive(false)
+      cur.term.focus()
     }
-  }, [instance])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /** 执行搜索：正则非法时提示错误、清掉旧高亮；否则带选项 + 高亮装饰查找 */
   const runSearch = (direction: 'next' | 'prev') => {

@@ -295,7 +295,10 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
                 terminal_name: msg.terminal_name || cur.terminal_name,
                 type: 'ssh',
                 shell_type: 'shell',
-                host_id: msg.host_id || cur.host_id || '', // 后端按 host+port+user 匹配到已保存主机时下发
+                // 后端按 host+port+user 匹配结果下发：匹配到新主机=新 id，未匹配=""（换挂后
+                // 必须清掉旧挂载，不能让断开重连到别的主机的会话留在旧主机组）
+                host_id: msg.host_id !== undefined ? msg.host_id : cur.host_id || '',
+                ssh_exited: false, // 断开后曾退到本机 shell 的会话重新连上：清除离线标记
                 ssh_conn: {
                   host: msg.host,
                   port: msg.port,
