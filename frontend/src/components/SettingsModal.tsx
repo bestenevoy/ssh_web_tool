@@ -272,16 +272,16 @@ export function SettingsModal({
   return (
     <div className="settings-overlay">
       <div className="settings-page">
-        {/* 页头：标题 + 右上角返回按钮（打开时聚焦此处，保证 Esc 能冒泡关闭） */}
+        {/* 页头：标题 + 右上角关闭按钮（与其它弹窗 modal-close-btn 统一；打开时聚焦此处保证 Esc 冒泡关闭） */}
         <div className="settings-page-header">
           <span className="settings-page-title">⚙️ 设置</span>
           <button
             ref={doneBtnRef}
-            className="btn btn-secondary btn-sm"
+            className="modal-close-btn"
             onClick={handleClose}
             title="返回主界面（Esc）"
           >
-            ← 返回
+            ✕
           </button>
         </div>
         <div className="settings-page-layout">
@@ -377,7 +377,7 @@ export function SettingsModal({
               开启记录时不再询问目录
             </label>
             <input
-              type="checkbox" checked={settings.logRecordNoAsk}
+              type="checkbox" className="switch" checked={settings.logRecordNoAsk}
               onChange={(e) => onUpdate({ logRecordNoAsk: e.target.checked })}
             />
           </div>
@@ -447,14 +447,14 @@ export function SettingsModal({
           <div className="settings-modal-row">
             <label title="命令左侧显示色条标记：单击色条选中块（Shift 范围 / Ctrl 多选），双击复制块内容；折叠/展开走终端右键菜单">块标记</label>
             <input
-              type="checkbox" checked={settings.blockBar}
+              type="checkbox" className="switch" checked={settings.blockBar}
               onChange={(e) => onUpdate({ blockBar: e.target.checked })}
             />
           </div>
           <div className="settings-modal-row">
             <label title="命令输出超过保留行数时自动折叠旧输出（下一个回车关闭块时生效）">自动折叠</label>
             <input
-              type="checkbox" checked={settings.blockAutoFold}
+              type="checkbox" className="switch" checked={settings.blockAutoFold}
               onChange={(e) => onUpdate({ blockAutoFold: e.target.checked })}
             />
           </div>
@@ -504,7 +504,7 @@ export function SettingsModal({
               />
               <span className="settings-hl-name" title={r.keyword}>{r.name}</span>
               <input
-                type="checkbox" checked={r.enabled}
+                type="checkbox" className="switch" checked={r.enabled}
                 onChange={(e) => updateRule(i, { enabled: e.target.checked })}
                 title="启用/停用该规则"
               />
@@ -528,7 +528,7 @@ export function SettingsModal({
               />
               <label className="settings-hl-case" title="关闭时按大小写不敏感匹配">
                 <input
-                  type="checkbox" checked={ruleEdit.draft.is_case_sensitive}
+                  type="checkbox" className="switch" checked={ruleEdit.draft.is_case_sensitive}
                   onChange={(e) => setRuleEdit({ ...ruleEdit, draft: { ...ruleEdit.draft, is_case_sensitive: e.target.checked } })}
                 />
                 区分大小写

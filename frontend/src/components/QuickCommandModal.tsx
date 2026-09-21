@@ -300,7 +300,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
                 />
               )}
               <button
-                className="action-btn"
+                className="action-btn danger"
                 onClick={() => setPreOps((prev) => prev.filter((_, i) => i !== idx))}
                 title="删除此预操作"
               >🗑</button>

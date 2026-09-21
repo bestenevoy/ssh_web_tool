@@ -155,7 +155,7 @@ export function GroupManager({ open, groups, onClose, onAdd, onRename, onDelete,
                     <button className="action-btn" onClick={() => startEdit(g)} title="重命名">✎</button>
                     <button className="action-btn" onClick={() => onDuplicate(g)} title="复制分组（含组内主机）">📄</button>
                     <button
-                      className="action-btn"
+                      className="action-btn danger"
                       onClick={() => {
                         if (confirm(`确定删除分组"${g}"吗？组内主机将移到"未分组"。`)) {
                           onDelete(g)

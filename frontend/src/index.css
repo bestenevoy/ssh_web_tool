@@ -912,14 +912,16 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-/* 设置页（整页覆盖层，自带标题栏；设置持久化到 config.json，localStorage 仅存临时内容） */
+/* 设置（大弹窗，非整页覆盖；左侧分区导航 + 右侧内容区，自带页头/页脚） */
 .settings-overlay {
   position: fixed; inset: 0; z-index: 900;
-  background: var(--bg-secondary); display: flex;
+  background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center;
 }
 .settings-page {
-  flex: 1; min-width: 0; display: flex; flex-direction: column;
-  background: var(--bg-secondary);
+  width: min(960px, 94vw); height: min(680px, 88vh);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg-secondary); border: 1px solid var(--border-color);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
 }
 .settings-page-header {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -1011,7 +1013,22 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   width: 14px; height: 14px; border-radius: 50%; border: none;
   background: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .18);
 }
-.settings-page input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+.settings-page input[type="checkbox"]:not(.switch) { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+/* 开关（Switch）：设置页布尔项统一用它替代原生勾选框；appearance:none 后原生外观清零 */
+input.switch {
+  appearance: none; -webkit-appearance: none; position: relative; flex-shrink: 0;
+  width: 36px; height: 20px; margin: 0; border-radius: 999px; cursor: pointer;
+  background: var(--bg-active); border: 1px solid var(--border-color);
+  transition: background .15s, border-color .15s, box-shadow .15s;
+}
+input.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  transition: left .15s;
+}
+input.switch:checked { background: var(--accent); border-color: var(--accent); }
+input.switch:checked::after { left: 18px; }
+input.switch:focus-visible { outline: none; box-shadow: var(--ring); }
 .settings-modal-hint {
   font-size: calc(11px * var(--ui-fs-scale)); color: var(--text-tertiary); margin-top: 6px; word-break: break-all;
   line-height: 1.5;
@@ -1168,6 +1185,22 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
 .form-section-subtitle {
   font-size: calc(10px * var(--ui-fs-scale)); color: #8892b0; font-weight: bold; margin: 12px 0 8px;
   text-transform: uppercase; letter-spacing: .5px;
+}
+
+/* 图标操作按钮（分组管理行内操作、预操作删除等）：设计系统 v2 尺寸/描边/聚焦环统一 */
+.action-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 26px; height: 26px; padding: 0;
+  background: var(--bg-input); color: var(--text-secondary);
+  border: 1px solid var(--border-color); border-radius: var(--r-md);
+  font-size: calc(13px * var(--ui-fs-scale)); font-family: inherit; line-height: 1;
+  cursor: pointer; transition: background .15s, color .15s, border-color .15s, transform .05s;
+}
+.action-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-light); }
+.action-btn:active:not(:disabled) { transform: translateY(1px); }
+.action-btn:focus-visible { outline: none; box-shadow: var(--ring); }
+.action-btn.danger:hover:not(:disabled) {
+  color: var(--danger); border-color: rgba(var(--danger-rgb), .45); background: rgba(var(--danger-rgb), .08);
 }
 
 /* 管理页面按钮加载状态 */
