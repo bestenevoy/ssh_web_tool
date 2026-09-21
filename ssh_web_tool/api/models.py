@@ -187,3 +187,11 @@ class FileWriteRequest(BaseModel):
     path: str
     content: str
     encoding: str = "utf-8"
+
+
+class FilePickRequest(BaseModel):
+    """编辑器调用系统原生文件对话框（mode: open=选择打开文件 / save=选择保存路径）"""
+
+    mode: str = "open"
+    initial_dir: str = ""  # 对话框初始目录（支持 ~ 展开；空=系统默认）
+    title: str = ""  # 对话框标题（空=默认"打开文件/保存文件"）

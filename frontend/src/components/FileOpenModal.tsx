@@ -28,6 +28,7 @@ export function FileOpenModal({ mode, initialPath = '', recentPaths, defaults, o
   const [browseDir, setBrowseDir] = useState<string | null>(null)
   const [listing, setListing] = useState<FileListResult | null>(null)
   const [error, setError] = useState('')
+  const [picking, setPicking] = useState(false)
 
   // 初始浏览目录：defaults 里的 scripts 目录（打开 .zs 的主场景）
   useEffect(() => {
@@ -79,6 +80,22 @@ export function FileOpenModal({ mode, initialPath = '', recentPaths, defaults, o
       })
   }
 
+  /** 调系统原生文件对话框（本机后端弹窗）：open 模式选中直接打开；save 模式回填路径 */
+  const systemPick = () => {
+    if (picking) return
+    setPicking(true)
+    setError('')
+    api
+      .pickFile(mode, listing?.dir || browseDir || defaults?.scripts_dir || '')
+      .then((r) => {
+        if (r.status !== 'picked' || !r.path) return // 用户取消：保持弹窗不动
+        if (mode === 'open') onPick(r.path)
+        else setPathInput(r.path)
+      })
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setPicking(false))
+  }
+
   return (
     <div className="modal-overlay show">
       <div className="modal file-open-modal" onKeyDown={(e) => { if (e.key === 'Escape') e.stopPropagation() }}>
@@ -97,6 +114,9 @@ export function FileOpenModal({ mode, initialPath = '', recentPaths, defaults, o
               placeholder={mode === 'open' ? '输入或粘贴文件路径…' : '输入保存路径…'}
               spellCheck={false}
             />
+            <button className="btn btn-secondary btn-sm" onClick={systemPick} disabled={picking} title="调用系统文件对话框（资源管理器同款）选择文件">
+              {picking ? '等待选择…' : '📂 系统选择'}
+            </button>
             <button className="btn btn-primary btn-sm" onClick={pick}>
               {mode === 'open' ? '打开' : '保存'}
             </button>

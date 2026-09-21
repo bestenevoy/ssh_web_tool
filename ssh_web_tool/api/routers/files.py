@@ -7,11 +7,12 @@
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from ssh_web_tool.api.models import FileWriteRequest
+from ssh_web_tool.api.models import FilePickRequest, FileWriteRequest
 from ssh_web_tool.config import get_app_dir
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -194,3 +195,87 @@ async def api_editor_defaults():
     logs_dir = app_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     return {"scripts_dir": str(scripts_dir), "logs_dir": str(logs_dir)}
+
+
+# ---------- 系统原生文件对话框（Windows，编辑器"系统选择"入口） ----------
+
+# OPENFILENAME 标志位（winuser.h / commdlg.h）
+_OFN_EXPLORER = 0x00080000  # 资源管理器风格外观
+_OFN_PATHMUSTEXIST = 0x00000800
+_OFN_FILEMUSTEXIST = 0x00001000
+_OFN_OVERWRITEPROMPT = 0x00000002  # save 模式覆盖已有文件前询问
+_OFN_HIDEREADONLY = 0x00000004
+
+
+def _win_file_dialog(mode: str, initial_dir: str, title: str) -> str | None:
+    """弹 Windows 原生文件对话框（comdlg32，资源管理器同款），返回所选绝对路径。
+
+    同步阻塞直到用户选择/取消——必须放在工作线程调用（api_files_pick 用
+    asyncio.to_thread）。用户取消返回 None。仅 Windows 使用（调用方判平台）。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize", wintypes.DWORD),
+            ("hwndOwner", wintypes.HWND),
+            ("hInstance", wintypes.HINSTANCE),
+            ("lpstrFilter", wintypes.LPCWSTR),
+            ("lpstrCustomFilter", wintypes.LPWSTR),
+            ("nMaxCustFilter", wintypes.DWORD),
+            ("nFilterIndex", wintypes.DWORD),
+            ("lpstrFile", wintypes.LPWSTR),
+            ("nMaxFile", wintypes.DWORD),
+            ("lpstrFileTitle", wintypes.LPWSTR),
+            ("nMaxFileTitle", wintypes.DWORD),
+            ("lpstrInitialDir", wintypes.LPCWSTR),
+            ("lpstrTitle", wintypes.LPCWSTR),
+            ("Flags", wintypes.DWORD),
+            ("nFileOffset", wintypes.WORD),
+            ("nFileExtension", wintypes.WORD),
+            ("lpstrDefExt", wintypes.LPCWSTR),
+            ("lCustData", wintypes.LPARAM),
+            ("lpfnHook", ctypes.c_void_p),
+            ("lpTemplateName", wintypes.LPCWSTR),
+        ]
+
+    buf = ctypes.create_unicode_buffer(4000)
+    ofn = OPENFILENAMEW()
+    ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+    ofn.lpstrFilter = "所有文件 (*.*)\0*.*\0"
+    ofn.lpstrFile = ctypes.addressof(buf)
+    ofn.nMaxFile = 4000
+    init = os.path.expanduser(initial_dir.strip()) if initial_dir else ""
+    ofn.lpstrInitialDir = init if init and os.path.isdir(init) else None
+    ofn.lpstrTitle = title or ("打开文件" if mode == "open" else "保存文件")
+    ofn.Flags = (
+        _OFN_EXPLORER
+        | _OFN_PATHMUSTEXIST
+        | _OFN_HIDEREADONLY
+        | (_OFN_FILEMUSTEXIST if mode == "open" else _OFN_OVERWRITEPROMPT)
+    )
+    comdlg = ctypes.windll.comdlg32
+    fn = comdlg.GetSaveFileNameW if mode == "save" else comdlg.GetOpenFileNameW
+    if not fn(ctypes.byref(ofn)):
+        return None  # 用户取消/关闭对话框
+    return buf.value or None
+
+
+@router.post("/pick")
+async def api_files_pick(req: FilePickRequest):
+    """调用系统原生文件对话框选择文件/保存路径（本工具 Server 与界面同机）。
+
+    网页自身的文件选择框拿不到本地完整路径，故由本机后端进程弹原生对话框。
+    取消返回 canceled；非 Windows 返回 400，前端回退自研目录浏览。
+    """
+    if sys.platform != "win32":
+        raise HTTPException(status_code=400, detail="系统选择仅支持 Windows")
+    mode = "save" if req.mode == "save" else "open"
+    try:
+        path = await asyncio.to_thread(_win_file_dialog, mode, req.initial_dir, req.title)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开系统对话框失败: {e}")
+    if not path:
+        return {"status": "canceled", "path": ""}
+    return {"status": "picked", "path": path}

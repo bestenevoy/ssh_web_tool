@@ -236,6 +236,12 @@ export const api = {
     }),
   listDir: (dir: string) => request<FileListResult>(`/api/files/list?dir=${encodeURIComponent(dir)}`),
   editorDefaults: () => request<EditorDefaults>('/api/files/defaults'),
+  // 系统原生文件对话框（本机后端弹窗，同机场景；非 Windows 返回 400）
+  pickFile: (mode: 'open' | 'save', initialDir = '', title = '') =>
+    request<{ status: 'picked' | 'canceled'; path: string }>('/api/files/pick', {
+      method: 'POST',
+      body: JSON.stringify({ mode, initial_dir: initialDir, title }),
+    }),
 
   // 持久化终端（会话ID复用）
   listSavedTerminals: () => request<{ terminals: SavedTerminal[] }>('/api/terminals/saved'),
