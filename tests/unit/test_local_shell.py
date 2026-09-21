@@ -98,6 +98,27 @@ async def test_switch_to_local_falls_back(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_powershell_command_word_not_yellow(tmp_path, monkeypatch):
+    """powershell 启动参数把 PSReadLine Command 色调回默认前景：输入行回显不再带亮黄色 SGR
+
+    Windows PowerShell 5.1 自带 PSReadLine 2.0 用 0;33;93（亮黄）给命令位词上色，
+    浅色主题下看不清；start_local_shell 通过 -NoExit -Command 调优后回显应为纯文本。
+    """
+    monkeypatch.setattr(SSHSession, "LOG_DIR", str(tmp_path))
+    SSHSession._logger_cache.clear()
+    s = SSHSession("loc12345", "localhost", 0, "tester")
+    await s.start_local_shell("powershell", cols=100, rows=30)
+    await asyncio.sleep(3.5)  # 等 -Command 调优脚本执行完、交互提示符就绪
+    await s.write_local("Write-Host ps-tuning-ok\r")
+    await asyncio.sleep(3.0)
+    buf = "".join(s._output_bus.raw_chunks())
+    s._flush_log_now()
+    await s.close()
+    assert "ps-tuning-ok" in buf, f"buf={buf[:300]!r}"
+    assert "\x1b[0;33;93m" not in buf, f"命令词仍被上亮黄色: {buf[:400]!r}"
+
+
+@pytest.mark.asyncio
 async def test_local_exit_kills_shell(tmp_path, monkeypatch):
     """本地终端输入 exit 后 shell 进程退出，reader 立即设置关闭通知"""
     monkeypatch.setattr(SSHSession, "LOG_DIR", str(tmp_path))

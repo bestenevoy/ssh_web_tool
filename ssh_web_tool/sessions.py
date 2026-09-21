@@ -780,7 +780,16 @@ class SSHSession:
         - 复用现有广播/日志/监听机制，前端协议与 SSH 会话完全一致
         """
         if shell == "powershell":
-            argv = ["powershell.exe", "-NoLogo"]
+            # Windows PowerShell 5.1 自带的 PSReadLine 2.0 会把输入行的命令词（第一个词）
+            # 用亮黄色（SGR 93）上色，浅色主题终端下几乎看不清；启动时把 Command 色
+            # 改回 Gray（等于默认前景，PSReadLine 不再发颜色码），文字颜色跟随终端主题。
+            argv = [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoExit",
+                "-Command",
+                "try { Set-PSReadLineOption -Colors @{ Command = 'Gray' } } catch {}",
+            ]
         elif shell == "pwsh":
             argv = ["pwsh", "-NoLogo"]
         elif shell == "cmd":
@@ -820,7 +829,8 @@ class SSHSession:
         import shutil
 
         appname = shutil.which(argv[0]) or argv[0]
-        cmdline = " ".join(argv[1:]) if len(argv) > 1 else None
+        # 含空格的参数需加引号拼回命令行字符串（如 powershell 的 -Command 调优脚本）
+        cmdline = " ".join(f'"{a}"' if " " in a else a for a in argv[1:]) if len(argv) > 1 else None
         pty_obj.spawn(appname, cmdline=cmdline, cwd=os.getcwd(), env=env_str)
         # 包装为类 PtyProcess 接口的对象（write/isalive/setwinsize/terminate/get_exitstatus）
         proc = _DirectPtyWrapper(pty_obj)
