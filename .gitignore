@@ -29,9 +29,10 @@ logs/
 Thumbs.db
 desktop.ini
 
-# 前端构建中间产物（static/index.html 是构建产物，需要提交）
+# 前端构建产物（vite 单文件；发版 CI 与本地 build.ps1 都会自行 npm run build，不再入库）
 frontend/node_modules/
 frontend/dist/
+static/index.html
 
 # PyInstaller
 SSHWebTool.exe

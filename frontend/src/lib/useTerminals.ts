@@ -115,6 +115,20 @@ export function useTerminals(settings: TerminalSettings) {
         if (el && el.scrollHeight > el.clientHeight + 2 && inst.term.rows > 5) {
           inst.term.resize(inst.term.cols, inst.term.rows - 1)
         }
+        // 右缘溢出修正：FitAddon 把容器 padding-left（色条/折叠槽 14px）也算进
+        // 可用宽度，列宽合计可能超出 .xterm 实际宽度，最后一列被右缘裁切/压到
+        // 滚动条下。按当前格宽回退整列数直到不再溢出（算术求解，单次 resize）
+        const screenEl = el?.querySelector('.xterm-screen') as HTMLElement | null
+        if (el && screenEl && inst.term.cols > 2) {
+          const screenW = screenEl.getBoundingClientRect().width
+          const availW = el.getBoundingClientRect().width
+          if (screenW > availW + 1) {
+            const cellW = screenW / inst.term.cols
+            let target = inst.term.cols
+            while (target > 2 && cellW * target > availW + 1) target -= 1
+            if (target !== inst.term.cols) inst.term.resize(target, inst.term.rows)
+          }
+        }
       } catch (e) {
         console.error('FitAddon fit failed', e)
       }

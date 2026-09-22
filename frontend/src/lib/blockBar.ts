@@ -451,6 +451,11 @@ export function attachBlockBar(
   }
   overlay.addEventListener('click', onClick)
   overlay.addEventListener('dblclick', onDblClick)
+  // 色条热区/折叠徽标按下时阻止默认行为：浏览器默认会把焦点从 xterm 输入框移走
+  // （点一下色条就得再点终端才能继续输入；选中块后 Ctrl+C 复制也依赖终端焦点）
+  overlay.addEventListener('mousedown', (ev) => {
+    if ((ev.target as Element).closest('[data-block]')) ev.preventDefault()
+  })
 
   // ---- 事件订阅 ----
   const disposables: { dispose(): void }[] = [

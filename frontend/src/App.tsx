@@ -331,7 +331,13 @@ function App() {
   // 点击窗口 → 聚焦（会话切换交给具体交互）
   const handleFocusWindow = useCallback((idx: PaneIndex) => {
     setFocusedPane(idx)
-  }, [])
+    // 点窗口任意处（tab 栏/边距/终端）都把输入焦点交给该窗口的活动终端：
+    // 否则点了非终端区域后 textarea 失焦，用户必须再点一次终端才能打字。
+    // windowActive 仅分屏自愈维护，单窗口可能为空 → 回退全局 activeId
+    const sid = windowActive[idx] ?? terminals.activeId
+    const inst = sid ? terminals.terminals.get(sid) : undefined
+    inst?.term.focus()
+  }, [windowActive, terminals])
 
   // 分屏状态自愈（每次渲染收敛检查，守卫保证只跑一次有效分支）：
   // ① 清理窗口里已被关闭的会话；② 两窗口全空则退出分屏；
@@ -1202,7 +1208,7 @@ function App() {
           sessionId={terminals.activeId}
           initialRemote={sftpInitialRemote}
           onNotify={setStatus}
-          onClose={() => { setSftpInitialRemote(null); setSftpWbOpen(false) }}
+          onClose={() => { setSftpInitialRemote(null); setSftpWbOpen(false); focusActiveTerminal() }}
         />
       )}
 

@@ -36,6 +36,39 @@ export const SEARCH_DECORATIONS = {
   activeMatchColorOverviewRuler: ACCENT,
 } as const
 
+/**
+ * 输入法（IME）字符吞字补丁——xterm 5.5~6.x 未修复的上游缺陷（xtermjs/xterm.js#5887）。
+ *
+ * 微软拼音等 IME 在"中文切英文"后仍对所有键上报 keyCode=229：keydown 置
+ * _keyDownSeen=true，但按键不产生 keypress 投递；随后 input 事件（composed=true、
+ * insertText）被 `_keyDownSeen` 门控丢弃——表现为切到英文后敲的字符进不了终端。
+ * 这里在实例上遮蔽原型方法 _inputEvent：insertText 且门控被 _keyDownSeen 卡住时
+ * 临时放行，让原实现走 triggerDataEvent 投递；原实现自带的 _keyPressHandled
+ * 检查保证普通按键（keypress 已处理）不会二次发送。
+ */
+function patchImeKeyDownGate(term: Terminal) {
+  type Gate = {
+    _inputEvent?: (ev: Event) => boolean
+    _keyDownSeen?: boolean
+  }
+  const core = term as unknown as Gate
+  const orig = core._inputEvent
+  if (typeof orig !== 'function') return
+  core._inputEvent = function (this: Gate, ev: Event): boolean {
+    const ie = ev as InputEvent
+    if (ie.data && ie.inputType === 'insertText' && this._keyDownSeen) {
+      const saved = this._keyDownSeen
+      this._keyDownSeen = false
+      try {
+        return orig.call(this, ev)
+      } finally {
+        this._keyDownSeen = saved
+      }
+    }
+    return orig.call(this, ev)
+  }
+}
+
 // 会话内保存的 SSH 连接信息（本地终端拦截 ssh 命令后建立，无已保存主机，
 // 供"重连"按钮直接用原始凭据重建会话——否则重连会报"找不到该主机信息"）
 export interface SshConnInfo {
@@ -212,6 +245,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
   // 内容搜索（Ctrl+F）：装饰选项在每次 find 调用时传入（SEARCH_DECORATIONS）
   const searchAddon = new SearchAddon()
   term.loadAddon(searchAddon)
+  patchImeKeyDownGate(term)
 
   // 建立后端 WebSocket 并绑定全部消息处理。deferConnect=false 时在工厂末尾立即调用；
   // deferConnect=true 的占位实例不建连（"先建 tab 显示连接中，连接成功后另建真实实例"）
