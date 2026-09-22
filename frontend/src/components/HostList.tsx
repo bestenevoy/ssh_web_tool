@@ -1,8 +1,16 @@
-import { useEffect, useState, memo } from 'react'
+import { useEffect, useState, useRef, memo } from 'react'
 import type { Host } from '../types'
 import { writeClipboardText } from '../lib/terminalCopy'
 import { ContextMenu } from './ContextMenu'
 import type { CtxMenuItem } from './ContextMenu'
+
+/** 悬停预览的单条会话快照（App 从当前 terminals 现取：tab 名 + 连接状态 + 缓冲尾几行） */
+export interface HostSessionPreview {
+  session_id: string
+  name: string
+  status: 'connected' | 'connecting' | 'disconnected'
+  preview: string
+}
 
 interface Props {
   hosts: Host[]
@@ -14,6 +22,10 @@ interface Props {
   onLocalClick: () => void
   onHostClick: (host: Host) => void
   onHostDoubleClick: (host: Host) => void
+  /** 悬停主机条目：取该主机全部会话的预览快照（须为稳定引用，HostList 是 memo 组件） */
+  getHostSessionsPreview: (hostId: string) => HostSessionPreview[]
+  /** 点击预览气泡中的会话行：切换到该会话 */
+  onSelectSession: (session_id: string) => void
   onEdit: (host: Host) => void
   onDelete: (host: Host) => void
   onCopy: (host: Host) => void
@@ -25,7 +37,7 @@ interface Props {
 // 默认终端条目右侧的 shell 显示名
 const SHELL_LABELS: Record<string, string> = { cmd: 'cmd', powershell: 'PowerShell', pwsh: 'pwsh' }
 
-export const HostList = memo(function HostList({ hosts, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onLocalClick, onHostClick, onHostDoubleClick, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
+export const HostList = memo(function HostList({ hosts, groups, activeHostId, defaultShell, onOpenDefaultTerminal, onLocalClick, onHostClick, onHostDoubleClick, getHostSessionsPreview, onSelectSession, onEdit, onDelete, onCopy, onDuplicate, onManageGroups, onReorderHosts }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [autoLoggingHosts, setAutoLoggingHosts] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
@@ -37,6 +49,54 @@ export const HostList = memo(function HostList({ hosts, groups, activeHostId, de
   // 单击选中的主机（单击不建连，只高亮；会话切换后清除恢复跟随活动会话）
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
   useEffect(() => { setSelectedHostId(null) }, [activeHostId])
+
+  // 悬停主机条目 → 该主机全部会话的缩略预览气泡（延迟出现，移出延迟消失，
+  // 指针移进气泡本体不关闭；点击会话行切换到该会话）
+  const [hoverHost, setHoverHost] = useState<{ host: Host; x: number; y: number; sessions: HostSessionPreview[] } | null>(null)
+  const showTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearHoverTimers = () => {
+    if (showTimer.current) { clearTimeout(showTimer.current); showTimer.current = null }
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null }
+  }
+
+  const onHostEnter = (h: Host, e: React.MouseEvent) => {
+    if ((h.terminal_total ?? 0) === 0) return  // 无会话不预览
+    if (showTimer.current) clearTimeout(showTimer.current)
+    if (hideTimer.current) clearTimeout(hideTimer.current)
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    showTimer.current = setTimeout(() => {
+      const sessions = getHostSessionsPreview(h.id)
+      if (sessions.length > 0) {
+        setHoverHost({ host: h, x: rect.right + 6, y: rect.top, sessions })
+      }
+    }, 420)
+  }
+
+  const onHostLeave = () => {
+    if (showTimer.current) { clearTimeout(showTimer.current); showTimer.current = null }
+    if (hideTimer.current) clearTimeout(hideTimer.current)
+    hideTimer.current = setTimeout(() => { setHoverHost(null); hideTimer.current = null }, 180)
+  }
+
+  // 组件卸载时清定时器
+  useEffect(() => () => clearHoverTimers(), [])
+
+  // 气泡打开期间定时刷新快照（在线状态与缓冲尾输出跟随变化）；会话清零自动收起
+  const hoverHostId = hoverHost?.host.id ?? null
+  useEffect(() => {
+    if (!hoverHostId) return
+    const timer = setInterval(() => {
+      setHoverHost((prev) => {
+        if (!prev || prev.host.id !== hoverHostId) return prev
+        const sessions = getHostSessionsPreview(hoverHostId)
+        if (sessions.length === 0) return null
+        return { ...prev, sessions }
+      })
+    }, 1200)
+    return () => clearInterval(timer)
+  }, [hoverHostId, getHostSessionsPreview])
 
 
   // 按名称或 IP 过滤主机
@@ -163,7 +223,9 @@ export const HostList = memo(function HostList({ hosts, groups, activeHostId, de
   const buildHostMenuSections = (h: Host): CtxMenuItem[][] => {
     const sections: CtxMenuItem[][] = [
       [
-        { label: '连接', onClick: () => onHostClick(h) },
+        // 菜单「连接」= 新建一条连接（与双击条目同语义）；不能走 onHostClick——
+        // 单击语义是「在该主机已有会话间切换、不建连」，右键点连接会变成切窗口
+        { label: '连接（新建）', onClick: () => onHostDoubleClick(h) },
       ],
     ]
     if (h.device_type === 'storage') {
@@ -231,18 +293,22 @@ export const HostList = memo(function HostList({ hosts, groups, activeHostId, de
                   <div
                     key={h.id}
                     className={`host-item${activeHostId === h.id || selectedHostId === h.id ? ' active' : ''}${dragHostId === h.id ? ' dragging' : ''}${overHostId === h.id && dragHostId && dragHostId !== h.id ? ' drag-over' : ''}`}
-                    onClick={() => { setSelectedHostId(h.id); onHostClick(h) }}
+                    onClick={() => { setSelectedHostId(h.id); setHoverHost(null); clearHoverTimers(); onHostClick(h) }}
                     onDoubleClick={() => onHostDoubleClick(h)}
+                    onMouseEnter={(e) => onHostEnter(h, e)}
+                    onMouseLeave={onHostLeave}
                     onContextMenu={(e) => {
                       e.preventDefault()
+                      clearHoverTimers()
+                      setHoverHost(null)
                       setMenu({ x: e.clientX, y: e.clientY, host: h })
                     }}
                     draggable
-                    onDragStart={() => handleHostDragStart(h)}
+                    onDragStart={() => { clearHoverTimers(); setHoverHost(null); handleHostDragStart(h) }}
                     onDragOver={(e) => handleHostDragOver(e, h)}
                     onDrop={() => handleHostDrop(h)}
                     onDragEnd={handleHostDragEnd}
-                    title="单击切换该主机已连接会话(不建连) · 双击另开新连接 · 右键操作菜单 · 拖动调整顺序"
+                    title="单击切换该主机已连接会话(不建连) · 双击另开新连接 · 悬停预览会话 · 右键操作菜单 · 拖动调整顺序"
                   >
                     <span className={`conn-dot${h.is_connected ? ' online' : ''}`} title={h.is_connected ? '已连接' : '未连接'} />
                     <div className="host-info">
@@ -293,6 +359,36 @@ export const HostList = memo(function HostList({ hosts, groups, activeHostId, de
           sections={buildHostMenuSections(menu.host)}
           onClose={() => setMenu(null)}
         />
+      )}
+      {/* 悬停会话预览气泡：tab 信息 + 终端缓冲尾几行的缩略预览，点击行切换会话 */}
+      {hoverHost && (
+        <div
+          className="host-hover-pop"
+          style={{ left: hoverHost.x, top: hoverHost.y, maxHeight: `calc(100vh - ${hoverHost.y + 12}px)` }}
+          onMouseEnter={() => { if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null } }}
+          onMouseLeave={onHostLeave}
+        >
+          <div className="host-hover-title">
+            <span className="host-hover-name">{hoverHost.host.name || hoverHost.host.host}</span>
+            <span className="host-hover-ip">{hoverHost.host.host}:{hoverHost.host.port}</span>
+          </div>
+          {hoverHost.sessions.map((s) => (
+            <div
+              key={s.session_id}
+              className="host-hover-session"
+              onClick={() => { onSelectSession(s.session_id); setHoverHost(null); clearHoverTimers() }}
+            >
+              <div className="host-hover-row">
+                <span className={`host-hover-dot ${s.status}`} />
+                <span className="host-hover-sname" title={s.name}>{s.name}</span>
+                <span className={`host-hover-status ${s.status}`}>
+                  {s.status === 'connected' ? '在线' : s.status === 'connecting' ? '连接中' : '已断开'}
+                </span>
+              </div>
+              <pre className="host-hover-preview">{s.preview || '（暂无输出）'}</pre>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )

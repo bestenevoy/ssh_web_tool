@@ -232,6 +232,35 @@ input, textarea, select { -webkit-user-select: text; user-select: text; }
   color: var(--text-muted); background: var(--bg-hover); border-color: var(--border-light);
 }
 /* 主机条目操作已收编进右键菜单（原 hover 按钮组已移除） */
+/* 悬停会话预览气泡：该主机全部会话的 tab 信息 + 终端缓冲尾几行「缩略窗」预览 */
+.host-hover-pop {
+  position: fixed; z-index: 1200; width: 302px; padding: 6px;
+  background: var(--bg-secondary); border: 1px solid var(--border-light);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
+  overflow-y: auto; user-select: none;
+}
+.host-hover-title { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px 6px; border-bottom: 1px solid var(--border-color); margin-bottom: 4px; }
+.host-hover-name { font-size: calc(12px * var(--ui-fs-scale)); font-weight: 600; color: var(--text-primary); }
+.host-hover-ip { font-size: calc(10px * var(--ui-fs-scale)); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.host-hover-session { padding: 6px 8px; border-radius: var(--r-md); cursor: pointer; }
+.host-hover-session:hover { background: var(--bg-hover); }
+.host-hover-session + .host-hover-session { border-top: 1px solid var(--border-color); border-radius: 0 var(--r-md) var(--r-md) 0; }
+.host-hover-row { display: flex; align-items: center; gap: 6px; }
+.host-hover-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-light); flex-shrink: 0; }
+.host-hover-dot.connected { background: var(--ok); box-shadow: 0 0 4px var(--ok); }
+.host-hover-dot.connecting { background: var(--warn); }
+.host-hover-dot.disconnected { background: var(--danger); }
+.host-hover-sname { flex: 1; min-width: 0; font-size: calc(11px * var(--ui-fs-scale)); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.host-hover-status { font-size: calc(10px * var(--ui-fs-scale)); flex-shrink: 0; color: var(--text-muted); }
+.host-hover-status.connected { color: var(--ok); }
+.host-hover-status.connecting { color: var(--warn); }
+.host-hover-status.disconnected { color: var(--danger); }
+.host-hover-preview {
+  margin: 4px 0 0; padding: 5px 7px; height: 82px; overflow: hidden;
+  background: var(--term-bg); border: 1px solid var(--border-color); border-radius: 6px;
+  font-family: Consolas, 'Courier New', monospace; font-size: calc(9px * var(--ui-fs-scale));
+  line-height: 1.4; color: var(--text-muted); white-space: pre-wrap; word-break: break-all;
+}
 
 /* 中间终端区域 */
 .terminal-area { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg-primary); }

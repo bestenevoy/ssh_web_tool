@@ -11,6 +11,8 @@ import { useTerminals } from './lib/useTerminals'
 import { writeClipboardText } from './lib/terminalCopy'
 import { useSettings, FONT_OPTIONS } from './lib/useSettings'
 import { HostList } from './components/HostList'
+import type { HostSessionPreview } from './components/HostList'
+import { sessionConnState } from './lib/terminalDisconnect'
 import { GroupManager } from './components/GroupManager'
 import { TerminalView } from './components/TerminalView'
 import type { SplitMode, PaneIndex } from './components/TerminalView'
@@ -30,6 +32,9 @@ import { FileEditor } from './components/FileEditor'
 import HistorySearchModal from './components/HistorySearchModal'
 
 type PanelTab = 'sessions' | 'quick' | 'sftp' | 'transfers'
+
+// 主机悬停预览：每条会话取终端缓冲尾几行做缩略预览
+const PREVIEW_LINES = 5
 
 // ---- 布局宽度持久化 ----
 const LAYOUT_KEY_PREFIX = 'ssh-web-tool-layout-'
@@ -536,9 +541,18 @@ function App() {
   }, [terminals, hosts, loadHosts, askPassword])
 
   // ---- 主机连接入口（单击复用 / 双击新建）----
+  // 建连在途锁（host.id 集合）：防连点重复建连，见 connectHostWithFallback
+  const connectingHostsRef = useRef<Set<string>>(new Set())
   // 新建连接：先建 tab 显示"连接中"，成功后接管显示；失败关闭占位 tab（useTerminals 负责
   // 原位回退焦点），失败原因走 toast——不跳转其他终端、不新建本机 tab
   const connectHostWithFallback = useCallback((host: Host) => {
+    // 防抖：连续快速双击/多次点击时对同一主机只发一次建连请求。
+    // 必须用同步在途锁——createTerminal 是异步的，其 pending 占位 tab 要等 React
+    // 重渲染才进 terminals，handleHostDoubleClick 里读旧快照的守卫会漏判，导致连点
+    // 每次都再建一条。按 host.id 键：不同主机并发建连互不阻塞；建连结束（成功或失败）
+    // 即释放，之后用户再点仍可正常另开第二条会话。
+    if (connectingHostsRef.current.has(host.id)) return
+    connectingHostsRef.current.add(host.id)
     return terminals.createTerminal(host)
       .then(() => {
         loadHosts()
@@ -547,6 +561,9 @@ function App() {
       .catch((e) => {
         setStatus(`SSH 连接失败 ${host.username}@${host.host}:${host.port} - ${(e as Error)?.message || '未知错误'}`)
         loadHosts()
+      })
+      .finally(() => {
+        connectingHostsRef.current.delete(host.id)
       })
   }, [terminals, loadHosts, setStatus])
 
@@ -592,6 +609,25 @@ function App() {
     if (insts.some((t) => t.host_id === host.id && (t.pending || t.reconnecting))) return
     connectHostWithFallback(host)
   }, [terminals, connectHostWithFallback])
+
+  // 主机悬停预览：读最新 terminals/readBufferTail 但保持回调引用稳定
+  // （HostList 是 memo 组件，回调每次换引用会击穿 memo 使整列表随 ws 消息重渲染）
+  const terminalsRef = useRef(terminals)
+  terminalsRef.current = terminals
+  const getHostSessionsPreview = useCallback((hostId: string): HostSessionPreview[] => {
+    const t = terminalsRef.current
+    return Array.from(t.terminals.values())
+      .filter((inst) => inst.host_id === hostId && !inst.pending)
+      .map((inst) => ({
+        session_id: inst.session_id,
+        name: inst.terminal_name || inst.host_name || '终端',
+        status: sessionConnState(inst),
+        preview: t.readBufferTail(inst.session_id, PREVIEW_LINES) ?? '',
+      }))
+  }, [])
+  const onSelectSessionFromPreview = useCallback((session_id: string) => {
+    terminalsRef.current.switchTerminal(session_id)
+  }, [])
 
   // 顶部 tab 栏「+」：以当前会话的主机另开一条新连接（无会话则提示）
   const handleNewTerminal = useCallback(() => {
@@ -1058,6 +1094,8 @@ function App() {
             onLocalClick={handleLocalClick}
             onHostClick={handleHostClick}
             onHostDoubleClick={handleHostDoubleClick}
+            getHostSessionsPreview={getHostSessionsPreview}
+            onSelectSession={onSelectSessionFromPreview}
             onEdit={(h) => { setEditingHost(h); setModalOpen(true) }}
             onDelete={handleDeleteHost}
             onCopy={handleCopyConnection}
