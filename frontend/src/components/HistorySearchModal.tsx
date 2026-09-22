@@ -25,6 +25,17 @@ function toQuickCommand(item: Extract<SearchResult, { type: 'quick' }>): QuickCo
   }
 }
 
+// 相对时间（秒级时间戳 → "刚刚/x分钟前/x小时前/x天前/日期"）：最近页行尾提示
+function relTime(ts: number): string {
+  if (!ts) return ''
+  const d = Date.now() / 1000 - ts
+  if (d < 60) return '刚刚'
+  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`
+  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`
+  if (d < 7 * 86400) return `${Math.floor(d / 86400)} 天前`
+  return new Date(ts * 1000).toLocaleDateString()
+}
+
 export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExecuteQuick, onInputToTerminal, onRefreshQuickCommands }: HistorySearchModalProps) {
   const [keyword, setKeyword] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
@@ -36,15 +47,23 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
   const [showIgnored, setShowIgnored] = useState(false)  // 已忽略列表视图
   const [ignoredList, setIgnoredList] = useState<Extract<SearchResult, { type: 'history' }>[]>([])
   const [ignoredLoading, setIgnoredLoading] = useState(false)
+  // 空输入分页：1=最近执行（last_used 降序，重复使用概率最高）/ 2=全部（快捷指令+频次历史，
+  // 即原有统一搜索结果）；输入关键字后分页失效回到搜索。←/→ 翻页
+  const [page, setPage] = useState<1 | 2>(1)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  // 统一搜索（快捷命令 + 历史命令，已忽略的不显示），最多显示20条
-  const doSearch = useCallback(async (kw: string) => {
+  // 空输入第 1 页走 /history/recent；其余（有关键字 / 第 2 页）走统一搜索
+  const doSearch = useCallback(async (kw: string, p: 1 | 2) => {
     setLoading(true)
     try {
-      const res = await api.unifiedSearch(kw, 20)
-      setResults(res.results || [])
+      if (!kw.trim() && p === 1) {
+        const res = await api.historyRecent(20)
+        setResults((res.commands || []).map(c => ({ type: 'history' as const, ...c })))
+      } else {
+        const res = await api.unifiedSearch(kw, 20)
+        setResults(res.results || [])
+      }
       setSelectedIndex(0)
     } catch (e) {
       setResults([])
@@ -66,9 +85,9 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
     }
   }, [])
 
-  // 初始加载
+  // 初始加载：第 1 页 = 最近执行
   useEffect(() => {
-    doSearch('')
+    doSearch('', 1)
     inputRef.current?.focus()
   }, [doSearch])
 
@@ -85,13 +104,13 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, confirmingCmd, showIgnored])
 
-  // 防抖搜索
+  // 防抖搜索（关键字或翻页变化即重查；关键字非空时分页参数自然失效）
   useEffect(() => {
     const timer = setTimeout(() => {
-      doSearch(keyword)
+      doSearch(keyword, page)
     }, 200)
     return () => clearTimeout(timer)
-  }, [keyword, doSearch])
+  }, [keyword, page, doSearch])
 
   // 保存为快捷命令
   const handleSaveAsQuick = async (command: string, id: string) => {
@@ -107,7 +126,7 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
       setSavingId(null)
       setSaveName('')
       // 重新搜索以显示新的快捷命令
-      doSearch(keyword)
+      doSearch(keyword, page)
     } catch (e) {
       alert('保存失败: ' + (e as Error).message)
     }
@@ -118,7 +137,7 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
     try {
       await api.ignoreHistoryCommand(command)
       setConfirmingCmd(null)
-      doSearch(keyword)  // 刷新：被忽略的命令从结果中消失
+      doSearch(keyword, page)  // 刷新：被忽略的命令从结果中消失
     } catch (e) {
       alert('忽略失败: ' + (e as Error).message)
     }
@@ -129,7 +148,7 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
     try {
       await api.unignoreHistoryCommand(command)
       await loadIgnored()
-      doSearch(keyword)
+      doSearch(keyword, page)
     } catch (e) {
       alert('恢复失败: ' + (e as Error).message)
     }
@@ -201,6 +220,18 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
       if (list.length > 0) {
         setSelectedIndex((prev) => Math.max(prev - 1, 0))
       }
+    } else if (e.key === 'ArrowRight') {
+      // 空输入时 → 翻页：第 1 页（最近执行）→ 第 2 页（全部：快捷指令+频次历史）
+      if (!keyword.trim() && !showIgnored && page === 1) {
+        e.preventDefault()
+        setPage(2)
+      }
+    } else if (e.key === 'ArrowLeft') {
+      // 空输入时 ← 回页：第 2 页 → 第 1 页
+      if (!keyword.trim() && !showIgnored && page === 2) {
+        e.preventDefault()
+        setPage(1)
+      }
     } else if (e.key === 'Enter') {
       e.preventDefault()
       if (showIgnored) return  // 已忽略视图不执行
@@ -225,6 +256,9 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
     el?.scrollIntoView({ block: 'nearest' })
   }, [selectedIndex])
 
+  // 最近页（空输入第 1 页）：行尾以相对时间呈现"刚才用的"，频次让位于新旧
+  const recentPage = !keyword.trim() && page === 1
+
   return (
     <div
       className="history-modal-overlay"
@@ -235,7 +269,12 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
         <div className="history-modal-header">
           <span className="history-modal-title">🔍 命令搜索 (Alt+R)</span>
           <div className="history-modal-header-right">
-            <span className="history-modal-hint">↑↓ 选择 | Enter 执行/输入 | Ctrl+S 保存 | ESC 关闭</span>
+            <span className="history-modal-hint">↑↓ 选择 | Enter 执行/输入 | Ctrl+S 保存{!keyword.trim() && !showIgnored ? ' | ←→ 翻页' : ''} | ESC 关闭</span>
+            {!keyword.trim() && !showIgnored && (
+              <span className="history-page-tag" title="无输入内容时按 ←/→ 翻页">
+                {page === 1 ? '第 1 页 · 最近' : '第 2 页 · 全部'}
+              </span>
+            )}
             <button
               className={`history-ignored-toggle${showIgnored ? ' active' : ''}`}
               onClick={toggleIgnored}
@@ -282,13 +321,13 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
               className="history-search-input"
               placeholder="搜索快捷命令和历史命令（按名称或命令内容）..."
               value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
+              onChange={(e) => { setKeyword(e.target.value); setPage(1) }}
               onKeyDown={handleKeyDown}
             />
             <div className="history-result-list" ref={listRef}>
               {loading && <div className="history-loading">搜索中...</div>}
               {!loading && results.length === 0 && (
-                <div className="history-empty">暂无匹配的命令</div>
+                <div className="history-empty">{recentPage ? '暂无最近执行的命令' : '暂无匹配的命令'}</div>
               )}
               {results.map((item, idx) => (
                 <div key={idx} data-index={idx}>
@@ -355,8 +394,13 @@ export default function HistorySearchModal({ onClose, onExecuteQuick, onEditExec
                         <>
                           <span className="history-type-badge history">🕐历史</span>
                           <span className="history-cmd-text" title={item.command}>{item.command}</span>
-                          <span className="history-cmd-count" title={`使用 ${item.count} 次`}>
-                            ×{item.count}
+                          <span
+                            className="history-cmd-count"
+                            title={recentPage
+                              ? `最后使用 ${new Date(item.last_used * 1000).toLocaleString()} · 共 ${item.count} 次`
+                              : `使用 ${item.count} 次`}
+                          >
+                            {recentPage ? relTime(item.last_used) : `×${item.count}`}
                           </span>
                           <button
                             className="history-save-quick-btn"

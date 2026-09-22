@@ -120,6 +120,18 @@
   color: var(--text-tertiary);
 }
 
+/* 空输入分页指示（第 1 页 · 最近 / 第 2 页 · 全部）：淡色小胶囊 */
+.history-page-tag {
+  font-size: calc(10px * var(--ui-fs-scale));
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), .1);
+  border: 1px solid rgba(var(--accent-rgb), .25);
+  padding: 1px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
 .history-search-input {
   width: 100%;
   padding: 10px 16px;

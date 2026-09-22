@@ -352,6 +352,12 @@ export const api = {
       >
     }>(`/api/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}`),
 
+  // 最近使用的命令（按最后使用时间降序，已忽略不返回）：历史搜索空输入第 1 页数据源
+  historyRecent: (limit: number = 20) =>
+    request<{ commands: Array<{ command: string; count: number; last_used: number }> }>(
+      `/api/history/recent?limit=${limit}`
+    ),
+
   // 历史命令忽略/恢复
   ignoreHistoryCommand: (command: string) =>
     request<{ status: string }>('/api/history/ignore', { method: 'POST', body: JSON.stringify({ command }) }),
