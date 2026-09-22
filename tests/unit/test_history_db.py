@@ -196,3 +196,16 @@ async def test_init_db_prunes_csi_residue(fake_history_db):
     cmds = [f["command"] for f in await db.search_commands(keyword="", limit=50)]
     assert "[1;31m" not in cmds and "[D" not in cmds and "[?2004l" not in cmds
     assert "[ -f x ] && ls" in cmds
+
+
+def test_clean_command_invisible_unicode():
+    """Unicode 隐形字符归一：NBSP/全角空格→普通空格，零宽类删除（网页/聊天
+    复制的命令混入后「看着一样效果不同」的根因，入库前统一规范化）"""
+    from ssh_web_tool.history_db import clean_command
+
+    assert clean_command("touch\u00a0note.txt") == "touch note.txt"
+    assert clean_command("ls\u200b -la") == "ls -la"
+    assert clean_command("echo\u3000hi") == "echo hi"
+    assert clean_command("cat \ufeffa.txt") == "cat a.txt"
+    assert clean_command("echo a\u2060b\u00adc") == "echo abc"
+    assert clean_command("git commit -m '正常 空格'") == "git commit -m '正常 空格'"  # 不误伤

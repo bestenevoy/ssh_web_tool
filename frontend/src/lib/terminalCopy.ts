@@ -14,6 +14,7 @@
  *   3) 隐藏 textarea + document.execCommand('copy') 兜底（旧 WebView / 无 API）
  */
 import type { Terminal } from '@xterm/xterm'
+import { normalizeInvisible } from './invisibleChars'
 
 declare global {
   interface Window {
@@ -129,6 +130,9 @@ export function setupTerminalCopy(term: Terminal, onAltR?: () => void, onCtrlF?:
 
 /**
  * 准备粘贴文本（参考 rssh 的 pasteText）：
+ * - 隐形字符归一化（normalizeInvisible）：网页/文档/聊天工具复制来的文本常混入
+ *   NBSP/零宽空格，显示无异但 shell 按单词一部分处理——粘贴执行与手敲结果就不同
+ *   （如创建出带脏字符的文件名），入口统一清理
  * - 把所有换行折叠为单个 \r：PTY 的 ICRNL 会把每个 \r 转成一个 \n，
  *   原样发送 CRLF 会变成双换行（\r\n → \n\n）。
  * - shell 已启用 bracketed paste（DECSET 2004，bash/zsh 默认开）时包裹
@@ -139,6 +143,6 @@ export function setupTerminalCopy(term: Terminal, onAltR?: () => void, onCtrlF?:
 function preparePasteText(term: Terminal, text: string): string {
   // xterm 的 modes.bracketedPasteMode 反映远端 shell 是否开启 DECSET 2004
   const bracketed = !!(term as any).modes?.bracketedPasteMode
-  const normalized = text.replace(/\r?\n/g, '\r')
+  const normalized = normalizeInvisible(text).replace(/\r?\n/g, '\r')
   return bracketed ? `\x1b[200~${normalized}\x1b[201~` : normalized
 }

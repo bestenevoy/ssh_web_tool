@@ -6,6 +6,7 @@ import type { Host } from '../types'
 import { api } from './api'
 import type { TerminalSettings } from './useSettings'
 import { editLineBuffer, isEnter } from './lineEditor'
+import { normalizeInvisible } from './invisibleChars'
 import { createTerminalInstance, getTerminalTheme } from './terminalInstance'
 import type { TerminalInstance, SshConnInfo } from './terminalInstance'
 import { attachBlockBar } from './blockBar'
@@ -617,20 +618,23 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   const sendCommandTo = useCallback((session_id: string, command: string, execute: boolean = true, focus: boolean = true): boolean => {
     const inst = terminalsRef.current.get(session_id)
     if (!inst || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) return false
+    // 隐形字符防御：快捷指令/脚本下发的字符串不经终端粘贴路径，历史库或指令卡
+    // 若混入 NBSP/零宽字符会原样喂给 shell（创建出带脏字符的文件名）——发送前归一
+    const cmd = normalizeInvisible(command)
     if (execute) {
-      sendClient(inst.ws, { type: 'input', data: command + '\n' })
-      api.recordCommand(command).catch(() => {})
+      sendClient(inst.ws, { type: 'input', data: cmd + '\n' })
+      api.recordCommand(cmd).catch(() => {})
       inst.input_buffer = ''
       // 程序注入绕过 term.onData（只对真实键盘触发），显式走一次 Enter 语义，
       // 否则 enter 模式下快捷指令不会开启新命令块（色块不划分）。
       // 多行指令（一次下发多条命令）按行数通知：首行即时开块，其余行等
       // 各自执行完的提示符行出现时逐个补切块——见 commandBlocks.ts onEnter
-      inst.blockBar?.notifySubmit(command.split('\n').length)
+      inst.blockBar?.notifySubmit(cmd.split('\n').length)
     } else {
       // 只输入命令文本，不发送换行，用户可以编辑后手动执行
-      sendClient(inst.ws, { type: 'input', data: command })
-      inst.input_buffer = command
-      inst.input_cursor = command.length
+      sendClient(inst.ws, { type: 'input', data: cmd })
+      inst.input_buffer = cmd
+      inst.input_cursor = cmd.length
     }
     if (focus) inst.term.focus()
     return true

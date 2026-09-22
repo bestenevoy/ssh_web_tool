@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type { QuickCommand, QuickPreOp } from '../types'
 import { api } from '../lib/api'
+import { normalizeInvisible, scanHiddenChars } from '../lib/invisibleChars'
 
 interface Props {
   onClose: () => void
@@ -56,18 +57,27 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
 
   const handleSubmit = () => {
     if (!name.trim() || !command.trim()) return
-    const data: Partial<QuickCommand> = {
-      name: name.trim(),
-      command: command.trim(),
-      description: description.trim(),
-      type: cmdType,
-      pre_ops: preOps.filter((o) => {
-        if (o.type === 'upload') return o.source?.trim() && o.remote?.trim()
-        if (o.type === 'chmod') return o.mode?.trim() && o.path?.trim()
-        if (o.type === 'exec') return o.cmd?.trim()
+    // 隐形字符防御：网页/文档/聊天工具复制进来的命令常混入 NBSP/零宽字符，
+    // 显示无异但执行时进 shell（建出脏文件名）——保存入库前统一清理
+    const nz = (s: string) => normalizeInvisible(s).trim()
+    const cleanPreOp = (o: QuickPreOp): QuickPreOp => {
+      if (o.type === 'upload') return { ...o, source: nz(o.source ?? ''), remote: nz(o.remote ?? '') }
+      if (o.type === 'chmod') return { ...o, mode: nz(o.mode ?? ''), path: nz(o.path ?? '') }
+      return { ...o, cmd: nz(o.cmd ?? '') }
+    }
+    const cleanedPreOps = preOps.map(cleanPreOp).filter((o) => {
+        if (o.type === 'upload') return !!o.source?.trim() && !!o.remote?.trim()
+        if (o.type === 'chmod') return !!o.mode?.trim() && !!o.path?.trim()
+        if (o.type === 'exec') return !!o.cmd?.trim()
         return false
-      }),
-      key: qcKey.trim(),
+      })
+    const data: Partial<QuickCommand> = {
+      name: nz(name),
+      command: nz(command),
+      description: description.trim(),  // 描述允许原样（含合法全角），不做替换
+      type: cmdType,
+      pre_ops: cleanedPreOps,
+      key: nz(qcKey),
     }
     if (editing && onUpdate) {
       onUpdate(editing.id, data)
@@ -203,6 +213,16 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
             rows={3}
             style={{ resize: 'vertical', fontFamily: 'Consolas, Monaco, monospace' }}
           />
+          {(() => {
+            // 实时检出：隐形字符（保存时自动清理）与全角/形近标点（仅提醒，不替换）
+            const issues = scanHiddenChars(command, true)
+            if (issues.length === 0) return null
+            return (
+              <div style={{ fontSize: 'calc(11px * var(--ui-fs-scale))', color: 'var(--danger)', marginTop: 3 }}>
+                检出：{issues.join('，')}——隐形字符将在保存时自动清理
+              </div>
+            )
+          })()}
         </div>
 
         {/* 预操作：执行命令前依次执行（文件传输 / 设置权限 / 设置环境变量） */}

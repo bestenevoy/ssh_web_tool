@@ -26,6 +26,12 @@ _DCS_RE = re.compile(r"\x1b[PX^_][\s\S]*?(?:\x1b\\|\x07)")
 # 否则 ESC 被删后只剩 "(B" 字面量，历史里出现一堆 (B 开头的假命令
 _ESC2_RE = re.compile(r"\x1b[()\)][0-9A-Za-z]|\x1b[=><78cM]")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Unicode 隐形字符归一：零宽/不可见格式字符删除，非 ASCII 空白（NBSP/全角空格等）
+# 替换为普通空格。网页/聊天工具/文档复制的命令常混入这些字符，显示与正常文本
+# 无异但 shell 按单词一部分处理——历史里"看着一样的命令效果不同"的根因之一。
+# （粘贴/快捷指令执行路径前端已在入口归一，此处兜底回显解析等非键盘录入路径）
+_ZERO_WIDTH_RE = re.compile("[\u200b\u200c\u200d\u2060\u00ad\ufeff]")
+_ODD_SPACE_RE = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
 
 
 def _looks_like_escape_residue(cmd: str) -> bool:
@@ -45,12 +51,14 @@ def _looks_like_escape_residue(cmd: str) -> bool:
 
 
 def clean_command(command: str) -> str:
-    """清洗命令：剥离 ANSI/OSC/DCS 转义序列与残留控制字符，返回规范命令"""
+    """清洗命令：剥离 ANSI/OSC/DCS 转义序列与残留控制字符，归一 Unicode 隐形字符"""
     text = _ANSI_RE.sub("", command)
     text = _OSC_RE.sub("", text)
     text = _DCS_RE.sub("", text)
     text = _ESC2_RE.sub("", text)
     text = _CTRL_RE.sub("", text)
+    text = _ZERO_WIDTH_RE.sub("", text)
+    text = _ODD_SPACE_RE.sub(" ", text)
     return text.strip()
 
 

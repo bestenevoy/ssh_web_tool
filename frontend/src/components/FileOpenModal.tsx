@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { normalizeInvisible } from '../lib/invisibleChars'
 import { api, type FileListEntry, type FileListResult } from '../lib/api'
 
 interface FileOpenModalProps {
@@ -47,7 +48,9 @@ export function FileOpenModal({ mode, initialPath = '', recentPaths, defaults, o
   }, [browseDir])
 
   const pick = () => {
-    const p = pathInput.trim()
+    // 隐形字符防御：粘贴路径常混入 NBSP/零宽字符，入库/建文件前归一，
+    // 否则会创建出文件名带脏字符的文件（肉眼不可见，后续操作全对不上）
+    const p = normalizeInvisible(pathInput).trim()
     if (!p) { setError('请输入文件路径'); return }
     onPick(p)
   }

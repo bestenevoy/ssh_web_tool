@@ -106,6 +106,15 @@ describe('setupTerminalCopy 粘贴逻辑', () => {
     expect(term.paste).toHaveBeenCalledWith('\x1b[200~echo hi\rls -la\x1b[201~')
   })
 
+  it('粘贴内容混入隐形字符时入口归一（NBSP→空格、零宽删除）', () => {
+    const term = makeFakeTerm()
+    setupTerminalCopy(term as any, () => {})
+    // touch\u00a0note.txt：网页/文档复制的命令常见混入 NBSP 与零宽空格
+    dispatchPaste(term.textarea, 'touch\u00a0note\u200b.txt')
+    expect(term.paste).toHaveBeenCalledTimes(1)
+    expect(term.paste).toHaveBeenCalledWith('touch note.txt')
+  })
+
   it('Ctrl+C 有选区时复制并返回 false（不发送 SIGINT）', () => {
     const term = makeFakeTerm()
     // mock copySelection 依赖的 navigator.clipboard
