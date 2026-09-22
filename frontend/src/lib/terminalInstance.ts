@@ -333,6 +333,9 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
                 // 必须清掉旧挂载，不能让断开重连到别的主机的会话留在旧主机组）
                 host_id: msg.host_id !== undefined ? msg.host_id : cur.host_id || '',
                 ssh_exited: false, // 断开后曾退到本机 shell 的会话重新连上：清除离线标记
+                // 换挂新 shell：旧连接上未回车的半截输入作废（防止串进新会话首条记录）
+                input_buffer: '',
+                input_cursor: 0,
                 ssh_conn: {
                   host: msg.host,
                   port: msg.port,
@@ -354,6 +357,9 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
                 ...cur,
                 ssh_exited: true,
                 shell_type: 'local',
+                // 切到本机 shell：远端未回车的半截输入作废
+                input_buffer: '',
+                input_cursor: 0,
               })
             }
             return next

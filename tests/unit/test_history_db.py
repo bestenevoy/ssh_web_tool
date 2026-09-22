@@ -38,6 +38,29 @@ async def test_record_command_unrelated_not_blocked_by_recent(fake_history_db):
 
 
 @pytest.mark.asyncio
+async def test_record_echo_skips_when_superstring_recent(fake_history_db):
+    """折行截断防护：前端已记录完整命令（3 秒内），回显只解析到首行截断片段——
+    片段作为严格前缀不再单独入库（与 record_command 的超串检查对称）"""
+    db = fake_history_db
+    await db.record_command("docker run -d --name app nginx:latest extra args")
+    await db.record_echo_command("docker run -d --name app nginx:la")  # 折行首行片段
+
+    found = await db.search_commands(keyword="docker run")
+    assert [f["command"] for f in found] == ["docker run -d --name app nginx:latest extra args"]
+
+
+@pytest.mark.asyncio
+async def test_record_echo_superstring_guard_not_block_unrelated(fake_history_db):
+    """反向防护只拦"本条是近 3 秒某记录的严格前缀"：无关回显命令正常入库"""
+    db = fake_history_db
+    await db.record_command("docker run -d nginx")
+    await db.record_echo_command("git status")
+
+    found = await db.search_commands(keyword="git")
+    assert len(found) == 1
+
+
+@pytest.mark.asyncio
 async def test_recent_ordering(fake_history_db):
     db = fake_history_db
     await db.record_command("cmd-1")

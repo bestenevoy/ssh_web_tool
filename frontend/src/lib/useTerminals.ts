@@ -220,8 +220,14 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
   const handleTerminalInput = useCallback((session_id: string, data: string) => {
     const inst = terminalsRef.current.get(session_id)
     if (!inst) return
-    // 重连建立中：不接受任何用户输入（disableStdin 挡键盘，这里兜底挡粘贴等路径）
-    if (inst.reconnecting) return
+    // 连接未就绪（已断开/重连中/占位实例）：输入到不了任何 shell——不记录、
+    // 不积累盲打文本，并清掉残留缓冲（防止断线前没回车的半截输入串进
+    // 重连后的第一条命令，产出错乱的"不完整"历史记录）
+    if (inst.reconnecting || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) {
+      inst.input_buffer = ''
+      inst.input_cursor = 0
+      return
+    }
 
     // 回车：先由前端按键盘输入即时记录（兜底，保证任何 PS1 环境下都有历史），
     // 后端随后解析终端回显行（含 Tab 补全/历史翻查后的真实命令）：
@@ -600,7 +606,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       const cur = prev.get(session_id)
       if (!cur || cur.reconnecting === value) return prev
       const next = new Map(prev)
-      next.set(session_id, { ...cur, reconnecting: value })
+      // 重连结束（成功落到新 shell 或放弃）：旧连接上没回车的半截输入已无意义，清空
+      next.set(session_id, value ? { ...cur, reconnecting: true } : { ...cur, reconnecting: false, input_buffer: '', input_cursor: 0 })
       return next
     })
   }, [])

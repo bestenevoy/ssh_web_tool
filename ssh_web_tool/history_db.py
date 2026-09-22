@@ -130,8 +130,9 @@ async def record_echo_command(cmd: str) -> None:
     """
     记录从终端回显解析出的"实际执行命令"（权威来源，含 Tab 补全/历史翻查结果）：
     1. 先删除 3 秒内记录的该命令的严格前缀残留（前端键盘输入版，如 cd /va vs cd /var）
-    2. 3 秒内已记录同命令则跳过（前端/CLI 已即时记录过，避免重复计数）
-    3. 否则正常记录
+    2. 3 秒内已记录过本条的严格超串则跳过（本条是折行截断片段）
+    3. 3 秒内已记录同命令则跳过（前端/CLI 已即时记录过，避免重复计数）
+    4. 否则正常记录
     """
     cmd = clean_command(cmd)
     if not cmd or len(cmd) > 500:
@@ -144,7 +145,19 @@ async def record_echo_command(cmd: str) -> None:
         "AND length(command) < length(?) AND substr(?, 1, length(command)) = command",
         (cmd, now - 3, cmd, cmd),
     )
-    # 2. 去重：3 秒内已记录同命令则跳过（前端/CLI 已记过）
+    # 2. 反向防护：3 秒内已记录过本条的严格超串（前端键入版完整命令），
+    # 本条是回显解析出的截断片段（长命令按终端宽度折行只解析到首行）——跳过。
+    # 与 record_command 的超串检查对称，杜绝"一条完整 + 一条不完整"并存
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM command_history WHERE last_used > ? "
+        "AND length(command) > length(?) AND substr(command, 1, length(?)) = ?",
+        (now - 3, cmd, cmd, cmd),
+    )
+    row = await cur.fetchone()
+    if row and row[0] > 0:
+        await conn.commit()
+        return
+    # 3. 去重：3 秒内已记录同命令则跳过（前端/CLI 已记过）
     cur = await conn.execute(
         "SELECT COUNT(*) FROM command_history WHERE command = ? AND last_used > ?",
         (cmd, now - 3),
@@ -154,7 +167,7 @@ async def record_echo_command(cmd: str) -> None:
     if cnt > 0:
         await conn.commit()
         return
-    # 3. 记录
+    # 4. 记录
     await conn.execute(
         "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
         "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
