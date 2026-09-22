@@ -13,7 +13,9 @@
 flush 模型（由 SessionLog 驱动）：
 - feed(data)：回放到屏幕（alt 期间喂给 scratch 屏幕吸收，不采集）
 - drain()：按显示顺序产出"新出现"的行——滚出行 → clear 被擦行 → 屏幕脏行，
-  逐行快照去重（重绘相同内容不重复记录；快照随滚动同步移位保持对齐）
+  逐行快照去重（重绘相同内容不重复记录；快照随滚动同步移位保持对齐）；
+  终端宽度造成的硬折行续行（pyte draw 内自动换行，非显式 \r\n）合并回同一
+  逻辑行——日志只按真实换行断行，不出现宽度折行的多余换行
 
 注意：pyte 不实现 alt buffer 切换，alt 守卫在流层面完成（按 CSI ?1049/1047/47
 h/l 序列切分数据段，alt 段喂给 scratch 屏幕吸收）；CSI L/M（插删行）导致的内容
@@ -44,21 +46,30 @@ class TranscriptScreen(_PyteScreen):
     """带转录捕获的 pyte 屏幕
 
     通过回调上抛两类"内容即将离开屏幕"事件，由 TerminalMirror 决定是否转录：
-    - on_scroll_top(text)：顶行滚出（index 时光标在滚动区底边）
-    - on_erase_line(y, text)：整屏擦除（ED2/ED3，clear 命令）前逐行回调
+    - on_scroll_top(text, cont)：顶行滚出（index 时光标在滚动区底边）；
+      cont=True 表示该行本身是上一物理行的硬折行延续（drain 侧按相邻关系合并）
+    - on_erase_line(y, text, cont)：整屏擦除（ED2/ED3，clear 命令）前逐行回调；
+      cont 同 scroll 捕获，标记随擦除固化（屏幕标记届时会被清空）
+
+    硬折行检测：pyte 在 draw 内光标抵到最右列且 DECAWM 开启时调用
+    carriage_return+linefeed 换到下一行（显式 \r\n 由 Stream 直接调方法，不经
+    draw）——据此精确区分"显示折行"与"真换行"，标记行在 drain 产出相邻行时
+    合并回同一逻辑行，日志不再出现终端宽度造成的多余换行。
     """
 
     def __init__(
         self,
         columns: int,
         lines: int,
-        on_scroll_top: Callable[[str], None] | None = None,
-        on_erase_line: Callable[[int, str], None] | None = None,
+        on_scroll_top: Callable[[str, bool], None] | None = None,
+        on_erase_line: Callable[[int, str, bool], None] | None = None,
     ) -> None:
         self.on_scroll_top = on_scroll_top
         self.on_erase_line = on_erase_line
-        self.scrolled_off: list[str] = []  # 已捕获的滚出行（消费后由镜像清空）
-        self.erased_lines: list[tuple[int, str]] = []  # 已捕获的被擦行 (y, text)
+        self.scrolled_off: list[tuple[str, bool]] = []  # 已捕获的滚出行 (文本, 是否折行延续)
+        self.erased_lines: list[tuple[int, str, bool]] = []  # 已捕获的被擦行 (y, text, 是否折行延续)
+        self.wrap_marks: set[int] = set()  # 该行是上一物理行的硬折行延续
+        self._drawing = False  # 正在 draw 内（此间的 linefeed 即自动换行）
         super().__init__(columns, lines)
 
     def render_line(self, y: int) -> str:
@@ -78,20 +89,57 @@ class TranscriptScreen(_PyteScreen):
             out.append(data)
         return "".join(out).rstrip()
 
+    def draw(self, data: str) -> None:
+        self._drawing = True
+        try:
+            super().draw(data)
+        finally:
+            self._drawing = False
+
+    def linefeed(self) -> None:
+        super().linefeed()
+        if self._drawing:
+            # draw 内换行 = 硬折行：光标落点行是上一行的延续
+            self.wrap_marks.add(self.cursor.y)
+        else:
+            # 显式换行落到该行：新起一行，清除可能残留的旧折行标记
+            self.wrap_marks.discard(self.cursor.y)
+
+    def cursor_position(self, row: int | None = None, column: int | None = None) -> None:
+        super().cursor_position(row, column)
+        if not self._drawing:
+            # 光标直落某行（CUP 重绘）：该行内容即将新起，旧折行标记作废
+            self.wrap_marks.discard(self.cursor.y)
+
     def index(self) -> None:
         _, bottom = self.margins or Margins(0, self.lines - 1)
         if self.cursor.y == bottom and self.on_scroll_top is not None:
-            # 顶行即将滚出：先上抛再交给 pyte 丢弃
-            self.on_scroll_top(self.render_line(0))
+            # 顶行即将滚出：先上抛（携带其折行标记）再交给 pyte 丢弃
+            self.on_scroll_top(self.render_line(0), 0 in self.wrap_marks)
+            # 缓冲整体上移一行（buffer[y]=buffer[y+1]）：折行标记随行号同步移位
+            self.wrap_marks = {y - 1 for y in self.wrap_marks if y > 0}
         super().index()
+
+    def reverse_index(self) -> None:
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        if self.cursor.y == top:
+            # 反向滚动：缓冲整体下移一行，折行标记随行号 +1（顶行标记的上一行已滚出屏底）
+            self.wrap_marks = {y + 1 for y in self.wrap_marks if y < bottom}
+        super().reverse_index()
 
     def erase_in_display(self, how: int = 0, *args: object, **kwargs: object) -> None:
         # clear/ED2：被擦内容用户已看到，逐行上抛后再擦（ED0/ED1 属于局部
         # 重绘，内容仍留屏幕上或马上重画，不转录避免重复）
         if (how == 2 or how == 3) and self.on_erase_line is not None:
             for y in range(self.lines):
-                self.on_erase_line(y, self.render_line(y))
+                self.on_erase_line(y, self.render_line(y), y in self.wrap_marks)
         super().erase_in_display(how, *args, **kwargs)
+        if how == 2 or how == 3:
+            self.wrap_marks.clear()  # 整屏擦除：各行内容即将新起，旧标记作废
+
+    def reset(self) -> None:
+        self.wrap_marks.clear()
+        super().reset()
 
 
 class TerminalMirror:
@@ -153,21 +201,23 @@ class TerminalMirror:
 
     # ---------- 捕获回调 ----------
 
-    def _on_scroll_top(self, text: str) -> None:
-        """顶行滚出：内容与快照一致说明已转录过，跳过；否则捕获（可能尚未落盘）"""
+    def _on_scroll_top(self, text: str, cont: bool = False) -> None:
+        """顶行滚出：内容与快照一致说明已转录过，跳过；否则捕获（可能尚未落盘）。
+        cont=该行是上一物理行的硬折行延续（drain 时并入前一行，日志不按宽度断行）"""
         if text and text != self._snapshot[0]:
             off = self.screen.scrolled_off
             if len(off) >= _MAX_SCROLLED_LINES:
                 off.pop(0)  # 超限丢最老行（长期未 drain 的内存防护）
-            off.append(text)
+            off.append((text, cont))
         # 快照随屏幕滚动同步移位（新滚入的底行视为未转录）
         self._snapshot.pop(0)
         self._snapshot.append(None)
 
-    def _on_erase_line(self, y: int, text: str) -> None:
-        """clear/ED2 被擦行：内容未转录过才捕获（已转录过的不重复记录）"""
+    def _on_erase_line(self, y: int, text: str, cont: bool = False) -> None:
+        """clear/ED2 被擦行：内容未转录过才捕获（已转录过的不重复记录）；
+        cont=擦除瞬间该行带硬折行标记（标记随本次捕获固化，ED2 会清空屏幕标记）"""
         if text and y < len(self._snapshot) and text != self._snapshot[y]:
-            self.screen.erased_lines.append((y, text))
+            self.screen.erased_lines.append((y, text, cont))
 
     # ---------- 提取 ----------
 
@@ -175,27 +225,57 @@ class TerminalMirror:
         """提取自上次 drain 以来新显示的行（显示顺序；重绘相同内容不重复）
 
         顺序：滚出行（最早） → resize 前补转录行 → clear 被擦行 → 当前屏幕脏行（最新）
+        硬折行合并：wrap_marks 标记的行（终端宽度造成的续行）在上一产出行恰好是其
+        前一行（y-1）时并入同一逻辑行——日志不再出现宽度折行的多余换行；跨批次
+        （如 64KB 阈值打断一行中途）无法合并，维持原样。
         """
         if not self._has_new:
             return []
         self._has_new = False
         out: list[str] = []
-        # 1. 滚出顶部的行（长输出转录）
-        if self.screen.scrolled_off:
-            out.extend(self.screen.scrolled_off)
-            self.screen.scrolled_off = []
-        # 2. resize 前补转录的行
+        marks = self.screen.wrap_marks
+        # 最近产出行对应的屏幕行号（-1=屏首行的前一行即刚滚出行；None=未知，不可并）
+        last_y: int | None = None
+
+        def emit(text: str, y: int) -> None:
+            """产出一行屏幕内容：折行延续且前一行紧邻产出时并入，否则独立成行"""
+            nonlocal last_y
+            if not text:
+                return
+            merge = y in marks
+            marks.discard(y)  # 标记随本次产出一并消费，防止残留误并
+            if merge and out and last_y == y - 1:
+                out[-1] += text
+            else:
+                out.append(text)
+            last_y = y
+
+        # 1. 滚出顶部的行（长输出转录；cont=滚出时其上一物理行即列表前一项）
+        for text, cont in self.screen.scrolled_off:
+            if cont and out:
+                out[-1] += text  # 折行延续：并入前一条滚出行
+            else:
+                out.append(text)
+            last_y = -1  # 最后一项滚出行正是屏上第 0 行的前一行
+        self.screen.scrolled_off = []
+        # 2. resize 前补转录的行（屏幕已重建，标记随之清空；行号未知不可并）
         if self._pending_out:
             out.extend(self._pending_out)
             self._pending_out = []
-        # 3. clear/ED2 被擦除的行（快照去重：已转录过的不重复）
+            last_y = None
+        # 3. clear/ED2 被擦除的行（快照去重：已转录过的不重复；cont=擦除时固化的折行延续）
         if self.screen.erased_lines:
             batch = self.screen.erased_lines
             self.screen.erased_lines = []
-            for y, text in batch:
+            last_y = None  # 擦除快照与上一节产出无行号邻接关系
+            for y, text, cont in batch:
                 if text != self._snapshot[y]:
                     self._snapshot[y] = text
-                    out.append(text)
+                    if cont and out and last_y == y - 1:
+                        out[-1] += text
+                    else:
+                        out.append(text)
+                    last_y = y
         # 4. 当前屏幕上的脏行（逐行快照去重）
         dirty = self.screen.dirty
         self.screen.dirty = set()
@@ -205,7 +285,7 @@ class TerminalMirror:
             text = self.screen.render_line(y)
             if text and text != self._snapshot[y]:
                 self._snapshot[y] = text
-                out.append(text)
+                emit(text, y)
         return out
 
     # ---------- 尺寸/重置 ----------

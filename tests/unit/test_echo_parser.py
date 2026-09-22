@@ -275,3 +275,16 @@ async def test_parse_echo_line_tab_completion_keeps_final():
     s._parse_echo_line("root@host:~# cd /va\rroot@host:~# cd /var\n")
     await asyncio.sleep(0.1)
     assert recorded == ["cd /var"]
+
+
+# ---------- 字符集转义残留（ESC ( B 等）不得混进命令 ----------
+
+
+def test_charset_escape_not_recorded_with_command():
+    """提示符/颜色重置 \x1b(B\x1b[m（tput sgr0）：ESC 先随序列整体剥离，
+    不得残留 "(B" 字面量混入记录的命令（旧清洗只删 ESC 控制符所致）"""
+    p = EchoParser()
+    assert p.feed("root@host:~$ \x1b(B\x1b[mls -la\r\n") == ["ls -la"]
+    p2 = EchoParser()
+    assert p2.feed("mini> \n") == []
+    assert p2.feed("\x1b(B\x1b[mCMD\r\n") == ["CMD"]

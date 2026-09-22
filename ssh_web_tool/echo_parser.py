@@ -112,9 +112,15 @@ def _arms_next_line_capture(s: str) -> bool:
     return False
 
 
-# 清 ANSI 但保留 \r\n（回显解析需要 \r 判断行内覆盖）
-_ANSI_KEEP_CR_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+# 清 ANSI 但保留 \r\n（回显解析需要 \r 判断行内覆盖）。CSI 参数区按标准取
+# 0x30-0x3F（数字与 : ; < = ?），覆盖私有 \x1b[?2004h、kitty \x1b[>1u 等
+_ANSI_KEEP_CR_RE = re.compile(r"\x1b\[[0-9;:<=>?]*[a-zA-Z]")
 _OSC_KEEP_CR_RE = re.compile(r"\x1b\][\s\S]*?(\x07|\x1b\\)")
+# DCS/SOS/PM/APC（\x1bP/X/^/_ 起，ST/BEL 止）
+_DCS_KEEP_CR_RE = re.compile(r"\x1b[PX^_][\s\S]*?(?:\x1b\\|\x07)")
+# 双字符转义（ESC ( B 字符集指定 / Fe 序列）：须在删 ESC 控制符前整体剥离，
+# 否则残留下 "(B" 字面量被当作命令记录（tput sgr0/提示符重置常见输出）
+_ESC2_KEEP_CR_RE = re.compile(r"\x1b[()\)][0-9A-Za-z]|\x1b[=><78cM]")
 
 
 class EchoParser:
@@ -145,7 +151,8 @@ class EchoParser:
         """清理 ANSI 转义序列，但保留 \r\n（区别于 prompt_detect.clean_ansi 会去掉 \r）"""
         text = _ANSI_KEEP_CR_RE.sub("", text)
         text = _OSC_KEEP_CR_RE.sub("", text)
-        text = re.sub(r"\x1b[=><]", "", text)
+        text = _DCS_KEEP_CR_RE.sub("", text)
+        text = _ESC2_KEEP_CR_RE.sub("", text)
         return text
 
     @staticmethod

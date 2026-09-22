@@ -173,6 +173,54 @@ def test_scrolled_off_bounded():
     assert "row20499" in got  # 最后一行仍在（屏幕脏行）
 
 
+# ---------- 硬折行合并（日志不再出现终端宽度造成的多余换行） ----------
+
+
+def test_hard_wrap_merged_on_screen():
+    """长行按宽度折行：屏幕相邻两行合并回一个逻辑行（真实 \r\n 处才断行）"""
+    m = TerminalMirror(columns=20, rows=5)
+    m.feed("A" * 45 + "\r\n" + "B" * 10 + "\r\n")
+    assert m.drain() == ["A" * 45, "B" * 10]
+
+
+def test_hard_wrap_merged_across_scroll():
+    """折行发生在滚出区：滚出行列表内同样合并"""
+    m = TerminalMirror(columns=20, rows=3)
+    m.feed("C" * 50 + "\r\n" + "D" * 5 + "\r\n")  # C 折成 3 个物理行，顶行滚出
+    got = m.drain()
+    assert "C" * 50 in got
+    assert "D" * 5 in got
+    assert len([ln for ln in got if "C" in ln]) == 1  # C 只出现一条（未碎成多行）
+
+
+def test_exact_width_line_not_merged():
+    """恰好占满宽度但用显式换行结束的两行：不得误并（\r\n 清除延续标记）"""
+    m = TerminalMirror(columns=20, rows=5)
+    m.feed("E" * 20 + "\r\n" + "F" * 20 + "\r\n" + "tail\r\n")
+    assert m.drain() == ["E" * 20, "F" * 20, "tail"]
+
+
+def test_wrap_after_prompt_merged_with_output():
+    """典型场景：提示符+长命令折行 → 日志一条完整命令行"""
+    m = TerminalMirror(columns=20, rows=5)
+    m.feed("root@h:~$ ls " + "/very/long/path/that/wraps" + "\r\nok\r\n")
+    got = m.drain()
+    assert got[0] == "root@h:~$ ls /very/long/path/that/wraps"
+    assert "ok" in got
+
+
+def test_clear_invalidates_wrap_marks():
+    """clear 后各行新起：旧折行标记不得把新内容错误粘连"""
+    m = TerminalMirror(columns=20, rows=4)
+    m.feed("G" * 30 + "\r\n")  # 折行：0,1 行
+    m.feed("\x1b[2J\x1b[H")  # clear（未 drain：被擦行捕获）
+    m.feed("H1\r\nH2\r\n")
+    got = m.drain()
+    assert "G" * 30 in got  # 被擦前已合并
+    assert "H1" in got and "H2" in got
+    assert all("H1H2" not in ln for ln in got)
+
+
 # ---------- SessionLog 集成 ----------
 
 

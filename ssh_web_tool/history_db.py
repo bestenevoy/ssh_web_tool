@@ -14,16 +14,42 @@ from pathlib import Path
 
 import aiosqlite
 
-# ANSI/控制字符清洗：方向键等 ESC 序列若被拆解残留（如 [D、[C），也会被清理
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# ANSI/控制字符清洗：方向键等 ESC 序列若被拆解残留（如 [D、[C），也会被清理。
+# CSI 参数区按标准取 0x30-0x3F（数字与 : ; < = ?），覆盖 kitty 键盘协议 \x1b[>1u、
+# 私有 \x1b[?2004h 等，防止 ESC 删除后残留 "[>1u" 字面量
+_ANSI_RE = re.compile(r"\x1b\[[0-9;:<=>?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][\s\S]*?(\x07|\x1b\\)")
+# DCS/SOS/PM/APC（\x1bP/X/^/_ 开头，ST 或 BEL 结尾）：sixel/诊断回显等，残渣形如 "P…"
+_DCS_RE = re.compile(r"\x1b[PX^_][\s\S]*?(?:\x1b\\|\x07)")
+# 双字符转义：ESC ( B / ESC ) 0 等字符集指定（tput sgr0/提示符颜色重置常见
+# \x1b(B\x1b[m），以及 ESC = > 7 8 c M 等 Fe 序列——必须先整体剥离再删控制字符，
+# 否则 ESC 被删后只剩 "(B" 字面量，历史里出现一堆 (B 开头的假命令
+_ESC2_RE = re.compile(r"\x1b[()\)][0-9A-Za-z]|\x1b[=><78cM]")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def _looks_like_escape_residue(cmd: str) -> bool:
+    """截断序列残渣判定（入库防线，防跨 chunk 劈开 \x1b[1;31m 等序列后残留字面量）：
+    - "[X…"（[ 紧跟非空格非[）：[D、[1;31m、[?2004h 类 CSI 残片；
+      合法 shell 写法 "[ …"（test）与 "[[" 的 [ 后是空格/[，不误伤
+    - "(X/）X 单字符类名（(B (0 )B )0）：ESC ( x 字符集指定残片；
+      合法子命令 "( cd…" "((" 的第二字符是空格/(/其他词，不误伤单字母外的…
+      ——(c (d 等子 shell 常见，故仅按已知类名字符 B b 0 1 2 3 判定
+    """
+    if len(cmd) < 2:
+        return False
+    head, nxt = cmd[0], cmd[1]
+    if head == "[" and nxt not in " \t[":
+        return True
+    return head in "()" and nxt in "Bb0123"
+
+
 def clean_command(command: str) -> str:
-    """清洗命令：剥离 ANSI 转义序列与残留控制字符，返回规范命令"""
+    """清洗命令：剥离 ANSI/OSC/DCS 转义序列与残留控制字符，返回规范命令"""
     text = _ANSI_RE.sub("", command)
     text = _OSC_RE.sub("", text)
+    text = _DCS_RE.sub("", text)
+    text = _ESC2_RE.sub("", text)
     text = _CTRL_RE.sub("", text)
     return text.strip()
 
@@ -97,6 +123,14 @@ async def init_db() -> None:
         """
     )
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_history_last ON command_history(last_used)")
+    # 一次性清理历史遗留垃圾：ESC 被旧版清洗删剩的转义残片——字符集指定 "(Bls …"
+    # （源于 tput sgr0/提示符重置 \x1b(B\x1b[m）与截断 CSI 残片 "[1;31m…/[D…"。
+    # 判据与 _looks_like_escape_residue 一致；合法 "[ …"/"[["/"(( …" 不误伤
+    await conn.execute(
+        "DELETE FROM command_history WHERE "
+        "command LIKE '(B%' OR command LIKE '(0%' OR command LIKE ')B%' OR command LIKE ')0%' "
+        "OR (command LIKE '[%' AND substr(command, 2, 1) NOT IN (' ', '[', char(9)))"
+    )
     await conn.commit()
 
 
@@ -104,7 +138,7 @@ async def record_command(command: str) -> None:
     """记录一条命令：已存在则次数 +1 并刷新使用时间，不存在则插入"""
     # 记录前清洗 ANSI/控制字符，防止方向键残留（[D/[C 等）污染历史
     cmd = clean_command(command)
-    if not cmd or len(cmd) > 500:
+    if not cmd or len(cmd) > 500 or _looks_like_escape_residue(cmd):
         return
     conn = await get_db()
     now = time.time()
@@ -135,7 +169,7 @@ async def record_echo_command(cmd: str) -> None:
     4. 否则正常记录
     """
     cmd = clean_command(cmd)
-    if not cmd or len(cmd) > 500:
+    if not cmd or len(cmd) > 500 or _looks_like_escape_residue(cmd):
         return
     now = time.time()
     conn = await get_db()
