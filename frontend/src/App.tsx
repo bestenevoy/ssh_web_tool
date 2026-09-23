@@ -1197,24 +1197,6 @@ function App() {
         {/* 应用级入口（设置）与工具开关分组隔开 */}
         <div className="topbar-divider" />
         {/* 检查配置入口已移入设置页「本机终端」分区 */}
-        {/* 调试台：打开 WebView2 DevTools 控制台（window.wst 脚本 API/输入注入可用） */}
-        <button
-          className="btn btn-secondary btn-sm"
-          onClick={async () => {
-            const pyApi = (window as unknown as {
-              pywebview?: { api?: { open_console?: () => Promise<boolean> } }
-            }).pywebview?.api
-            if (pyApi?.open_console) {
-              const ok = await pyApi.open_console().catch(() => false)
-              if (!ok) setStatus('开发者工具打开失败（非 WebView2 内核或窗口未就绪）')
-            } else {
-              setStatus('浏览器环境请按 F12；控制台可用 wst.run(code) / wst.t / wst.type(data)')
-            }
-          }}
-          title="打开调试控制台（DevTools）：wst.run('代码') 运行脚本、wst.t API、wst.type('\\t') 模拟键入验证命令识别"
-        >
-          🐞
-        </button>
         {/* 设置入口：顶栏最右上角，打开整页设置 */}
         <button
           className="btn btn-secondary btn-sm settings-btn"
