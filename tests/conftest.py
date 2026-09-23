@@ -110,6 +110,29 @@ def fake_sessions(monkeypatch):
     return mgr
 
 
+@pytest.fixture(autouse=True)
+def _isolate_history_db(monkeypatch, tmp_path):
+    """全局默认隔离：任何测试的 history.db 都指向临时目录
+
+    忘挂 fake_history_db 的测试（如 test_sessions_api 的 inject_command("CMD2")）
+    曾把记录直写进真实 ~/.ai4one/sshtool/history.db——真实库里 CMD2/exit 高频
+    垃圾条目即此污染。fake_history_db 在本 fixture 之后覆盖路径，互不冲突。
+    """
+    import ssh_web_tool.history_db as history_db
+
+    history_db._db_conn = None
+    monkeypatch.setattr(history_db, "get_db_path", lambda: tmp_path / "history_isolated.db")
+    yield
+    if history_db._db_conn is not None:
+        import asyncio
+
+        try:
+            asyncio.run(history_db.close_db())
+        except Exception:
+            pass
+        history_db._db_conn = None
+
+
 @pytest.fixture()
 def fake_history_db(monkeypatch, tmp_path):
     """把 history.db 指到临时目录并初始化，避免污染真实历史库

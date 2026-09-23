@@ -209,3 +209,44 @@ def test_clean_command_invisible_unicode():
     assert clean_command("cat \ufeffa.txt") == "cat a.txt"
     assert clean_command("echo a\u2060b\u00adc") == "echo abc"
     assert clean_command("git commit -m '正常 空格'") == "git commit -m '正常 空格'"  # 不误伤
+
+
+def test_residue_guard_digit_fragments_and_caret():
+    """数字开头残片/编号输出行/^C 尾巴拒收；单数字开头与数字中段不误伤"""
+    from ssh_web_tool.history_db import _looks_like_escape_residue
+
+    assert _looks_like_escape_residue("255mvim file")  # SGR 38;5;255 跨 chunk 截断残片
+    assert _looks_like_escape_residue("38;5;255m")
+    assert _looks_like_escape_residue("255  ls -la")  # history/jobs 编号输出行
+    assert _looks_like_escape_residue("free -h^C")  # 中断回显尾巴
+    assert _looks_like_escape_residue("255")  # 纯数字行（输出残片）
+    # 不误伤：单数字开头工具名、数字出现在命令中部、算式/版本号形态
+    assert not _looks_like_escape_residue("7z a out.7z")
+    assert not _looks_like_escape_residue("2to3 -w x.py")
+    assert not _looks_like_escape_residue("sha256sum img.tar.gz")
+    assert not _looks_like_escape_residue("12+34")
+    assert not _looks_like_escape_residue("127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_init_db_prunes_digit_residue_and_output_lines(fake_history_db):
+    """存量清理：数字残片、^C 尾巴、列对齐输出行删除；正常命令不误伤"""
+    db = fake_history_db
+    conn = await db.get_db()
+    junk = ["255mvim", "255  ls -la", "of 19.32GB   Users logged in:       0", "ssh host^C"]
+    good = ["echo x", "sha256sum a", "7z a b.7z", "[ -f x ]", "ps aux | head -10"]
+    for c in junk + good:
+        await conn.execute("INSERT INTO command_history (command, count, last_used) VALUES (?, 1, 1)", (c,))
+    await conn.commit()
+    await db.init_db()
+    cmds = {f["command"] for f in await db.search_commands(keyword="", limit=100)}
+    assert cmds.isdisjoint(set(junk))
+    assert set(good) <= cmds
+
+
+@pytest.mark.asyncio
+async def test_record_guard_rejects_digit_residue(fake_history_db):
+    db = fake_history_db
+    await db.record_command("255mvim")
+    await db.record_echo_command("255  systemctl status nginx")
+    assert [f["command"] for f in await db.search_commands(keyword="", limit=50)] == []

@@ -288,3 +288,12 @@ def test_charset_escape_not_recorded_with_command():
     p2 = EchoParser()
     assert p2.feed("mini> \n") == []
     assert p2.feed("\x1b(B\x1b[mCMD\r\n") == ["CMD"]
+
+
+def test_prompt_own_line_aligned_output_not_recorded():
+    """下一行捕获输出形态过滤：列对齐（free/ps 表格特征）不收，真实命令照常"""
+    p = EchoParser()
+    p.feed("mini> \n")
+    assert p.feed("Mem:   15Gi   1.2Gi   9.5Gi\n") == []  # 表格行被拒（并消耗本次武装）
+    p.feed("mini> \n")
+    assert p.feed("free -h\n") == ["free -h"]  # 下一次输入的普通命令不受影响

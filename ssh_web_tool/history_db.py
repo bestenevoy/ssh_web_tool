@@ -32,6 +32,15 @@ _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # （粘贴/快捷指令执行路径前端已在入口归一，此处兜底回显解析等非键盘录入路径）
 _ZERO_WIDTH_RE = re.compile("[\u200b\u200c\u200d\u2060\u00ad\ufeff]")
 _ODD_SPACE_RE = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+# 数字开头残片/输出行特征（入库拒收 + init_db 存量清理共用判据）：
+# - "255mvim…"、"38;5;…"：SGR 256 色参数（\x1b[38;5;255m）跨 chunk 截断后的残片，
+#   ESC 已丢、无从按序列剥离——"命令前挂着 255/256 数字"的来源
+# - "255  ls -la"：history/jobs 带编号的输出行被提示符误判后整行入库
+# - "…^C"：中断符回显被当作命令行（readline 打断渲染的 2 字符字面量）
+# 不误伤：7z/2to3（单数字开头）、127.0.0.1（数字后接 .）、12+34（REPL 算式）
+_RESIDUE_DIGIT_RE = re.compile(r"^\d{2,}([A-Za-z;:\s]|$)|\^C$")
+# 列对齐输出形态：词间出现 3+ 连续空白（free -h / ps 等表格输出特征，提交输入不会出现）
+_OUTPUT_SHAPE_RE = re.compile(r"\S\s{3,}\S")
 
 
 def _looks_like_escape_residue(cmd: str) -> bool:
@@ -41,7 +50,10 @@ def _looks_like_escape_residue(cmd: str) -> bool:
     - "(X/）X 单字符类名（(B (0 )B )0）：ESC ( x 字符集指定残片；
       合法子命令 "( cd…" "((" 的第二字符是空格/(/其他词，不误伤单字母外的…
       ——(c (d 等子 shell 常见，故仅按已知类名字符 B b 0 1 2 3 判定
+    - 数字开头残片/编号输出行/^C 尾巴（_RESIDUE_DIGIT_RE，见上）
     """
+    if _RESIDUE_DIGIT_RE.search(cmd):
+        return True
     if len(cmd) < 2:
         return False
     head, nxt = cmd[0], cmd[1]
@@ -139,6 +151,13 @@ async def init_db() -> None:
         "command LIKE '(B%' OR command LIKE '(0%' OR command LIKE ')B%' OR command LIKE ')0%' "
         "OR (command LIKE '[%' AND substr(command, 2, 1) NOT IN (' ', '[', char(9)))"
     )
+    # 存量清理扩展（与入库防线同判据）：数字开头残片（255mvim/编号输出行）、
+    # "^C" 尾巴、列对齐输出行（free -h/ps 表格特征）——SQLite 无正则，逐行 Python 判定
+    cur = await conn.execute("SELECT rowid, command FROM command_history")
+    rows = await cur.fetchall()
+    bad = [rid for rid, cmd in rows if _looks_like_escape_residue(cmd) or _OUTPUT_SHAPE_RE.search(cmd)]
+    if bad:
+        await conn.executemany("DELETE FROM command_history WHERE rowid = ?", [(rid,) for rid in bad])
     await conn.commit()
 
 

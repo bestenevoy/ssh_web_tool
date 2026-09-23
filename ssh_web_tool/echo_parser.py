@@ -121,6 +121,8 @@ _DCS_KEEP_CR_RE = re.compile(r"\x1b[PX^_][\s\S]*?(?:\x1b\\|\x07)")
 # 双字符转义（ESC ( B 字符集指定 / Fe 序列）：须在删 ESC 控制符前整体剥离，
 # 否则残留下 "(B" 字面量被当作命令记录（tput sgr0/提示符重置常见输出）
 _ESC2_KEEP_CR_RE = re.compile(r"\x1b[()\)][0-9A-Za-z]|\x1b[=><78cM]")
+# 列对齐输出形态：词间 3+ 连续空白（free -h/ps 等表格输出特征，提交的命令不会出现）
+_OUTPUT_TABLE_RE = re.compile(r"\S\s{3,}\S")
 
 
 class EchoParser:
@@ -269,7 +271,10 @@ class EchoParser:
                 elif self._await_cmd and line.strip():
                     self._await_cmd = False
                     candidate = self._strip_control_chars(line).strip()
-                    if candidate and len(candidate) <= 500:
+                    # 下一行捕获输出形态过滤：捕获意图是"提示符独立成行后用户敲的命令"，
+                    # 表格对齐形态（free -h 类输出行被误武装的场景）一律不收——
+                    # 这是"回显内容被当成命令"的最大来源
+                    if candidate and len(candidate) <= 500 and not _OUTPUT_TABLE_RE.search(candidate):
                         self._dedup_append(cmds, candidate)
                 # 其余（空行/普通输出行）忽略
         except Exception:
