@@ -84,6 +84,7 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
 
         {commands.map((qc) => {
           const isParam = qc.type === 'param'
+          const isScript = qc.type === 'script'
           return (
             <div
               key={qc.id}
@@ -97,7 +98,9 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
               style={{ opacity: disabled ? 0.5 : 1, cursor: disabled ? 'not-allowed' : 'grab' }}
               title={isParam
                 ? '带参数指令：点击输入到终端（含 {args} 占位），编辑后回车执行；右键更多操作；按住可拖拽排序'
-                : '点击立即执行；右键更多操作；按住可拖拽排序'}
+                : isScript
+                  ? 'JS 脚本指令：点击运行（t.send/expect/sleep 流程控制）；运行中再次点击 = 停止；右键更多操作'
+                  : '点击立即执行；右键更多操作；按住可拖拽排序'}
               onClick={() => {
                 if (disabled) return
                 if (isParam) onEditExecute(qc)  // 带参数指令：输入到终端，用户自行编辑 {args} 后执行
@@ -106,8 +109,8 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
             >
               <div className="qc-item-header">
                 <div className="qc-name" title={qc.command ? `${qc.name}\n${qc.command}` : qc.name}>
-                  <span className={`qc-type-badge ${isParam ? 'param' : 'direct'}`} title={isParam ? '带参数' : '直接执行'}>
-                    {isParam ? '⌨️' : '⚡'}
+                  <span className={`qc-type-badge ${isScript ? 'script' : isParam ? 'param' : 'direct'}`} title={isScript ? 'JS 脚本' : isParam ? '带参数' : '直接执行'}>
+                    {isScript ? '📜' : isParam ? '⌨️' : '⚡'}
                   </span>
                   {qc.name}
                   {qc.key && (
@@ -147,7 +150,7 @@ export function QuickCommands({ commands, onExecute, onEditExecute, onEdit, onDe
           sections={[
             [
               {
-                label: menu.qc.type === 'param' ? '输入到终端（可编辑）' : '立即执行',
+                label: menu.qc.type === 'param' ? '输入到终端（可编辑）' : menu.qc.type === 'script' ? '运行脚本' : '立即执行',
                 onClick: () => { if (!disabled) (menu.qc.type === 'param' ? onEditExecute : onExecute)(menu.qc) },
                 disabled,
               },

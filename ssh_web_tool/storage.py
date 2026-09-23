@@ -369,6 +369,7 @@ class Storage:
 
         Args:
             cmd_type: "direct" 直接执行 / "param" 带参数（输入后不执行，命令含 {args} 供编辑）
+                / "script" JS 脚本（command 字段为 JS 代码，前端 quickScript 运行时执行）
             pre_ops: 预操作列表 [{"type": "upload"|"chmod"|"exec", ...}]
             qc_key: 可选短标识（唯一），用于 .zs 脚本 @ 调用
         """
@@ -379,7 +380,7 @@ class Storage:
             "name": name,
             "command": command,
             "description": description,
-            "type": cmd_type if cmd_type in ("direct", "param") else "direct",
+            "type": cmd_type if cmd_type in ("direct", "param", "script") else "direct",
             "pre_ops": pre_ops or [],
             "key": key,
         }
@@ -405,7 +406,7 @@ class Storage:
                 qc["name"] = name
                 qc["command"] = command
                 qc["description"] = description
-                qc["type"] = cmd_type if cmd_type in ("direct", "param") else "direct"
+                qc["type"] = cmd_type if cmd_type in ("direct", "param", "script") else "direct"
                 qc["pre_ops"] = pre_ops or []
                 qc["key"] = key
                 self._save()

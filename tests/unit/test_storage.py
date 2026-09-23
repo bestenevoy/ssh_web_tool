@@ -124,3 +124,19 @@ def test_save_handles_corrupt_file_gracefully(tmp_path):
     data_file.write_text("{ corrupted json !!!", encoding="utf-8")
     s = Storage(data_file=str(data_file))
     assert s.list_hosts() == []
+
+
+def test_quick_command_script_type(tmp_path):
+    """JS 脚本类型须原样存储（归一白名单含 script；未知值仍回退 direct）"""
+    s = make_storage(tmp_path)
+    q = s.add_quick_command("巡检", "await t.session().expect('done')", cmd_type="script")
+    by_id = {qc["id"]: qc for qc in s.list_quick_commands()}
+    assert by_id[q["id"]]["type"] == "script"
+
+    q2 = s.add_quick_command("坏值", "ls", cmd_type="weird")
+    by_id = {qc["id"]: qc for qc in s.list_quick_commands()}
+    assert by_id[q2["id"]]["type"] == "direct"
+
+    s.update_quick_command(q["id"], "巡检2", q["command"], cmd_type="direct")
+    by_id = {qc["id"]: qc for qc in s.list_quick_commands()}
+    assert by_id[q["id"]]["type"] == "direct"

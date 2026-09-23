@@ -823,6 +823,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     setSearchOpenId,
     // 按会话 id 读取最新实例（terminalsRef，绕过闭包过期问题；不存在返回 undefined）
     getTerminal: (session_id: string) => terminalsRef.current.get(session_id),
+    // 全部会话最新快照（JS 脚本枚举目标用；同样经 ref 规避闭包过期）
+    listTerminals: () => [...terminalsRef.current.values()],
     createTerminal,
     // 打开本机终端（shell 为短标识或检测列表里的完整路径，WinPTY，不经过 SSH）
     openLocalTerminal: (shell: string) => createTerminal({} as Host, undefined, 'local', shell),

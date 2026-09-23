@@ -1382,6 +1382,7 @@ input.switch:focus-visible { outline: none; box-shadow: var(--ring); }
 }
 .qc-type-badge.direct { background: rgba(var(--ok-rgb),0.15); }
 .qc-type-badge.param { background: rgba(var(--warn-rgb),0.15); }
+.qc-type-badge.script { background: rgba(var(--info-rgb),0.15); }
 .qc-preop-badge { margin-left: 6px; font-size: calc(11px * var(--ui-fs-scale)); opacity: 0.85; }
 .qc-key-badge {
   margin-left: 6px; font-size: calc(10px * var(--ui-fs-scale)); padding: 0 4px; border-radius: 3px;

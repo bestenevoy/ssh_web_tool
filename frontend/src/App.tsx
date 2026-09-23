@@ -8,6 +8,7 @@ import type { EditorSessionInfo } from './lib/api'
 import { ContextMenu } from './components/ContextMenu'
 import type { CtxMenuItem } from './components/ContextMenu'
 import { useTerminals } from './lib/useTerminals'
+import { runQuickScript, ScriptAbort, SCRIPT_MAX_MS, type QuickScriptHost, type ScriptSession } from './lib/quickScript'
 import { writeClipboardText } from './lib/terminalCopy'
 import { useSettings, FONT_OPTIONS } from './lib/useSettings'
 import { HostList } from './components/HostList'
@@ -792,6 +793,30 @@ function App() {
   }, [terminals, setStatus])
 
 
+  // JS 脚本快捷指令运行句柄：qc.id → 取消标记（运行中再次点击 = 协作停止）
+  const scriptRunsRef = useRef<Map<string, { cancelled: boolean }>>(new Map())
+
+  // 解析脚本目标会话：省略=活动会话；参数=session_id / 主机显示名 精确、id 前缀
+  const resolveScriptSession = useCallback((idOrName?: string): Omit<ScriptSession, 'expect'> | null => {
+    const all = terminals.listTerminals()
+    let inst: TerminalInstance | undefined
+    if (!idOrName) {
+      const aid = terminals.activeId
+      inst = aid ? terminals.getTerminal(aid) : undefined
+    } else {
+      inst = all.find((i) => i.session_id === idOrName || i.host_name === idOrName)
+        ?? all.find((i) => i.session_id.startsWith(idOrName))
+    }
+    if (!inst) return null
+    const sid = inst.session_id
+    return {
+      id: sid,
+      name: inst.host_name || sid,
+      send: (c, execute = true) => terminals.sendCommandTo(sid, c, execute),
+      lines: (n = 50) => (terminals.readBufferTail(sid, Math.max(1, Math.min(n, 200))) ?? '').split('\n'),
+    }
+  }, [terminals])
+
   // 执行快捷指令（含预操作流水线：上传文件 → chmod → 先执行命令 → 命令本体）。
   // session_id 显式传入（默认当前活动终端）
   const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null, session_id?: string) => {
@@ -805,9 +830,42 @@ function App() {
         : (cmd + ' ' + param).trim()
     }
 
+    // JS 脚本型快捷指令（Xshell 动态对象式）：command 字段是脚本代码，
+    // 经 quickScript 运行时的 t API 操作终端；运行中再次点击本指令 = 停止
+    if (qc.type === 'script') {
+      const existing = scriptRunsRef.current.get(qc.id)
+      if (existing) {
+        existing.cancelled = true
+        setStatus(`脚本已请求停止：${qc.name}`)
+        return
+      }
+      const handle = { cancelled: false }
+      scriptRunsRef.current.set(qc.id, handle)
+      const deadline = Date.now() + SCRIPT_MAX_MS
+      const host: QuickScriptHost = {
+        resolve: (idOrName) => resolveScriptSession(idOrName),
+        list: () => terminals.listTerminals().map((i) => ({ id: i.session_id, name: i.host_name || i.session_id })),
+        activeId: () => terminals.activeId,
+        log: (m) => setStatus(`脚本「${qc.name}」: ${m}`),
+        cancelled: () => handle.cancelled,
+        deadline: () => deadline,
+      }
+      setStatus(`脚本运行中：${qc.name}（再次点击可停止）`)
+      try {
+        await runQuickScript(cmd, host)
+        setStatus(`脚本完成：${qc.name}`)
+      } catch (e) {
+        if (e instanceof ScriptAbort) setStatus(`脚本停止：${qc.name}（${e.message}）`)
+        else setStatus(`脚本报错：${qc.name}（${(e as Error).message}）`)
+      } finally {
+        scriptRunsRef.current.delete(qc.id)
+      }
+      return
+    }
+
     terminals.sendCommandTo(session_id ?? terminals.activeId ?? '', cmd, true)
     setStatus(`已执行: ${cmd.slice(0, 60)}`)
-  }, [runPreOps, terminals, setStatus])
+  }, [runPreOps, terminals, setStatus, resolveScriptSession])
 
   // 检查配置/脚本更新：扫描 config/data/scripts 后刷新主机与快捷指令列表
   const handleReloadConfig = useCallback(async () => {

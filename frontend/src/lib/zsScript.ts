@@ -92,6 +92,11 @@ export function resolveZsStep(text: string, line: number, quickCommands: QuickCo
     // 硬性规则：param 型指令需要人工输入参数，禁止在 .zs 中自动播放
     return { kind: 'error', message: `不允许引用带参数的指令: ${qc.name}`, line }
   }
+  if (qc.type === 'script') {
+    // JS 脚本指令由 quickScript 运行时执行，不是可广播的命令行——
+    // 整段代码当命令发进 shell 会造成灾难，硬性禁止 @ 引用（后续如需再做成 kind:'script' 步骤）
+    return { kind: 'error', message: `不允许引用 JS 脚本指令: ${qc.name}`, line }
+  }
   return { kind: 'send', cmd: qc.command, line, source: qc.name }
 }
 

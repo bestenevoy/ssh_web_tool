@@ -96,7 +96,8 @@ export interface QuickCommand {
   command: string
   description?: string
   // 指令类型：direct 直接执行 / param 带参数（点击后输入到终端，替换命令中的 {args} 占位符）
-  type?: 'direct' | 'param'
+  // / script JS 脚本（command 字段为 JS 代码，经 t API 操作终端，见 lib/quickScript.ts）
+  type?: 'direct' | 'param' | 'script'
   pre_ops?: QuickPreOp[]
   // 可选短标识（唯一，大小写不敏感），用于 .zs 脚本 @ 调用
   key?: string

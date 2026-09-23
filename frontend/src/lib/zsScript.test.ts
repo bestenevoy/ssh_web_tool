@@ -63,6 +63,13 @@ describe('resolveZsStep', () => {
     if (r.kind === 'error') expect(r.message).toContain('不允许引用带参数的指令')
   })
 
+  it('硬性规则：script 型指令报错（JS 代码不可当命令行广播）', () => {
+    const scriptQcs = [QC({ id: '9', name: '部署流程', key: 'deploy', type: 'script', command: "t.session().send('ls')" })]
+    const r = resolveZsStep('@deploy', 0, scriptQcs)
+    expect(r.kind).toBe('error')
+    if (r.kind === 'error') expect(r.message).toContain('JS 脚本指令')
+  })
+
   it('未知引用报错', () => {
     expect(resolveZsStep('@nope', 0, qcs).kind).toBe('error')
   })
