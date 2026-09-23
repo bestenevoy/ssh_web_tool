@@ -28,7 +28,11 @@ async def api_record_command(req: RecordCommandRequest):
         except Exception:
             recently = False  # 测试替身/旧对象无此方法：视作未记录，走兜底
         if recently:
+            print(f"[history] 延迟兜底·回显已记→跳过: {req.command!r}")
             return {"status": "skipped_echo"}
+        print(f"[history] 延迟兜底·回显未记→落键盘版: {req.command!r}")
+        await get_history_db().record_command(req.command, via="延迟兜底")
+        return {"status": "ok"}
     await get_history_db().record_command(req.command)
     return {"status": "ok"}
 

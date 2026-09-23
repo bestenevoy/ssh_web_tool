@@ -251,11 +251,14 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         if (viaTab) {
           const cap = anchor ? captureTypedLine(inst.term, anchor) : ''
           if (cap && cap.length >= typed.length) {
+            console.log('[history] 回车记录·缓冲捕获:', JSON.stringify(cap))
             api.recordCommand(cap).catch(() => {})
           } else {
+            console.log('[history] 回车记录·延迟兜底(回显优先):', JSON.stringify(typed))
             api.recordCommand(typed, session_id, 2).catch(() => {})
           }
         } else {
+          console.log('[history] 回车记录·键入版:', JSON.stringify(typed))
           api.recordCommand(typed).catch(() => {})
         }
       }
@@ -659,6 +662,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     const cmd = normalizeInvisible(command)
     if (execute) {
       sendClient(inst.ws, { type: 'input', data: cmd + '\n' })
+      console.log('[history] 回车记录·快捷指令注入:', JSON.stringify(cmd))
       api.recordCommand(cmd).catch(() => {})
       inst.input_buffer = ''
       // 程序注入绕过 term.onData（只对真实键盘触发），显式走一次 Enter 语义，

@@ -158,26 +158,34 @@ async def init_db() -> None:
     bad = [rid for rid, cmd in rows if _looks_like_escape_residue(cmd) or _OUTPUT_SHAPE_RE.search(cmd)]
     if bad:
         await conn.executemany("DELETE FROM command_history WHERE rowid = ?", [(rid,) for rid in bad])
+        print(f"[history] init_db 存量清理：删除 {len(bad)} 条垃圾记录")
     await conn.commit()
 
 
-async def record_command(command: str) -> None:
-    """记录一条命令：已存在则次数 +1 并刷新使用时间，不存在则插入"""
+async def record_command(command: str, via: str = "键入") -> None:
+    """记录一条命令：已存在则次数 +1 并刷新使用时间，不存在则插入
+
+    via：来源标签（仅用于 [history] console 决策日志，排查"哪条通道记的/为什么没记"）
+    """
     # 记录前清洗 ANSI/控制字符，防止方向键残留（[D/[C 等）污染历史
     cmd = clean_command(command)
-    if not cmd or len(cmd) > 500 or _looks_like_escape_residue(cmd):
+    if not cmd or len(cmd) > 500:
+        return
+    if _looks_like_escape_residue(cmd):
+        print(f"[history] 拒收·残片特征 via={via}: {command!r}")
         return
     conn = await get_db()
     now = time.time()
     # 回显已记录本条的超串（Tab 补全/历史翻查后的最终版）：本条是补全前残留，
     # 跳过。前端 HTTP 记录与回显解析存在竞争，晚到时不能覆盖权威版
     cur = await conn.execute(
-        "SELECT COUNT(*) FROM command_history WHERE last_used > ? "
+        "SELECT command FROM command_history WHERE last_used > ? "
         "AND length(command) > length(?) AND substr(command, 1, length(?)) = ?",
         (now - 3, cmd, cmd, cmd),
     )
-    row = await cur.fetchone()
-    if row and row[0] > 0:
+    superseded = [r[0] for r in await cur.fetchall()]
+    if superseded:
+        print(f"[history] 跳过·回显已记超串 via={via}: {cmd!r} ← {superseded[0]!r}")
         return
     await conn.execute(
         "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
@@ -185,6 +193,7 @@ async def record_command(command: str) -> None:
         (cmd, now),
     )
     await conn.commit()
+    print(f"[history] 记录 via={via}: {cmd!r}")
 
 
 async def record_echo_command(cmd: str) -> None:
@@ -196,26 +205,34 @@ async def record_echo_command(cmd: str) -> None:
     4. 否则正常记录
     """
     cmd = clean_command(cmd)
-    if not cmd or len(cmd) > 500 or _looks_like_escape_residue(cmd):
+    if not cmd or len(cmd) > 500:
+        return
+    if _looks_like_escape_residue(cmd):
+        print(f"[history] 拒收·残片特征 via=回显: {cmd!r}")
         return
     now = time.time()
     conn = await get_db()
-    # 1. 清理前缀残留：删除 3 秒内、更短、且是 cmd 严格前缀的命令
-    await conn.execute(
-        "DELETE FROM command_history WHERE command != ? AND last_used > ? "
+    # 1. 清理前缀残留：删除 3 秒内、更短、且是 cmd 严格前缀的命令（键盘输入版）
+    cur = await conn.execute(
+        "SELECT command FROM command_history WHERE command != ? AND last_used > ? "
         "AND length(command) < length(?) AND substr(?, 1, length(command)) = command",
         (cmd, now - 3, cmd, cmd),
     )
+    prefix_junk = [r[0] for r in await cur.fetchall()]
+    if prefix_junk:
+        await conn.executemany("DELETE FROM command_history WHERE command = ?", [(p,) for p in prefix_junk])
+        print(f"[history] 回显覆盖前缀残留: {prefix_junk!r} → {cmd!r}")
     # 2. 反向防护：3 秒内已记录过本条的严格超串（前端键入版完整命令），
     # 本条是回显解析出的截断片段（长命令按终端宽度折行只解析到首行）——跳过。
     # 与 record_command 的超串检查对称，杜绝"一条完整 + 一条不完整"并存
     cur = await conn.execute(
-        "SELECT COUNT(*) FROM command_history WHERE last_used > ? "
+        "SELECT command FROM command_history WHERE last_used > ? "
         "AND length(command) > length(?) AND substr(command, 1, length(?)) = ?",
         (now - 3, cmd, cmd, cmd),
     )
-    row = await cur.fetchone()
-    if row and row[0] > 0:
+    longer = [r[0] for r in await cur.fetchall()]
+    if longer:
+        print(f"[history] 跳过·截断片段 via=回显: {cmd!r} ← 已有 {longer[0]!r}")
         await conn.commit()
         return
     # 3. 去重：3 秒内已记录同命令则跳过（前端/CLI 已记过）
@@ -226,6 +243,7 @@ async def record_echo_command(cmd: str) -> None:
     row = await cur.fetchone()
     cnt = row[0] if row else 0
     if cnt > 0:
+        print(f"[history] 跳过·3秒内已记 via=回显: {cmd!r}")
         await conn.commit()
         return
     # 4. 记录
@@ -235,6 +253,7 @@ async def record_echo_command(cmd: str) -> None:
         (cmd, now),
     )
     await conn.commit()
+    print(f"[history] 记录 via=回显: {cmd!r}")
 
 
 async def search_commands(keyword: str = "", limit: int = 50, include_ignored: bool = False) -> list[dict]:

@@ -477,6 +477,7 @@ class SSHSession:
         if not self._has_shell or self.process is None:
             return
         for cmd in self._echo_parser.feed(data):
+            print(f"[history] echo解析→ {cmd!r} (session={self.session_id})")
             # cd 跟踪权威修正：回显行是 Tab 补全/历史翻查后的最终命令，
             # 输入侧按键缓冲只见补全前内容（含 Tab 的行已跳过缓冲解析）；
             # 本机会话无 SFTP 需求不跟踪，避免本地 shell 回显干扰
