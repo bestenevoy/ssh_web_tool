@@ -8,7 +8,7 @@ import type { EditorSessionInfo } from './lib/api'
 import { ContextMenu } from './components/ContextMenu'
 import type { CtxMenuItem } from './components/ContextMenu'
 import { useTerminals } from './lib/useTerminals'
-import { runQuickScript, ScriptAbort, SCRIPT_MAX_MS, type QuickScriptHost, type ScriptSession } from './lib/quickScript'
+import { runQuickScript, ScriptAbort, SCRIPT_MAX_MS, type QuickScriptHost, type ScriptSession, type ScriptSessionState } from './lib/quickScript'
 import { writeClipboardText } from './lib/terminalCopy'
 import { useSettings, FONT_OPTIONS } from './lib/useSettings'
 import { HostList } from './components/HostList'
@@ -796,8 +796,20 @@ function App() {
   // JS 脚本快捷指令运行句柄：qc.id → 取消标记（运行中再次点击 = 协作停止）
   const scriptRunsRef = useRef<Map<string, { cancelled: boolean }>>(new Map())
 
+  // 脚本视角的会话连接状态：ws 就绪态 + 前端断线/重连标记 → 统一枚举
+  const scriptConnState = useCallback(
+    (inst: TerminalInstance | undefined): ScriptSessionState => {
+      if (!inst) return 'closed'
+      if (inst.reconnecting) return 'connecting'
+      if (inst.disconnected) return 'disconnected'
+      if (inst.ws && inst.ws.readyState === WebSocket.OPEN) return 'open'
+      return 'closed'
+    },
+    [],
+  )
+
   // 解析脚本目标会话：省略=活动会话；参数=session_id / 主机显示名 精确、id 前缀
-  const resolveScriptSession = useCallback((idOrName?: string): Omit<ScriptSession, 'expect'> | null => {
+  const resolveScriptSession = useCallback((idOrName?: string): Omit<ScriptSession, 'expect' | 'run' | 'waitIdle' | 'connected'> | null => {
     const all = terminals.listTerminals()
     let inst: TerminalInstance | undefined
     if (!idOrName) {
@@ -813,9 +825,11 @@ function App() {
       id: sid,
       name: inst.host_name || sid,
       send: (c, execute = true) => terminals.sendCommandTo(sid, c, execute),
-      lines: (n = 50) => (terminals.readBufferTail(sid, Math.max(1, Math.min(n, 200))) ?? '').split('\n'),
+      lines: (n = 50) => (terminals.readBufferTail(sid, Math.max(1, Math.min(n, 2000))) ?? '').split('\n'),
+      // 经 ref 取最新实例算状态（闭包里的 inst 会过期）
+      state: () => scriptConnState(terminals.getTerminal(sid)),
     }
-  }, [terminals])
+  }, [terminals, scriptConnState])
 
   // 执行快捷指令（含预操作流水线：上传文件 → chmod → 先执行命令 → 命令本体）。
   // session_id 显式传入（默认当前活动终端）
@@ -844,9 +858,31 @@ function App() {
       const deadline = Date.now() + SCRIPT_MAX_MS
       const host: QuickScriptHost = {
         resolve: (idOrName) => resolveScriptSession(idOrName),
-        list: () => terminals.listTerminals().map((i) => ({ id: i.session_id, name: i.host_name || i.session_id })),
+        list: () =>
+          terminals.listTerminals().map((i) => ({
+            id: i.session_id,
+            name: i.host_name || i.session_id,
+            state: scriptConnState(terminals.getTerminal(i.session_id)),
+          })),
         activeId: () => terminals.activeId,
         log: (m) => setStatus(`脚本「${qc.name}」: ${m}`),
+        // 重连：走统一重连流程（无凭据会弹密码框，取消即失败），等 ws 就绪落定
+        reconnect: async (id) => {
+          await handleReconnectTerminal(id)
+          const until = Date.now() + 8000
+          for (;;) {
+            const inst = terminals.getTerminal(id)
+            if (inst?.ws && inst.ws.readyState === WebSocket.OPEN && !inst.reconnecting) return true
+            if (Date.now() >= until) return false
+            await new Promise((r) => setTimeout(r, 250))
+          }
+        },
+        // 断开：后端切回本机 shell（会话保留，可再 reconnect）
+        disconnect: async (id) => {
+          if (!terminals.getTerminal(id)) return false
+          await terminals.disconnectTerminal(id)
+          return true
+        },
         cancelled: () => handle.cancelled,
         deadline: () => deadline,
       }
@@ -865,7 +901,7 @@ function App() {
 
     terminals.sendCommandTo(session_id ?? terminals.activeId ?? '', cmd, true)
     setStatus(`已执行: ${cmd.slice(0, 60)}`)
-  }, [runPreOps, terminals, setStatus, resolveScriptSession])
+  }, [runPreOps, terminals, setStatus, resolveScriptSession, scriptConnState, handleReconnectTerminal])
 
   // 检查配置/脚本更新：扫描 config/data/scripts 后刷新主机与快捷指令列表
   const handleReloadConfig = useCallback(async () => {

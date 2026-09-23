@@ -213,7 +213,7 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
                 onChange={() => setCmdType('script')}
               />
               <span>📜 JS 脚本</span>
-              <span className="qc-type-desc">JavaScript 流程控制（send/expect/sleep），Xshell 动态对象式</span>
+              <span className="qc-type-desc">JavaScript 流程控制（send/run/expect/重连），Xshell 动态对象式</span>
             </label>
           </div>
         </div>
@@ -241,8 +241,11 @@ export function QuickCommandModal({ onClose, onAdd, onUpdate, editing }: Props) 
               />
               <div style={{ fontSize: 'calc(10px * var(--ui-fs-scale))', color: 'var(--text-muted)', marginTop: 3 }}>
                 API（async 函数体，可直接 await）：<code>t.session(id或名称)</code> 取会话（省略=当前活动）、
-                <code>t.sessions()</code> 列表、<code>s.send(cmd, execute=true)</code>、
+                <code>t.sessions()</code> 列表（含 state）、<code>s.send(cmd, execute=true)</code>、
+                <code>await s.run(cmd)</code> → 发命令并等执行完 <code>{'{ok, code, output[], matched}'}</code>（注入退出码探针，bash/zsh）、
                 <code>await s.expect('文本'或/正则/, 超时ms)</code> → 命中行/null、
+                <code>await s.waitIdle()</code> 等屏幕停止刷新、<code>s.state()/s.connected()</code> 连接状态、
+                <code>await t.reconnect(id或名称)/t.disconnect()</code> 重连/断开会话、
                 <code>await t.sleep(ms)</code>、<code>t.log(msg)</code>。全局超时 120s；运行中再次点击本指令 = 停止。
               </div>
               {scriptErr && (
