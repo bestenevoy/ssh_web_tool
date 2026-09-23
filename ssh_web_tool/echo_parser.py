@@ -95,23 +95,6 @@ def _strip_one_prompt(s: str, prompt_only: bool = False) -> int | None:
     return _match_zsh_percent(s, prompt_only=prompt_only)
 
 
-def _arms_next_line_capture(s: str) -> bool:
-    """提示符独占整行时，是否武装"下一行是命令回显"捕获
-
-    仅自研/简易 shell 需要该机制：通用 xxx> 提示符（mini 等）与只能靠宽松
-    PS1 兜底识别的自定义提示符（[myshell]$ 等）。
-    标准 shell（bash/zsh %、fish、PS/cmd、箭头）虽也可能 fullmatch 宽松 PS1
-    正则（如 root@host:~#），但它们能被精确模式识别 → 同行回显，不武装
-    （防误记空回车后的输出）。
-    """
-    if _PROMPT_PATTERNS[6].fullmatch(s):  # 通用 xxx>（mongo/postgres/mini 等同形态）
-        return True
-    if re.fullmatch(r"[\[\]~\w@.\- :/\\]*?[#$]\s*", s):  # 宽松 PS1 兜底形态
-        # 能被精确提示符模式识别 = 标准 shell，不武装
-        return _strip_one_prompt(s, prompt_only=True) is None
-    return False
-
-
 # 清 ANSI 但保留 \r\n（回显解析需要 \r 判断行内覆盖）。CSI 参数区按标准取
 # 0x30-0x3F（数字与 : ; < = ?），覆盖私有 \x1b[?2004h、kitty \x1b[>1u 等
 _ANSI_KEEP_CR_RE = re.compile(r"\x1b\[[0-9;:<=>?]*[a-zA-Z]")
@@ -121,32 +104,28 @@ _DCS_KEEP_CR_RE = re.compile(r"\x1b[PX^_][\s\S]*?(?:\x1b\\|\x07)")
 # 双字符转义（ESC ( B 字符集指定 / Fe 序列）：须在删 ESC 控制符前整体剥离，
 # 否则残留下 "(B" 字面量被当作命令记录（tput sgr0/提示符重置常见输出）
 _ESC2_KEEP_CR_RE = re.compile(r"\x1b[()\)][0-9A-Za-z]|\x1b[=><78cM]")
-# 列对齐输出形态：词间 3+ 连续空白（free -h/ps 等表格输出特征，提交的命令不会出现）
-_OUTPUT_TABLE_RE = re.compile(r"\S\s{3,}\S")
 
 
 class EchoParser:
-    """回显解析状态机（每个会话一个实例）
+    """回显解析状态机（每个会话一个实例）——S3 兜底通道
 
-    支持两类回显形态：
-    - 标准 readline shell（bash/zsh）：提示符与命令同行，Tab 补全增量直接拼在行内
-    - 简易/自研 shell（如 mini>）：提示符独立成行，命令回显在下一行
-      （is_prompt_only + _await_cmd 状态机捕获，否则这类 shell 完全无法从
-      回显记录命令，只剩前端键入版——Tab 补全场景会记录补全前文本）
+    仅处理"提示符与命令同行"的标准 readline 回显（bash/zsh/fish/PS/cmd/
+    自研 xxx> 同行形态）。原"提示符独占行→武装下一行捕获"机制已整体退役：
+    它是"回显内容被当成命令"的最大误报源（任何输出行撞宽松 PS1 形态，其后
+    第一行程序输出即入库）；自研 shell 的下一行回显、↑ 历史召回、整段粘贴
+    等场景统一改由输入快照通道承担（前端 xterm 缓冲 captureTypedLine，
+    headless 会话的后端镜像快照随二期事件总线上线）。
     """
 
     # 异常情况下行缓冲上限，超过直接丢弃防止无限增长
     BUFFER_LIMIT = 4000
     # 同命令去重窗口（秒）
     DEDUP_WINDOW = 3.0
-    # 提示符独立成行时的行长度上限（超过视为普通输出行，防误记）
-    PROMPT_LINE_MAX = 120
 
     def __init__(self) -> None:
         self.buffer = ""  # 输出行缓冲（可能被数据块截断，留到下一块补齐）
         self.last_cmd = ""  # 最近一次解析记录的命令（去重防重复记录）
         self.last_time = 0.0  # 最近一次记录时间
-        self._await_cmd = False  # 提示符独立成行后，等待下一非空行作为命令回显
 
     @classmethod
     def clean_ansi_keep_cr(cls, text: str) -> str:
@@ -178,21 +157,6 @@ class EchoParser:
             else:
                 out.append(ch)
         return "".join(out)
-
-    @classmethod
-    def is_prompt_only(cls, line: str) -> bool:
-        """该行是否为"只有提示符"的行（命令回显在下一行，如 mini> 自研 shell）"""
-        s = line.strip()
-        if not s or len(s) > cls.PROMPT_LINE_MAX:
-            return False
-        # python 续行提示符不是新命令的起点（其后无独立命令回显行）
-        if s.startswith("..."):
-            return False
-        n = _strip_one_prompt(s, prompt_only=True)
-        if n is not None and not s[n:].strip():
-            return True
-        # 宽松兜底与 extract_echo_command 保持一致（[user@host ~]$ 等）
-        return bool(re.fullmatch(r"[\[\]~\w@.\- :/\\]*?[#$]\s*", s))
 
     @classmethod
     def extract_echo_command(cls, line: str) -> str:
@@ -259,24 +223,10 @@ class EchoParser:
                 line = self._apply_backspaces(line)
                 cmd = self.extract_echo_command(line)
                 if cmd:
-                    self._await_cmd = False
                     self._dedup_append(cmds, cmd)
-                    continue
-                # 无命令的行：仅自研/简易 shell（通用 xxx>、宽松 PS1 兜底）的提示符
-                # 独立成行时，下一个非空行是该提示符的命令回显；标准 shell
-                # （bash/zsh/fish/PS/cmd/箭头/python）均同行回显，提示符独占行只会
-                # 出现在空回车场景，武装捕获只会把后续输出误记为命令
-                if self.is_prompt_only(line) and _arms_next_line_capture(line.strip()):
-                    self._await_cmd = True
-                elif self._await_cmd and line.strip():
-                    self._await_cmd = False
-                    candidate = self._strip_control_chars(line).strip()
-                    # 下一行捕获输出形态过滤：捕获意图是"提示符独立成行后用户敲的命令"，
-                    # 表格对齐形态（free -h 类输出行被误武装的场景）一律不收——
-                    # 这是"回显内容被当成命令"的最大来源
-                    if candidate and len(candidate) <= 500 and not _OUTPUT_TABLE_RE.search(candidate):
-                        self._dedup_append(cmds, candidate)
-                # 其余（空行/普通输出行）忽略
+                # 其余行（空行/普通输出行/提示符独占行）一律忽略：S3 只认与提示符
+                # 同行的回显；无键入缓冲的行（↑ 召回/粘贴/自研 shell 下行回显）
+                # 由输入快照通道负责，不再从输出流猜
         except Exception:
             pass
         return cmds

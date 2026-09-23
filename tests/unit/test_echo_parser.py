@@ -71,23 +71,22 @@ def test_blank_line():
     assert extract("   ") == ""
 
 
-# ---------- 提示符独立成行（自研/简易 shell，如 mini>） ----------
+# ---------- 提示符独立成行：下一行捕获通道已退役（一期重设计） ----------
 
 
-def test_prompt_own_line_command_next_line():
-    """mini shell：提示符独立成行，命令回显在下一行（分块到达）"""
+def test_prompt_own_line_no_next_line_capture():
+    """ "提示符独占行→下一行是命令"的猜测通道整体退役：其后任何输出行
+    都不再入库（回显当命令最大误报源）；这类场景改由输入快照通道承担"""
     p = EchoParser()
     assert p.feed("mini> \n") == []
-    assert p.feed("CMD") == []
-    assert p.feed("2\n") == ["CMD2"]  # Tab 补全增量拼在命令行内，最终命令被捕获
-
-
-def test_prompt_own_line_output_after_cmd_not_misrecorded():
-    """mini shell：命令记录后，命令的输出行不再误记为命令"""
-    p = EchoParser()
-    p.feed("mini> \n")
-    assert p.feed("whoami\n") == ["whoami"]
+    assert p.feed("whoami\n") == []  # 曾经的"下一行命令"不再从输出流猜
     assert p.feed("root\n") == []
+
+
+def test_prompt_own_line_same_line_still_parsed():
+    """同行 mini> 回显形态不受影响（extract 主路径正常）"""
+    p = EchoParser()
+    assert p.feed("mini> whoami\r\n") == ["whoami"]
 
 
 def test_prompt_own_line_empty_enter_then_cmd():
@@ -131,10 +130,13 @@ def test_zsh_percent_prompt_only_empty_enter():
 
 
 def test_zsh_percent_prompt_only_detection():
-    assert EchoParser.is_prompt_only("user@host ~ %")
-    assert EchoParser.is_prompt_only("~/repo %")
-    # 裸 hostname% 不算"仅提示符"行（防误报防线）
-    assert not EchoParser.is_prompt_only("myserver%")
+    """zsh % 提示符独占行：自身不产出命令，且其后输出行不再被"下一行捕获"误记"""
+    p = EchoParser()
+    assert p.feed("user@host ~ %\r\n") == []
+    assert p.feed("some output with  spaces\r\n") == []
+    p2 = EchoParser()
+    assert p2.feed("myserver%\r\n") == []
+    assert p2.feed("uptime\r\n") == []  # 下一行捕获通道已退役
 
 
 @pytest.mark.parametrize(
@@ -178,11 +180,12 @@ def test_oh_my_zsh_feed_tab_completion():
 
 def test_starship_prompt():
     assert extract("❯ docker ps") == "docker ps"
-    assert EchoParser.is_prompt_only("❯")
-    # 两行式第一行（路径 + ❯）
-    assert EchoParser.is_prompt_only("~/repo ❯")
-    assert EchoParser.is_prompt_only("user@host ❯")
     assert extract("~/repo ❯ pytest") == "pytest"
+    # 箭头独占行：无命令产出，也不武装下一行（通道已退役）
+    p = EchoParser()
+    assert p.feed("❯\n") == []
+    assert p.feed("~/repo ❯\n") == []
+    assert p.feed("ls output line\n") == []
 
 
 def test_arrow_glyph_output_not_recorded():
@@ -228,11 +231,13 @@ def test_standard_prompt_own_line_does_not_await():
     assert p.feed("more output\r\n") == []
 
 
-def test_mini_style_prompt_still_awaits():
-    """自研 shell（宽松 PS1）提示符独占行：下一行命令仍被捕获"""
+def test_loose_ps1_own_line_awaits_removed():
+    """自研 shell（宽松 PS1）提示符独占行：不再武装下一行捕获
+    （free -h 表格/普通输出行零入库），场景归输入快照通道负责"""
     p = EchoParser()
     assert p.feed("[myshell]$\r\n") == []
-    assert p.feed("run_task\r\n") == ["run_task"]
+    assert p.feed("run_task\r\n") == []
+    assert p.feed("Mem:   15Gi   1.2Gi\r\n") == []
 
 
 # ---------- 退格擦除重放（↑ 召回/退格编辑） ----------
@@ -285,15 +290,14 @@ def test_charset_escape_not_recorded_with_command():
     不得残留 "(B" 字面量混入记录的命令（旧清洗只删 ESC 控制符所致）"""
     p = EchoParser()
     assert p.feed("root@host:~$ \x1b(B\x1b[mls -la\r\n") == ["ls -la"]
-    p2 = EchoParser()
-    assert p2.feed("mini> \n") == []
-    assert p2.feed("\x1b(B\x1b[mCMD\r\n") == ["CMD"]
+    p2 = EchoParser()  # 同行形态：mini> 提示符 + 字符集序列 + 命令
+    assert p2.feed("mini> \x1b(B\x1b[mCMD\r\n") == ["CMD"]
 
 
 def test_prompt_own_line_aligned_output_not_recorded():
-    """下一行捕获输出形态过滤：列对齐（free/ps 表格特征）不收，真实命令照常"""
+    """列对齐输出行（free/ps 表格特征）任何形态都不入库——下一行捕获
+    通道退役后由"输出行天然不带提示符"保证，本用例锁定回归"""
     p = EchoParser()
-    p.feed("mini> \n")
-    assert p.feed("Mem:   15Gi   1.2Gi   9.5Gi\n") == []  # 表格行被拒（并消耗本次武装）
-    p.feed("mini> \n")
-    assert p.feed("free -h\n") == ["free -h"]  # 下一次输入的普通命令不受影响
+    assert p.feed("mini> \n") == []
+    assert p.feed("Mem:   15Gi   1.2Gi   9.5Gi\n") == []
+    assert p.feed("free -h\n") == []  # 无提示符同行形态：不再猜，快照通道负责

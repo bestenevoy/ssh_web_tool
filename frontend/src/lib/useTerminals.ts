@@ -241,25 +241,30 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     // ① 终端缓冲捕获输入行全文（补全后所见即所得，与重绘字节序/PS1 形态无关）
     // ② 缓冲不可用（行被后台输出推挤等）→ 延迟兜底：等 2s 让回显解析先落库
     // ③ 回显也没记到才落键盘版——任何路径下至少一条，且不再残留补全前半截
+    // 回车记录（一期：输入快照主通道化）。键盘缓冲只在"纯键入无补全"时可信：
+    // - 可信行（有键入内容且本行无 Tab）→ 键入版即时记录（原行为，最快最稳）
+    // - 含 Tab 补全行 / 缓冲空但有输入锚行（↑ 历史召回、整段粘贴、自研 shell
+    //   下行回显）→ captureTypedLine 从 xterm 缓冲捕获屏幕实际显示的命令行
+    //   （所见即所得，不依赖提示符格式/重绘方式，S2 主通道）
+    // - 捕获不可用（行被推挤/锚失效）且缓冲非空 → 延迟兜底：等 2s 让后端回显
+    //   解析先落库，没记到才落键盘版——任何 shell 至少一条且不留补全前半截
     if (isEnter(data)) {
       const typed = inst.input_buffer.trim()
       const viaTab = inst.saw_tab
       const anchor = inst.cmd_anchor
       inst.saw_tab = false
       inst.cmd_anchor = null
-      if (typed) {
-        if (viaTab) {
-          const cap = anchor ? captureTypedLine(inst.term, anchor) : ''
-          if (cap && cap.length >= typed.length) {
-            console.log('[history] 回车记录·缓冲捕获:', JSON.stringify(cap))
-            api.recordCommand(cap).catch(() => {})
-          } else {
-            console.log('[history] 回车记录·延迟兜底(回显优先):', JSON.stringify(typed))
-            api.recordCommand(typed, session_id, 2).catch(() => {})
-          }
-        } else {
-          console.log('[history] 回车记录·键入版:', JSON.stringify(typed))
-          api.recordCommand(typed).catch(() => {})
+      if (typed && !viaTab) {
+        console.log('[history] 回车记录·键入版:', JSON.stringify(typed))
+        api.recordCommand(typed).catch(() => {})
+      } else {
+        const cap = anchor ? captureTypedLine(inst.term, anchor) : ''
+        if (cap && cap.length >= typed.length) {
+          console.log('[history] 回车记录·缓冲捕获:', JSON.stringify(cap))
+          api.recordCommand(cap).catch(() => {})
+        } else if (typed) {
+          console.log('[history] 回车记录·延迟兜底(回显优先):', JSON.stringify(typed))
+          api.recordCommand(typed, session_id, 2).catch(() => {})
         }
       }
     } else if (data.includes('\t')) {
@@ -291,9 +296,11 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       inst.input_buffer = next.buffer
       inst.input_cursor = next.cursor
     }
-    // 输入行起点锚：空→非空瞬间，回显尚未到达（echo 异步），光标仍在提示符结束列
-    // ——记住行列即"命令文本在终端缓冲中的起点"，供 captureTypedLine 截取全文
-    if (!prevBuffer && inst.input_buffer && !isEnter(data)) {
+    // 输入行锚点：行空闲（键盘缓冲空）时的任何首次输入都设锚 = 当前光标位置
+    // （远端回显异步未到，光标仍在提示符结束处）。覆盖三类缓冲记不到的行：
+    // ↑ 历史召回（ESC 序列）、整段粘贴（ESC 200~ 段）、Tab 菜单选择——它们
+    // 键盘缓冲留空，回车时靠此锚从 xterm 缓冲捕获屏幕命令行
+    if (!isEnter(data) && !prevBuffer && data !== '\x03' && data !== '\x04' && data !== '\x15') {
       const b = inst.term.buffer.active
       inst.cmd_anchor = { row: b.cursorY, col: b.cursorX }
     }
