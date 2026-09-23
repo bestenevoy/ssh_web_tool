@@ -5,7 +5,7 @@ import type { FitAddon } from '@xterm/addon-fit'
 import type { Host } from '../types'
 import { api } from './api'
 import type { TerminalSettings } from './useSettings'
-import { editLineBuffer, isEnter } from './lineEditor'
+import { editLineBuffer, isEnter, captureTypedLine } from './lineEditor'
 import { normalizeInvisible } from './invisibleChars'
 import { createTerminalInstance, getTerminalTheme } from './terminalInstance'
 import type { TerminalInstance, SshConnInfo } from './terminalInstance'
@@ -227,21 +227,50 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     if (inst.reconnecting || !inst.ws || inst.ws.readyState !== WebSocket.OPEN) {
       inst.input_buffer = ''
       inst.input_cursor = 0
+      inst.saw_tab = false
+      inst.cmd_anchor = null
       return
     }
 
     // 回车：先由前端按键盘输入即时记录（兜底，保证任何 PS1 环境下都有历史），
     // 后端随后解析终端回显行（含 Tab 补全/历史翻查后的真实命令）：
-    // record_echo_command 会清理 3 秒内的前缀残留（如 cd /va）并去重，以后端为准
+    // record_echo_command 会清理 3 秒内的前缀残留（如 cd /va）并去重，以后端为准。
+    // 例外——本行按过 Tab：补全文本从输出侧回来，键盘缓冲要么残缺、要么在
+    // "补全后又输入"时交错成非前缀乱串（前缀/超串去重都拦不住，即"补全的命令
+    // 没记录、只留半截"的根因）。三级取权威：
+    // ① 终端缓冲捕获输入行全文（补全后所见即所得，与重绘字节序/PS1 形态无关）
+    // ② 缓冲不可用（行被后台输出推挤等）→ 延迟兜底：等 2s 让回显解析先落库
+    // ③ 回显也没记到才落键盘版——任何路径下至少一条，且不再残留补全前半截
     if (isEnter(data)) {
-      if (inst.input_buffer.trim()) {
-        api.recordCommand(inst.input_buffer.trim()).catch(() => {})
+      const typed = inst.input_buffer.trim()
+      const viaTab = inst.saw_tab
+      const anchor = inst.cmd_anchor
+      inst.saw_tab = false
+      inst.cmd_anchor = null
+      if (typed) {
+        if (viaTab) {
+          const cap = anchor ? captureTypedLine(inst.term, anchor) : ''
+          if (cap && cap.length >= typed.length) {
+            api.recordCommand(cap).catch(() => {})
+          } else {
+            api.recordCommand(typed, session_id, 2).catch(() => {})
+          }
+        } else {
+          api.recordCommand(typed).catch(() => {})
+        }
       }
+    } else if (data.includes('\t')) {
+      // 行内任何 Tab（补全/菜单选择）都使键盘版缓冲不可信；整段粘贴含 Tab 同样命中
+      inst.saw_tab = true
     }
     // Ctrl+C：除清空行缓冲外，打断洪水输出（cat 大文件/grep -r）时立即丢弃
     // 尚未渲染的积压。否则后端已中断命令，但积压块仍会持续灌入 xterm 解析绘制，
     // 界面看起来像"卡死/没反应"（这是用户最常把 Ctrl+C 误判为失效的场景）
+    // Ctrl+C / Ctrl+D：行被作废，输入缓冲与 Tab 标记一并由 editLineBuffer 清空路径处理
+    // （此处显式重置 saw_tab，防补全标记串到下一行导致误走延迟兜底）
     if (data === '\x03' || data === '\x04') {
+      inst.saw_tab = false
+      inst.cmd_anchor = null
       if (inst.feeder && inst.feeder.pendingBytes() > 0) {
         inst.feeder.dropPending()
         // 本地 shell（cmd/powershell）：Ctrl+C 后 ^C 回显+新提示符几十毫秒就到，
@@ -253,10 +282,17 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       }
     }
 
+    const prevBuffer = inst.input_buffer
     const next = editLineBuffer({ buffer: inst.input_buffer, cursor: inst.input_cursor }, data)
     if (next.buffer !== inst.input_buffer || next.cursor !== inst.input_cursor) {
       inst.input_buffer = next.buffer
       inst.input_cursor = next.cursor
+    }
+    // 输入行起点锚：空→非空瞬间，回显尚未到达（echo 异步），光标仍在提示符结束列
+    // ——记住行列即"命令文本在终端缓冲中的起点"，供 captureTypedLine 截取全文
+    if (!prevBuffer && inst.input_buffer && !isEnter(data)) {
+      const b = inst.term.buffer.active
+      inst.cmd_anchor = { row: b.cursorY, col: b.cursorX }
     }
   }, [])
 
@@ -608,7 +644,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       if (!cur || cur.reconnecting === value) return prev
       const next = new Map(prev)
       // 重连结束（成功落到新 shell 或放弃）：旧连接上没回车的半截输入已无意义，清空
-      next.set(session_id, value ? { ...cur, reconnecting: true } : { ...cur, reconnecting: false, input_buffer: '', input_cursor: 0 })
+      next.set(session_id, value ? { ...cur, reconnecting: true } : { ...cur, reconnecting: false, input_buffer: '', input_cursor: 0, saw_tab: false, cmd_anchor: null })
       return next
     })
   }, [])

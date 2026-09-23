@@ -336,8 +336,10 @@ export const api = {
   reloadConfig: () => request<Record<string, unknown>>('/api/config/reload', { method: 'POST' }),
 
   // 全局命令历史（跨终端，按使用频次排序）
-  recordCommand: (command: string) =>
-    request('/api/history/record', { method: 'POST', body: JSON.stringify({ command }) }),
+  // session_id + defer_sec：Tab 补全行的延迟兜底模式——后端先等 defer_sec，
+  // 该会话回显已记录（权威版）则跳过，否则记录本条键盘版
+  recordCommand: (command: string, session_id: string = '', defer_sec: number = 0) =>
+    request('/api/history/record', { method: 'POST', body: JSON.stringify({ command, session_id, defer_sec }) }),
   searchCommands: (keyword: string = '', limit: number = 50) =>
     request<{ keyword: string; commands: Array<{ command: string; count: number; last_used: number }> }>(
       `/api/history/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}`

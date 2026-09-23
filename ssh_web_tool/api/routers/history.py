@@ -1,16 +1,34 @@
 """命令历史域路由：全局历史（记录/搜索/忽略/恢复）+ 统一搜索"""
 
+import asyncio
+
 from fastapi import APIRouter
 
 from ssh_web_tool.api.models import IgnoreCommandRequest, RecordCommandRequest
-from ssh_web_tool.deps import get_history_db, get_storage
+from ssh_web_tool.deps import get_history_db, get_session_manager, get_storage
 
 router = APIRouter(prefix="/api", tags=["history"])
 
 
 @router.post("/history/record")
 async def api_record_command(req: RecordCommandRequest):
-    """记录一条命令到全局历史（增加使用频次）"""
+    """记录一条命令到全局历史（增加使用频次）
+
+    Tab 补全延迟兜底模式（session_id + defer_sec>0）：补全文本从输出侧回来，
+    前端键盘缓冲对含 Tab 的行不可信（可能残缺，补全后再输入还会交错成非前缀
+    乱串，DB 前缀/超串去重拦不住）——先延迟等待回显解析（权威）落库，窗口内
+    该会话已有回显记录则跳过；没等到才兜底记键盘版，保证任何 shell 下至少一条
+    """
+    if req.defer_sec > 0 and req.session_id:
+        await asyncio.sleep(req.defer_sec)
+        sess = get_session_manager().get_session(req.session_id)
+        # +0.8s 容差：回显多在前端 HTTP 到达前几十毫秒内已记录，纯比较请求时刻会误兜底
+        try:
+            recently = sess.echo_recently_recorded(req.defer_sec + 0.8) if sess is not None else False
+        except Exception:
+            recently = False  # 测试替身/旧对象无此方法：视作未记录，走兜底
+        if recently:
+            return {"status": "skipped_echo"}
     await get_history_db().record_command(req.command)
     return {"status": "ok"}
 

@@ -9,6 +9,7 @@ import type { RefObject, Dispatch, SetStateAction } from 'react'
 import type { TerminalSettings } from './useSettings'
 import type { BlockBarController } from './blockBar'
 import type { WsServerMessage } from '../types/ws'
+import type { LineAnchor } from './lineEditor'
 import { api } from './api'
 import { reflowForCols } from './reflow'
 import { setupTerminalCopy } from './terminalCopy'
@@ -93,6 +94,8 @@ export interface TerminalInstance {
   state_timer: ReturnType<typeof setInterval> | null
   input_buffer: string  // 当前输入行缓冲区（用于记录命令历史）
   input_cursor: number  // 输入行光标位置（行编辑用，精确跟踪命令内容）
+  saw_tab: boolean  // 本行按过 Tab（补全文本从输出侧回来，键盘缓冲不可信→Enter 走回显权威+延迟兜底）
+  cmd_anchor: LineAnchor | null  // 本输入行起点（空→非空瞬间的光标行列=提示符结束处），Tab 行捕获缓冲全文用
   disconnected: boolean  // 主动断开/意外断开标记（断开后可手动重连）
   reconnecting: boolean  // 重连建立中标记（Tab/终端遮罩显示"连接中"，期间禁止重复点击）
   pending: boolean  // 初始连接建立中标记（先建 tab 后连接的占位阶段，Tab 闪烁 + 终端遮罩）
@@ -336,6 +339,8 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
                 // 换挂新 shell：旧连接上未回车的半截输入作废（防止串进新会话首条记录）
                 input_buffer: '',
                 input_cursor: 0,
+                saw_tab: false,
+                cmd_anchor: null,
                 ssh_conn: {
                   host: msg.host,
                   port: msg.port,
@@ -360,6 +365,8 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
                 // 切到本机 shell：远端未回车的半截输入作废
                 input_buffer: '',
                 input_cursor: 0,
+                saw_tab: false,
+                cmd_anchor: null,
               })
             }
             return next
@@ -409,6 +416,8 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     state_timer: null,
     input_buffer: '',
     input_cursor: 0,
+    saw_tab: false,
+    cmd_anchor: null,
     disconnected: false,
     reconnecting: false,
     pending: false,

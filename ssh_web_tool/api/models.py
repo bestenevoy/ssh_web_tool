@@ -168,6 +168,10 @@ class UiSettingsRequest(BaseModel):
 
 class RecordCommandRequest(BaseModel):
     command: str
+    # Tab 补全延迟兜底模式：session_id + defer_sec>0 时，先等待 defer_sec，
+    # 若该会话回显解析在此期间已记录命令（权威版含补全文本）则跳过本条
+    session_id: str = ""
+    defer_sec: float = 0.0
 
 
 class IgnoreCommandRequest(BaseModel):

@@ -233,6 +233,8 @@ class SSHSession:
         # 各自独立实现，本类只做编排，见对应组件模块）
         self._output_bus = OutputBus(prompt_detect.clean_ansi)
         self._echo_parser = EchoParser()
+        # 最近一次回显命令记录时刻（Tab 补全行的前端延迟兜底判定用）
+        self._echo_last_record_ts = 0.0
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
@@ -489,12 +491,19 @@ class SSHSession:
         """异步记录回显命令（不阻塞输出广播循环）
         record_echo_command 内部：清理键盘输入版前缀残留（如 cd /va）、
         3 秒内同命令去重（前端/CLI 已即时记录过则不重复）"""
+        # 记录时刻戳：Tab 补全行的前端延迟兜底（/history/record defer 模式）据此
+        # 判断回显是否已记录权威版；PSReadLine 采集器等旁路也走本方法，统一覆盖
+        self._echo_last_record_ts = time.time()
         try:
             from .history_db import record_echo_command
 
             await record_echo_command(cmd)
         except Exception:
             pass
+
+    def echo_recently_recorded(self, within: float) -> bool:
+        """最近 within 秒内是否有回显解析命令已记录（Tab 补全兜底竞争判定）"""
+        return (time.time() - self._echo_last_record_ts) < within
 
     async def _broadcast_output(self, data: str):
         """广播输出给所有监听器，并维护缓冲区（用于状态检测）和日志持久化"""

@@ -7,6 +7,46 @@ export interface LineEditState {
   cursor: number
 }
 
+/** 输入行起点锚：首字符按下时光标所在终端物理行/列（= 提示符结束位置） */
+export interface LineAnchor {
+  row: number
+  col: number
+}
+
+/** captureTypedLine 所需的最小终端面（xterm buffer.active 子集，可 mock 单测） */
+export interface BufferSource {
+  buffer: {
+    active: {
+      cursorY: number
+      getLine(y: number): { translateToString(trimRight?: boolean): string } | undefined
+    }
+  }
+}
+
+/**
+ * 从终端缓冲捕获"用户实际看到的输入行全文"（Tab 补全识别主路径）。
+ *
+ * 原理：补全文本由远端回显直接渲染进 xterm 缓冲区；按下回车瞬间，输入行内容 =
+ * 提示符结束列（anchor）到光标行的全部已显示文本。与 readline 重绘字节序
+ * （\r / 光标移动 / 候选列表清行）和 PS1 形态完全无关——键盘缓冲只见按键、
+ * 回显解析依赖重绘，二者在复杂补全下都会丢失补全结果，本函数不会。
+ * 行宽折行的续行按物理行顺序拼接（PTY 层并无真实换行）。
+ */
+export function captureTypedLine(term: BufferSource, anchor: LineAnchor): string {
+  const active = term.buffer.active
+  const last = active.cursorY
+  if (last < anchor.row || last - anchor.row > 20) return '' // 行已被推/scrolled 出可视区：放弃
+  const parts: string[] = []
+  for (let r = anchor.row; r <= last; r++) {
+    const line = active.getLine(r)
+    if (!line) break
+    let s = line.translateToString(true)
+    if (r === anchor.row) s = s.slice(anchor.col)
+    parts.push(s)
+  }
+  return parts.join('').trim()
+}
+
 const ENTER_SEQS = ['\r', '\n', '\r\n']
 
 /** 是否回车（成行触发） */
