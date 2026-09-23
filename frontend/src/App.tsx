@@ -8,7 +8,7 @@ import type { EditorSessionInfo } from './lib/api'
 import { ContextMenu } from './components/ContextMenu'
 import type { CtxMenuItem } from './components/ContextMenu'
 import { useTerminals } from './lib/useTerminals'
-import { runQuickScript, ScriptAbort, SCRIPT_MAX_MS, type QuickScriptHost, type ScriptSession, type ScriptSessionState } from './lib/quickScript'
+import { createScriptApi, runQuickScript, ScriptAbort, SCRIPT_MAX_MS, type QuickScriptHost, type ScriptSession, type ScriptSessionState } from './lib/quickScript'
 import { writeClipboardText } from './lib/terminalCopy'
 import { useSettings, FONT_OPTIONS } from './lib/useSettings'
 import { HostList } from './components/HostList'
@@ -831,6 +831,85 @@ function App() {
     }
   }, [terminals, scriptConnState])
 
+  // 脚本宿主构造（快捷指令执行与调试控制台 wst 共用）：log/cancelled/deadline 参数化
+  const buildScriptHost = useCallback(
+    (
+      label: string,
+      handle: { cancelled: boolean },
+      opts?: { log?: (m: string) => void; deadline?: number },
+    ): QuickScriptHost => {
+      const deadline = opts?.deadline ?? Date.now() + SCRIPT_MAX_MS
+      return {
+        resolve: (idOrName) => resolveScriptSession(idOrName),
+        list: () =>
+          terminals.listTerminals().map((i) => ({
+            id: i.session_id,
+            name: i.host_name || i.session_id,
+            state: scriptConnState(terminals.getTerminal(i.session_id)),
+          })),
+        activeId: () => terminals.activeId,
+        log: opts?.log ?? ((m) => setStatus(`脚本「${label}」: ${m}`)),
+        // 重连：走统一重连流程（无凭据会弹密码框，取消即失败），等 ws 就绪落定
+        reconnect: async (id) => {
+          await handleReconnectTerminal(id)
+          const until = Date.now() + 8000
+          for (;;) {
+            const inst = terminals.getTerminal(id)
+            if (inst?.ws && inst.ws.readyState === WebSocket.OPEN && !inst.reconnecting) return true
+            if (Date.now() >= until) return false
+            await new Promise((r) => setTimeout(r, 250))
+          }
+        },
+        // 断开：后端切回本机 shell（会话保留，可再 reconnect）
+        disconnect: async (id) => {
+          if (!terminals.getTerminal(id)) return false
+          await terminals.disconnectTerminal(id)
+          return true
+        },
+        cancelled: () => handle.cancelled,
+        deadline: () => deadline,
+      }
+    },
+    [terminals, scriptConnState, resolveScriptSession, handleReconnectTerminal, setStatus],
+  )
+
+  // 调试桥（DevTools 控制台随时可调，见顶栏 🐞 按钮）：window.wst
+  // - run(code)：等价于运行一段脚本型快捷指令（t.log 同时进 console 与 toast）
+  // - t：ScriptApi 对象，可逐条调用（await wst.t.session().run('ls')）
+  // - type(data, 目标?)：向终端注入原始键入（走真实 onData 链路，验证 Tab 补全
+  //   命令识别等）；term(目标?) 拿 TerminalInstance 深挖（.term.buffer 等）
+  useEffect(() => {
+    const handle = { cancelled: false }
+    // deadline 恒为"未来"：控制台手动调试不设全局超时（各等待自带 timeoutMs）
+    const host = buildScriptHost('console', handle, {
+      log: (m) => {
+        console.log('[script]', m)
+        setStatus(`脚本: ${m}`)
+      },
+      deadline: Number.MAX_SAFE_INTEGER,
+    })
+    const wst = {
+      t: createScriptApi(host),
+      run: (code: string) => runQuickScript(code, host),
+      sessions: host.list,
+      type: (data: string, idOrName?: string): boolean => {
+        const s = host.resolve(idOrName)
+        const inst = s ? terminals.getTerminal(s.id) : undefined
+        if (!inst?.debugInput) return false
+        inst.debugInput(data)
+        return true
+      },
+      term: (idOrName?: string): TerminalInstance | undefined => {
+        const s = host.resolve(idOrName)
+        return s ? terminals.getTerminal(s.id) : undefined
+      },
+    }
+    ;(window as unknown as { wst?: typeof wst }).wst = wst
+    return () => {
+      delete (window as unknown as { wst?: typeof wst }).wst
+    }
+  }, [buildScriptHost, terminals, setStatus])
+
   // 执行快捷指令（含预操作流水线：上传文件 → chmod → 先执行命令 → 命令本体）。
   // session_id 显式传入（默认当前活动终端）
   const executeQuickCommand = useCallback(async (qc: QuickCommand, param: string | null, session_id?: string) => {
@@ -855,37 +934,7 @@ function App() {
       }
       const handle = { cancelled: false }
       scriptRunsRef.current.set(qc.id, handle)
-      const deadline = Date.now() + SCRIPT_MAX_MS
-      const host: QuickScriptHost = {
-        resolve: (idOrName) => resolveScriptSession(idOrName),
-        list: () =>
-          terminals.listTerminals().map((i) => ({
-            id: i.session_id,
-            name: i.host_name || i.session_id,
-            state: scriptConnState(terminals.getTerminal(i.session_id)),
-          })),
-        activeId: () => terminals.activeId,
-        log: (m) => setStatus(`脚本「${qc.name}」: ${m}`),
-        // 重连：走统一重连流程（无凭据会弹密码框，取消即失败），等 ws 就绪落定
-        reconnect: async (id) => {
-          await handleReconnectTerminal(id)
-          const until = Date.now() + 8000
-          for (;;) {
-            const inst = terminals.getTerminal(id)
-            if (inst?.ws && inst.ws.readyState === WebSocket.OPEN && !inst.reconnecting) return true
-            if (Date.now() >= until) return false
-            await new Promise((r) => setTimeout(r, 250))
-          }
-        },
-        // 断开：后端切回本机 shell（会话保留，可再 reconnect）
-        disconnect: async (id) => {
-          if (!terminals.getTerminal(id)) return false
-          await terminals.disconnectTerminal(id)
-          return true
-        },
-        cancelled: () => handle.cancelled,
-        deadline: () => deadline,
-      }
+      const host = buildScriptHost(qc.name, handle)
       setStatus(`脚本运行中：${qc.name}（再次点击可停止）`)
       try {
         await runQuickScript(cmd, host)
@@ -901,7 +950,7 @@ function App() {
 
     terminals.sendCommandTo(session_id ?? terminals.activeId ?? '', cmd, true)
     setStatus(`已执行: ${cmd.slice(0, 60)}`)
-  }, [runPreOps, terminals, setStatus, resolveScriptSession, scriptConnState, handleReconnectTerminal])
+  }, [runPreOps, terminals, setStatus, buildScriptHost])
 
   // 检查配置/脚本更新：扫描 config/data/scripts 后刷新主机与快捷指令列表
   const handleReloadConfig = useCallback(async () => {
@@ -1148,6 +1197,24 @@ function App() {
         {/* 应用级入口（设置）与工具开关分组隔开 */}
         <div className="topbar-divider" />
         {/* 检查配置入口已移入设置页「本机终端」分区 */}
+        {/* 调试台：打开 WebView2 DevTools 控制台（window.wst 脚本 API/输入注入可用） */}
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={async () => {
+            const pyApi = (window as unknown as {
+              pywebview?: { api?: { open_console?: () => Promise<boolean> } }
+            }).pywebview?.api
+            if (pyApi?.open_console) {
+              const ok = await pyApi.open_console().catch(() => false)
+              if (!ok) setStatus('开发者工具打开失败（非 WebView2 内核或窗口未就绪）')
+            } else {
+              setStatus('浏览器环境请按 F12；控制台可用 wst.run(code) / wst.t / wst.type(data)')
+            }
+          }}
+          title="打开调试控制台（DevTools）：wst.run('代码') 运行脚本、wst.t API、wst.type('\\t') 模拟键入验证命令识别"
+        >
+          🐞
+        </button>
         {/* 设置入口：顶栏最右上角，打开整页设置 */}
         <button
           className="btn btn-secondary btn-sm settings-btn"

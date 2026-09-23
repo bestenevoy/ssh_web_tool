@@ -118,6 +118,9 @@ export interface TerminalInstance {
   resizeObservedEl?: HTMLDivElement | null
   // 重连后重建 WebSocket（断开时 ws 被置空/关闭，重建以恢复终端输出）
   reconnectWs?: () => void
+  // 调试注入（window.wst.type）：走与真实键盘完全相同的 onData 链路
+  // （含 handleTerminalInput 的回车记录/Tab 标记），供验证命令识别等场景
+  debugInput?: (data: string) => void
 }
 
 // 洪水输出内存上限：xterm write 缓冲无上限（超 50MB 抛错），这里限 2MB 积压，
@@ -391,9 +394,11 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
   }
 
   // 绑定终端键盘输入 + 复制/粘贴（与 WebSocket 无关，占位实例也需要）
+  // 同一入口存一份给调试桥（wst.type），保证模拟键入与真人敲击走完全相同链路
+  const debugInput = (data: string) => onData(session_id, data)
   term.onData((data) => {
     // 逐字符更新命令历史缓冲（保持 ESC 序列完整）
-    onData(session_id, data)
+    debugInput(data)
   })
   setupTerminalCopy(term, copyShortcut, () => onCtrlF(session_id), () => onCtrlB(session_id))
 
@@ -417,6 +422,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     input_buffer: '',
     input_cursor: 0,
     saw_tab: false,
+    debugInput,
     cmd_anchor: null,
     disconnected: false,
     reconnecting: false,

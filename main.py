@@ -367,6 +367,43 @@ def main():
             except Exception:
                 return False
 
+        def open_console(self) -> bool:
+            """打开 WebView2 开发者工具（顶栏 🐞 按钮的调试入口）。
+
+            打包版 webview.start(debug=False) 时 AreDevToolsEnabled 与 F12 加速键
+            都是关的（pywebview 按 debug 开关统一设置），这里在运行时把这两项打开
+            再调 OpenDevToolsWindow；此后 F12 也可直接切换。js_api 回调不在 UI
+            线程，CoreWebView2 调用须经 Control.Invoke 编组。任何异常兜底 False。
+            """
+            try:
+                ctrl = None
+                for w in webview.windows:
+                    c = getattr(w, "webview", None)
+                    core = getattr(c, "CoreWebView2", None) if c is not None else None
+                    if core is not None:
+                        ctrl, target = c, core
+                        break
+                else:
+                    return False
+
+                def _open():
+                    target.Settings.AreDevToolsEnabled = True
+                    target.Settings.AreBrowserAcceleratorKeysEnabled = True
+                    target.OpenDevToolsWindow()
+
+                try:
+                    if ctrl.InvokeRequired:
+                        from System import Action  # pythonnet（pywebview WinForms 依赖）
+
+                        ctrl.Invoke(Action(_open))
+                    else:
+                        _open()
+                except Exception:
+                    _open()  # Invoke 编组不可用时直接试一次（多数场景同样能开）
+                return True
+            except Exception:
+                return False
+
     def on_closing():
         """窗口关闭确认"""
         import ctypes

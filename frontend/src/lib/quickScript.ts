@@ -243,9 +243,8 @@ function bindSession(
   }
 }
 
-/** 运行脚本；异常（含 ScriptAbort）抛给宿主处理 */
-export async function runQuickScript(code: string, host: QuickScriptHost): Promise<void> {
-  const fn = compileScript(code)
+/** 由宿主构造 t API（runQuickScript 与调试控制台 window.wst 共用同一套实现） */
+export function createScriptApi(host: QuickScriptHost): ScriptApi {
   const resolveBound = (idOrName?: string): ScriptSession | null => {
     const sid = idOrName ?? host.activeId() ?? undefined
     const raw = host.resolve(sid ?? undefined)
@@ -256,7 +255,7 @@ export async function runQuickScript(code: string, host: QuickScriptHost): Promi
     if (idOrName && !info) return null
     return (info?.id ?? (idOrName ?? host.activeId())) ?? null
   }
-  const t: ScriptApi = {
+  return {
     session: resolveBound,
     sessions: host.list,
     reconnect: async (idOrName) => {
@@ -270,5 +269,10 @@ export async function runQuickScript(code: string, host: QuickScriptHost): Promi
     sleep: (ms) => waitPump(Math.max(0, Math.min(ms, SCRIPT_MAX_MS)), host),
     log: host.log,
   }
-  await fn(t)
+}
+
+/** 运行脚本；异常（含 ScriptAbort）抛给宿主处理 */
+export async function runQuickScript(code: string, host: QuickScriptHost): Promise<void> {
+  const fn = compileScript(code)
+  await fn(createScriptApi(host))
 }
