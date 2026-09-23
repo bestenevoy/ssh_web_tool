@@ -372,36 +372,48 @@ def main():
 
             打包版 webview.start(debug=False) 时 AreDevToolsEnabled 与 F12 加速键
             都是关的（pywebview 按 debug 开关统一设置），这里在运行时把这两项打开
-            再调 OpenDevToolsWindow；此后 F12 也可直接切换。js_api 回调不在 UI
-            线程，CoreWebView2 调用须经 Control.Invoke 编组。任何异常兜底 False。
+            再调 OpenDevToolsWindow；此后 F12 也可直接切换。注意 pywebview 6.x
+            WinForms 后端里 WebView2 控件挂在 BrowserView.instances（BrowserForm
+            .webview），不在 webview.Window 实例上；js_api 回调不在 UI 线程，
+            CoreWebView2 调用须经 Control.Invoke 编组。失败原因打 stdout 便于排查。
             """
             try:
-                ctrl = None
-                for w in webview.windows:
-                    c = getattr(w, "webview", None)
-                    core = getattr(c, "CoreWebView2", None) if c is not None else None
+                from webview.platforms.winforms import BrowserView
+
+                target: tuple = ()
+                for form in BrowserView.instances.values():
+                    ctrl = getattr(form, "webview", None)
+                    core = getattr(ctrl, "CoreWebView2", None) if ctrl is not None else None
                     if core is not None:
-                        ctrl, target = c, core
+                        target = (ctrl, core)
                         break
-                else:
+                if not target:
+                    print(f"[devtools] 失败：BrowserView.instances={list(BrowserView.instances)} 无就绪 CoreWebView2")
                     return False
+                ctrl, core = target
 
                 def _open():
-                    target.Settings.AreDevToolsEnabled = True
-                    target.Settings.AreBrowserAcceleratorKeysEnabled = True
-                    target.OpenDevToolsWindow()
+                    core.Settings.AreDevToolsEnabled = True
+                    core.Settings.AreBrowserAcceleratorKeysEnabled = True
+                    core.OpenDevToolsWindow()
 
                 try:
                     if ctrl.InvokeRequired:
-                        from System import Action  # pythonnet（pywebview WinForms 依赖）
+                        from System import Action  # pyright: ignore[reportMissingImports] — pythonnet 运行时才有
 
                         ctrl.Invoke(Action(_open))
                     else:
                         _open()
-                except Exception:
-                    _open()  # Invoke 编组不可用时直接试一次（多数场景同样能开）
+                except Exception as e:
+                    print(f"[devtools] Invoke 编组失败，直调一次: {e!r}")
+                    try:
+                        _open()
+                    except Exception as e2:
+                        print(f"[devtools] 直调也失败: {e2!r}")
+                        return False
                 return True
-            except Exception:
+            except Exception as e:
+                print(f"[devtools] 异常: {e!r}")
                 return False
 
     def on_closing():
