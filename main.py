@@ -374,8 +374,11 @@ def main():
             都是关的（pywebview 按 debug 开关统一设置），这里在运行时把这两项打开
             再调 OpenDevToolsWindow；此后 F12 也可直接切换。注意 pywebview 6.x
             WinForms 后端里 WebView2 控件挂在 BrowserView.instances（BrowserForm
-            .webview），不在 webview.Window 实例上；js_api 回调不在 UI 线程，
-            CoreWebView2 调用须经 Control.Invoke 编组。失败原因打 stdout 便于排查。
+            .webview），不在 webview.Window 实例上。js_api 回调不在 UI 线程，
+            CoreWebView2 调用须回投 UI 线程，且必须用 BeginInvoke（异步投递）：
+            同步 Invoke 会在持有 GIL 的情况下等待 UI 线程执行 Python 委托，而该
+            委托回到 UI 线程又要 GIL —— 死锁冻住整个界面（实测踩过）。
+            失败原因打 stdout 便于排查。
             """
             try:
                 from webview.platforms.winforms import BrowserView
@@ -401,16 +404,12 @@ def main():
                     if ctrl.InvokeRequired:
                         from System import Action  # pyright: ignore[reportMissingImports] — pythonnet 运行时才有
 
-                        ctrl.Invoke(Action(_open))
+                        ctrl.BeginInvoke(Action(_open))  # 异步投递，绝不等 UI 线程（同步 Invoke 会 GIL 死锁）
                     else:
                         _open()
                 except Exception as e:
-                    print(f"[devtools] Invoke 编组失败，直调一次: {e!r}")
-                    try:
-                        _open()
-                    except Exception as e2:
-                        print(f"[devtools] 直调也失败: {e2!r}")
-                        return False
+                    print(f"[devtools] BeginInvoke 投递失败: {e!r}")
+                    return False
                 return True
             except Exception as e:
                 print(f"[devtools] 异常: {e!r}")
