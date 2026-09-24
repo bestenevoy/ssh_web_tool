@@ -11,6 +11,7 @@ from ssh_web_tool.api.models import (
     CreateSessionFromHostRequest,
     CreateSessionRequest,
     RunCommandRequest,
+    SessionCwdRequest,
     SessionRecordRequest,
 )
 from ssh_web_tool.api.routers.ws import _ACTIVE_WS
@@ -452,6 +453,17 @@ async def api_get_session_cwd(session_id: str):
         except Exception:
             pass  # 取不到保持 None，前端走默认目录回退
     return {"cwd": cwd}
+
+
+@router.post("/sessions/{session_id}/cwd")
+async def api_set_session_cwd(session_id: str, req: SessionCwdRequest):
+    """S1 shell 集成回填工作目录（前端解析 OSC 633;P;Cwd 后调用，权威于 echo cd 跟踪）"""
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    session.set_cwd(req.dir)
+    return {"status": "ok"}
 
 
 @router.get("/sessions/{session_id}/logs")

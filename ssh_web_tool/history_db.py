@@ -187,6 +187,16 @@ async def record_command(command: str, via: str = "键入") -> None:
     if superseded:
         print(f"[history] 跳过·回显已记超串 via={via}: {cmd!r} ← {superseded[0]!r}")
         return
+    # 3 秒内已记同命令则跳过（多通道竞争兜底：S1 E 事件与快捷指令注入等可能
+    # 对同一次执行各报一次；真需要 count+1 的重复执行间隔通常 >3 秒）
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM command_history WHERE command = ? AND last_used > ?",
+        (cmd, now - 3),
+    )
+    row = await cur.fetchone()
+    if row and row[0] > 0:
+        print(f"[history] 跳过·3秒内已记同命令 via={via}: {cmd!r}")
+        return
     await conn.execute(
         "INSERT INTO command_history (command, count, last_used) VALUES (?, 1, ?) "
         "ON CONFLICT(command) DO UPDATE SET count = count + 1, last_used = excluded.last_used",

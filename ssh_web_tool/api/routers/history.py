@@ -33,7 +33,7 @@ async def api_record_command(req: RecordCommandRequest):
         print(f"[history] 延迟兜底·回显未记→落键盘版: {req.command!r}")
         await get_history_db().record_command(req.command, via="延迟兜底")
         return {"status": "ok"}
-    await get_history_db().record_command(req.command)
+    await get_history_db().record_command(req.command, via=req.via or "键入")
     return {"status": "ok"}
 
 

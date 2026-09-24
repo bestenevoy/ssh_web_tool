@@ -3,6 +3,7 @@
 // 洪水供给器）收敛到一个入口。行为与拆分前完全一致。
 
 import { Terminal } from '@xterm/xterm'
+import type { IDisposable } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import type { RefObject, Dispatch, SetStateAction } from 'react'
@@ -15,6 +16,8 @@ import { reflowForCols } from './reflow'
 import { setupTerminalCopy } from './terminalCopy'
 import { createOutputFeeder } from './outputFeeder'
 import { markDisconnected } from './terminalDisconnect'
+import { attachShellIntegration } from './shellIntegration'
+import { stripRcProbe } from './quickScript'
 import type { HighlightDecorator } from './highlightDecorations'
 
 // 终端回滚行数（单一定义源）：folds.ts 的 savedLines 缓存预算按
@@ -121,6 +124,13 @@ export interface TerminalInstance {
   // 调试注入（window.wst.type）：走与真实键盘完全相同的 onData 链路
   // （含 handleTerminalInput 的回车记录/Tab 标记），供验证命令识别等场景
   debugInput?: (data: string) => void
+  /**
+   * S1 shell 集成状态（OSC 133/633 权威事件通道，见 shellIntegration.ts）。
+   * 用对象引用承载而非平铺 boolean：setTerminals 的 {...cur} 浅扩会替换 Map 里的
+   * 实例对象，闭包持有的旧对象与 Map 现行对象只有经同一 holder 才能共享标记
+   * （handleTerminalInput/sendCommandTo 读它跳过键盘记录通道）。
+   */
+  siState?: { integrated: boolean; sub: IDisposable | null }
 }
 
 // 洪水输出内存上限：xterm write 缓冲无上限（超 50MB 抛错），这里限 2MB 积压，
@@ -194,6 +204,9 @@ export interface TerminalInstanceSpec {
   resync: (session_id: string, term: Terminal, ws: WebSocket | null, clean: boolean) => void
   /** 写入历史前确保 fit 完成（ensureFit） */
   ensureFit: (session_id: string, term: Terminal, fitAddon: FitAddon, ws: WebSocket | null) => Promise<void>
+  /** 读取 Map 中现行实例（terminalsRef 口径）：setTerminals 浅扩后闭包 instance
+   *  可能过期，S1 事件回调经它拿最新 blockBar 等挂载后字段；缺省回退闭包实例 */
+  getLiveInstance?: (session_id: string) => TerminalInstance | undefined
 }
 
 /**
@@ -225,6 +238,7 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     requestClose,
     resync,
     ensureFit,
+    getLiveInstance,
   } = spec
 
   const term = new Terminal({
@@ -325,6 +339,10 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
           // 本地终端拦截 SSH 后切换为远端终端：更新标签信息。
           // 同时保存连接信息（host/port/username/password）：此类会话没有已保存
           // 主机（host_id 为空），重连按钮需用这份凭据重建会话，否则报"无主机信息"
+          // 换挂新 shell：旧 shell 的 S1 集成状态作废（后端对新 shell 重新注入，
+          // 等 SI 回执再激活），期间键盘记录/猜测式切块兜底
+          instance.siState!.integrated = false
+          liveBar()?.setAuthoritative(false)
           setTerminals((prev) => {
             const next = new Map(prev)
             const cur = next.get(session_id)
@@ -357,6 +375,9 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
         }
         else if (msg.type === 'switched_to_local') {
           // SSH 退出/断开后后端自动切换到本机终端：标记 ssh_exited，保留原 host_id 供重连
+          // 本机 shell 无 S1 集成（后端只注入远端）：权威标记退回、键盘通道接管
+          instance.siState!.integrated = false
+          liveBar()?.setAuthoritative(false)
           setTerminals((prev) => {
             const next = new Map(prev)
             const cur = next.get(session_id)
@@ -457,7 +478,44 @@ export function createTerminalInstance(spec: TerminalInstanceSpec): TerminalInst
     highlight: null,
     search: searchAddon,
     reconnectWs: connectWs,
+    siState: { integrated: false, sub: null },
   }
+
+  // ---- S1 shell 集成：拦截输出流中的 OSC 133/633 权威事件 ----
+  // 后端在 SSH 交互 shell 建立后向远端注入 precmd 片段（sessions.py
+  // SHELL_INTEGRATION_SNIPPET），远端在每个提示符周期上报命令全文/退出码/
+  // 工作目录/提示符边界。事件到达即置 integrated：键盘回车记录、快捷指令
+  // 记录、延迟兜底等猜测通道随之让位（useTerminals 读 siState 门控）。
+  // blockBar 经 getLiveInstance 取现行对象（闭包 instance 可能已被浅扩替换）。
+  const liveBar = (): BlockBarController | null => (getLiveInstance?.(session_id) ?? instance).blockBar
+  const markIntegrated = () => {
+    if (instance.siState?.integrated) return
+    if (instance.siState) instance.siState.integrated = true
+    liveBar()?.setAuthoritative(true)
+  }
+  instance.siState!.sub = attachShellIntegration(term, {
+    onReady: markIntegrated,
+    onPrompt: () => {
+      markIntegrated()
+      liveBar()?.notifyPrompt()
+    },
+    onExit: (rc) => liveBar()?.noteExit(rc),
+    onCwd: (dir) => {
+      // 后端 set_cwd 同时置 _si_active：echo 观察通道的 cd 跟踪让位给此权威源
+      const d = dir.trim()
+      if (!d) return
+      api.setSessionCwd(session_id, d).catch(() => {})
+    },
+    onCommand: (cmd) => {
+      // shell 上报整行原文：裁掉行首缩进/空白（fc 输出带前导 TAB），
+      // 并剥掉 s.run 退出码探针后缀（脚本实现细节不入用户历史）
+      const c = stripRcProbe(cmd.trim())
+      if (!c) return
+      console.log('[history] 回车记录·S1 shell 集成:', JSON.stringify(c))
+      api.recordCommand(c, session_id, 0, 'S1 shell 集成').catch(() => {})
+    },
+  })
+
   if (!deferConnect) connectWs()
   return instance
 }

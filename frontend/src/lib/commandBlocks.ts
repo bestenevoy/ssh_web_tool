@@ -26,6 +26,8 @@ export interface CommandBlock {
   color: string
   start: IMarker
   end: IMarker | null
+  /** S1 权威退出码（OSC 133;D 到达时回填；null=未知/未集成）。 */
+  exitCode: number | null
 }
 
 export interface CommandBlockTracker extends IDisposable {
@@ -38,8 +40,16 @@ export interface CommandBlockTracker extends IDisposable {
    *  term.onData 只对真实键盘触发，程序注入绕过它——必须显式通知。
    *  多行注入（一次下发多条命令）传 lines：首行即时开块，其余 lines-1 个
    *  块边界等各条命令执行完的提示符行出现时逐个切（即时连切只会落在同一
-   *  光标位置，产生空块且全部输出并入最后一块）。 */
+   *  光标位置，产生空块且全部输出并入最后一块）。
+   *  权威模式（S1 集成生效）下为空操作——A 事件负责切块。 */
   notifySubmit(lines?: number): void
+  /** S1 权威模式开关：shell 集成事件（133;A）成为唯一切块驱动源，
+   *  键盘 Enter / notifySubmit 的猜测式切块全部让位。 */
+  setAuthoritative(on: boolean): void
+  /** OSC 133;A：提示符开始——在当前光标逻辑行切块（同逻辑行重复 A 去重）。 */
+  notifyPrompt(): void
+  /** OSC 133;D;<rc>：回填最近一个块的退出码（先于下一条 A 到达，指向刚结束的块）。 */
+  noteExit(exitCode: number): void
 }
 
 /** 金色角 HSL 循环取色——无限调色板，相邻块不撞色。 */
@@ -88,6 +98,8 @@ export function createCommandBlockTracker(
   let submittedLine: IMarker | null = null
   // 多行注入的剩余待切块数：onWriteParsed 检测到提示符行时逐个消费（两种模式共用）
   let pendingPromptSplits = 0
+  // S1 权威模式：切块由 133;A 事件驱动，键盘 Enter/notifySubmit 猜测式切块让位
+  let authoritative = false
 
   const clearSubmittedLine = () => {
     submittedLine?.dispose()
@@ -125,6 +137,7 @@ export function createCommandBlockTracker(
       color: colorForIndex(id),
       start,
       end: null,
+      exitCode: null,
     }
     // start marker 被 scrollback 裁剪掉时，块一并移除。
     start.onDispose(() => {
@@ -166,6 +179,9 @@ export function createCommandBlockTracker(
   // lines>1（多行注入）：先即时开块承载第一条命令，剩余 lines-1 个边界由
   // onWriteParsed 的提示符检测逐个补切。
   const onEnter = (lines = 1) => {
+    // 权威模式：Enter/程序注入不切块——133;A 事件是唯一切块源（按 shell 实际
+    // 提示符周期切，多行粘贴/循环回车等形态差异全部免疫）
+    if (authoritative) return
     if (lines > 1) {
       splitAt()
       pendingPromptSplits += lines - 1
@@ -200,6 +216,24 @@ export function createCommandBlockTracker(
     }
     return false
   }
+
+  // OSC 133;A 权威提示符开始：在光标当前逻辑行切块。A 先于 PS1 文本写出，
+  // 此刻光标正好停在将要绘制提示符的行（上一条输出以换行收尾时）。
+  // 去重：同一逻辑行重复收到 A（Ctrl+L 原位重绘提示符、PROMPT_COMMAND 二次
+  // 执行等）不再切——否则产生同行双起点空块。
+  const notifyPrompt = () => {
+    if (term.buffer.active.type === 'alternate') return
+    const line = logicalLineAtCursor(term)
+    if (!line) return
+    const cur = blocks[blocks.length - 1]
+    if (cur && cur.start.line === line.startLine) return
+    splitAt(line.startOffset)
+  }
+  // OSC 133;D;<rc>：注入片段保证 D 先于下一条 A 到达——最后一个块即刚结束的命令
+  const noteExit = (exitCode: number) => {
+    const cur = blocks[blocks.length - 1]
+    if (cur) cur.exitCode = exitCode
+  }
   disposables.push(
     term.onData((data: string) => {
       if (term.buffer.active.type === 'alternate') return
@@ -213,6 +247,8 @@ export function createCommandBlockTracker(
   // enter 模式仅多行注入期间工作（pendingPromptSplits > 0）
   disposables.push(
     term.onWriteParsed(() => {
+      // 权威模式下提示符猜测探测整体让位（A 事件已经给出精确边界）
+      if (authoritative) return
       const multi = pendingPromptSplits > 0
       if (splitMode === 'prompt') {
         if (!waitingForPrompt) return
@@ -258,6 +294,17 @@ export function createCommandBlockTracker(
     // 程序化提交：快捷指令等注入路径不发 onData，显式走一次 Enter 语义
     // （多行注入 lines>1：首行即时开块，其余边界等提示符行逐个补切）
     notifySubmit: onEnter,
+    setAuthoritative(on) {
+      authoritative = on
+      if (on) {
+        // 进入权威模式：清掉猜测式探测的在途状态，避免残留计数与 A 事件抢切
+        pendingPromptSplits = 0
+        clearSubmittedLine()
+        waitingForPrompt = false
+      }
+    },
+    notifyPrompt,
+    noteExit,
     dispose() {
       disposables.forEach((d) => d.dispose())
       clearSubmittedLine()

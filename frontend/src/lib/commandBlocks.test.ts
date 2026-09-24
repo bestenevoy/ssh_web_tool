@@ -234,6 +234,89 @@ describe('enter 模式回归', () => {
   })
 })
 
+describe('S1 权威模式（OSC 133;A/D 驱动切块）', () => {
+  it('setAuthoritative 后键盘 Enter 不再切块，notifyPrompt 才切', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'enter')
+    tracker.setAuthoritative(true)
+    f.type('ls\r') // 键盘回车：权威模式下不切
+    f.feed([{ text: 'file1' }]) // 输出行也不切
+    expect(tracker.blocks).toHaveLength(0)
+    f.feed([{ text: 'user@host:~$ ' }])
+    tracker.notifyPrompt() // 133;A 到达：首个提示符行开块
+    expect(tracker.blocks).toHaveLength(1)
+    expect(tracker.blocks[0].start.line).toBe(1)
+    expect(tracker.blocks[0].exitCode).toBeNull()
+    tracker.dispose()
+  })
+
+  it('notifyPrompt 关闭上一块（终点=新提示符前一行）并开新块', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'enter')
+    tracker.setAuthoritative(true)
+    f.feed([{ text: 'user@host:~$ ls' }])
+    tracker.notifyPrompt()
+    f.feed([{ text: 'file1' }, { text: 'file2' }, { text: 'user@host:~$ ' }])
+    tracker.notifyPrompt()
+    expect(tracker.blocks).toHaveLength(2)
+    expect(tracker.blocks[0].end?.line).toBe(2) // 输出末行
+    expect(tracker.blocks[1].start.line).toBe(3)
+    tracker.dispose()
+  })
+
+  it('同一逻辑行重复 A（Ctrl+L 重绘/PROMPT_COMMAND 二次执行）去重不双切', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'enter')
+    tracker.setAuthoritative(true)
+    f.feed([{ text: 'user@host:~$ ' }])
+    tracker.notifyPrompt()
+    tracker.notifyPrompt()
+    tracker.notifyPrompt()
+    expect(tracker.blocks).toHaveLength(1)
+    tracker.dispose()
+  })
+
+  it('noteExit 回填最近块退出码；空回车周期不产生退出码丢失', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'enter')
+    tracker.setAuthoritative(true)
+    f.feed([{ text: 'user@host:~$ false' }])
+    tracker.notifyPrompt()
+    f.feed([{ text: 'user@host:~$ ' }])
+    tracker.noteExit(1) // 133;D 先于下一条 A 到达 → 落在刚结束的块
+    tracker.notifyPrompt()
+    expect(tracker.blocks[0].exitCode).toBe(1)
+    expect(tracker.blocks[1].exitCode).toBeNull()
+    tracker.noteExit(0)
+    expect(tracker.blocks[1].exitCode).toBe(0)
+    tracker.dispose()
+  })
+
+  it('notifySubmit（程序注入）在权威模式下为空操作（A 事件负责开块）', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'enter')
+    tracker.notifySubmit() // 未集成：正常开块
+    expect(tracker.blocks).toHaveLength(1)
+    tracker.setAuthoritative(true)
+    tracker.notifySubmit(3) // 权威模式：忽略（多行注入同样由各自周期的 A 切块）
+    expect(tracker.blocks).toHaveLength(1)
+    tracker.dispose()
+  })
+
+  it('权威模式下 writeParsed 提示符猜测不并行切块', () => {
+    const f = makeFakeTerm()
+    const tracker = createCommandBlockTracker(f.term, 'prompt', {
+      extraPromptPatterns: compilePromptPatterns(['mini>']),
+    })
+    tracker.setAuthoritative(true)
+    f.feed([{ text: 'mini> ' }]) // 未权威时这里会开块
+    expect(tracker.blocks).toHaveLength(0)
+    tracker.notifyPrompt()
+    expect(tracker.blocks).toHaveLength(1)
+    tracker.dispose()
+  })
+})
+
 describe('resetAll 导出与 onReset 通知', () => {
   it('resetAll 清空全部块并 dispose marker', () => {
     const f = makeFakeTerm()

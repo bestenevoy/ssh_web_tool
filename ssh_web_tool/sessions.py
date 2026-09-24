@@ -9,6 +9,7 @@ SSH 会话池管理
 import asyncio
 import logging
 import os
+import posixpath
 import re
 import threading
 import time
@@ -19,7 +20,7 @@ import asyncssh
 from fastapi import WebSocket
 
 from . import prompt_detect
-from .config import get_connect_timeout
+from .config import get_connect_timeout, get_shell_integration
 from .echo_parser import EchoParser
 from .output_bus import OutputBus
 from .ps_history import PSReadlineTailer, TailerLike
@@ -195,6 +196,52 @@ def _fallback_shell() -> str:
     return get_fallback_local_shell()
 
 
+# S1 shell 集成片段（Ghostty/VSCode 同思路）：SSH 交互 shell 建立后注入，给远端
+# bash/zsh 挂 precmd 钩子，在每个提示符出现时向输出流写 OSC 转义上报权威事件：
+#   633;E;<base64 命令>   实际执行的命令全文（Tab 补全/↑ 召回后 shell 视角的定稿）
+#   133;D;<退出码>        上一条命令退出码
+#   633;P;Cwd=<路径>      当前工作目录（cd 跟踪权威源，脚本内 cd 也能跟上）
+#   133;A                 提示符开始（块状条切块锚点）
+#   633;SI;ready          集成生效回执（前端据此切换到 S1 通道）
+# 空回车判定：bash 空回车不产生新历史条目，用 `history 1` 的条目编号比对
+# （编号不变=没有新命令执行→跳过 E；HISTNO 在部分 bash/上下文中为空不可靠）；
+# history 不可用时退回"命令文本与上次不同且非空"的弱判定。
+# 注入片段自身那一条不上报 E，并从 bash 历史删除，尽量不污染用户 shell。
+# 注：fc 输出带前导 TAB（缩进），由前端解码后 trim；此处 case 匹配任意位置不受影响。
+SHELL_INTEGRATION_SNIPPET = (
+    "__wst_precmd(){ __wst_e=$?; "
+    "__wst_c=$(fc -ln -1 2>/dev/null | tail -n 1); "
+    "__wst_n=$(history 1 2>/dev/null | awk '{print $1; exit}'); "
+    'case "$__wst_c" in '
+    "*'__wst_'*) "
+    # 删条目后 bash 会复用该事件编号（下一条命令编号不变）——删完必须清空
+    # 跟踪状态，否则紧跟的第一条真实命令因编号相同被误判为"未执行新命令"。
+    '[ -n "$BASH_VERSION" ] && history -d "$__wst_n" 2>/dev/null; __wst_ln=; __wst_lc=;; '
+    "*) "
+    "if command -v base64 >/dev/null 2>&1; then "
+    'if [ -n "$__wst_n" ] && [ "$__wst_n" != "${__wst_ln:-}" ]; then __wst_go=1; '
+    'elif [ -z "$__wst_n" ] && [ -n "$__wst_c" ] && [ "$__wst_c" != "${__wst_lc:-}" ]; then __wst_go=1; '
+    "else __wst_go=; fi; "
+    '[ -n "$__wst_go" ] && '
+    "printf '\\033]633;E;%s\\007' \"$(printf %s \"$__wst_c\" | base64 2>/dev/null | tr -d '\\n')\"; "
+    "fi; __wst_ln=$__wst_n; __wst_lc=$__wst_c;; "
+    "esac; "
+    "printf '\\033]133;D;%s\\007' \"$__wst_e\"; "
+    "printf '\\033]633;P;Cwd=%s\\007' \"$PWD\"; "
+    "printf '\\033]133;A\\007'; }; "
+    'if [ -n "$BASH_VERSION" ]; then '
+    # 追加旧 PROMPT_COMMAND 用 "; " 链接（其值按命令列表执行；分号后留空格防与旧值
+    # 首词粘连）。不能用换行分隔：注入片段必须保持单物理行——双引号内 "\n" 是字面
+    # 两字符（bash 赋值不做 C 转义，实测命令词被拼成 __wst_precmdntrue），真实换行
+    # 会吞掉用户随后键入的首条命令，$'...' 引号手术在双引号/${:+} 内也不生效。
+    'PROMPT_COMMAND="__wst_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"; '
+    'elif [ -n "$ZSH_VERSION" ]; then '
+    "(autoload -U add-zsh-hook 2>/dev/null && add-zsh-hook precmd __wst_precmd 2>/dev/null) "
+    "|| precmd(){ __wst_precmd; }; fi; "
+    "printf '\\033]633;SI;ready\\007'"
+)
+
+
 class SSHSession:
     """单个 SSH 会话（对应一个 SSH 连接 + 可选的交互式终端）"""
 
@@ -235,6 +282,10 @@ class SSHSession:
         self._echo_parser = EchoParser()
         # 最近一次回显命令记录时刻（Tab 补全行的前端延迟兜底判定用）
         self._echo_last_record_ts = 0.0
+        # S1 shell 集成（OSC 133/633）：注入任务句柄 + 激活标记。激活后 cd 跟踪
+        # 由 633;P;Cwd 事件权威驱动，echo 观察通道让位（_parse_echo_line 跳过）
+        self._si_task: asyncio.Task | None = None
+        self._si_active = False
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
@@ -438,6 +489,8 @@ class SSHSession:
         )
         self._has_shell = True
         self.last_active = time.time()
+        # S1 shell 集成：新 shell 挂钩子（Ghostty/VSCode 同思路，见 SHELL_INTEGRATION_SNIPPET）
+        self.arm_shell_integration()
         # 自动启动 SSH 输出读取器（广播给所有监听器）
         # 注意：必须直接启动 SSH 读取器而非走 start_output_reader——
         # switch_to_ssh 流程中此刻 _local_proc 尚未清空（本地 shell 在本方法
@@ -480,8 +533,9 @@ class SSHSession:
             print(f"[history] echo观察(不入库) {cmd!r} (session={self.session_id})")
             # cd 跟踪权威修正：回显行是 Tab 补全/历史翻查后的最终命令，
             # 输入侧按键缓冲只见补全前内容（含 Tab 的行已跳过缓冲解析）；
-            # 本机会话无 SFTP 需求不跟踪，避免本地 shell 回显干扰
-            if not self.is_local():
+            # 本机会话无 SFTP 需求不跟踪，避免本地 shell 回显干扰；
+            # S1 集成激活后 cd 跟踪由 633;P;Cwd 权威驱动，观察通道让位
+            if not self.is_local() and not self._si_active:
                 self._track_cd(cmd)
 
     async def _record_echo(self, cmd: str):
@@ -503,6 +557,53 @@ class SSHSession:
     def echo_recently_recorded(self, within: float) -> bool:
         """最近 within 秒内是否有回显解析命令已记录（Tab 补全兜底竞争判定）"""
         return (time.time() - self._echo_last_record_ts) < within
+
+    # ============ S1 shell 集成（Ghostty/VSCode 同思路：OSC 133/633 权威事件源） ============
+
+    def arm_shell_integration(self) -> None:
+        """SSH 交互 shell 建立后调度注入（本机会话/配置关闭时跳过）。
+
+        每个新 shell（首连/重连 restart_shell/switch_to_ssh）都要重新 arm：
+        钩子函数存活于该 shell 进程内，换 shell 即失效。_si_active 由前端
+        收到事件后经 set_cwd 置位（后端看不到 OSC 流内容归属）。
+        """
+        self._si_active = False
+        if self.is_local() or not get_shell_integration():
+            return
+        if self._si_task is not None and not self._si_task.done():
+            self._si_task.cancel()
+        try:
+            self._si_task = asyncio.create_task(self._inject_shell_integration())
+        except Exception:
+            pass
+
+    async def _inject_shell_integration(self) -> None:
+        """延迟注入集成片段：等远端 shell 提示符/登录脚本收尾（1.2s 经验值）。
+
+        片段本身会作为一行出现在终端并被远端执行（readline 回显），这是无
+        rcfile 注入手段前提下的可见代价；片段自过滤（不上报自身 E）并从
+        bash 历史删除，用户侧仅多一次闪过的注入行。
+        """
+        try:
+            await asyncio.sleep(1.2)
+            if self.is_local() or self._switching_local or self.process is None:
+                return
+            stdin = getattr(self.process, "stdin", None)
+            if stdin is None:
+                return
+            stdin.write(SHELL_INTEGRATION_SNIPPET + "\n")
+            print(f"[si] shell 集成片段已注入 session={self.session_id}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[si] 注入失败 session={self.session_id}: {e!r}")
+
+    def set_cwd(self, path: str) -> None:
+        """S1 633;P;Cwd 事件权威回填工作目录（前端 OSC 解析后回调）"""
+        if self.is_local() or not path or len(path) > 500 or not path.startswith("/"):
+            return
+        self._si_active = True
+        self.current_dir = posixpath.normpath(path)
 
     async def _broadcast_output(self, data: str):
         """广播输出给所有监听器，并维护缓冲区（用于状态检测）和日志持久化"""
@@ -844,6 +945,10 @@ class SSHSession:
         proc = _DirectPtyWrapper(pty_obj)
         self._local_proc = proc
         self._local_shell = shell
+        # 回到本机 shell：S1 集成失效（前端同步清标志），取消挂起的注入任务
+        self._si_active = False
+        if self._si_task is not None and not self._si_task.done():
+            self._si_task.cancel()
         # PowerShell 会话启用 PSReadLine 采集器（cmd 无历史文件，跳过）
         self._ps_tailer = PSReadlineTailer(self._record_echo) if shell in ("powershell", "pwsh") else None
         self._last_cols = cols
@@ -1085,8 +1190,6 @@ class SSHSession:
           复合命令（&&/;/|/>）→ 置 None（未知），打开 SFTP 时由接口回退 home，
           避免给出错误位置
         """
-        import posixpath
-
         line = (line or "").strip()
         if not line.startswith("cd") or (len(line) > 2 and line[2] not in " \t"):
             return  # 非 cd 命令（含 cdx 之类前缀撞车）一律忽略，维持当前跟踪值
@@ -1216,6 +1319,8 @@ class SSHSession:
         self._connected = True
         self._has_shell = True
         self._local_shell = ""
+        # S1 shell 集成：远端 shell 换新进程，重新挂钩子
+        self.arm_shell_integration()
         # 挂载到已保存主机：host+port+用户名精确匹配则复用其 host_id，不匹配清空（防错挂）。
         # 本机终端输入 ssh 连出的会话由此计入主机列表的连接数/状态点（get_sessions_by_host）
         self.host_id = self._match_saved_host()

@@ -58,11 +58,20 @@ export interface BlockBarController {
   /** 程序化提交通知（快捷指令/.zs 播放注入命令时调用）：与用户敲 Enter 同语义。
    *  多行注入传行数 lines（见 commandBlocks.ts notifySubmit）。 */
   notifySubmit(lines?: number): void
+  /** S1 shell 集成生效/失效：tracker 切权威模式（133;A 成为唯一切块源）或退回猜测式。 */
+  setAuthoritative(on: boolean): void
+  /** OSC 133;A：提示符开始（权威切块）。 */
+  notifyPrompt(): void
+  /** OSC 133;D;<rc>：回填最近块退出码（失败块色条标红）。 */
+  noteExit(exitCode: number): void
   dispose(): void
 }
 
 // 左侧色条区宽度：与 index.css 中 .terminal-instance 的 padding-left 保持一致
 const BAR_ZONE_PX = 14
+// 失败块（S1 133;D 退出码非 0）色条覆盖色：与 index.css 暗色 --danger 手工同步
+// （svg 属性不走 CSS 变量，同 ACCENT 在 terminalInstance 的处理口径）
+const FAIL_COLOR = '#e5484d'
 // 色条视觉宽度；点击热区宽度单独加宽
 const BAR_WIDTH = 3
 const HIT_WIDTH = 12
@@ -88,6 +97,8 @@ export function attachBlockBar(
     onReset: () => foldStore?.discardAll(),
   })
   let trackerSig = trackerSigOf(settings)
+  // S1 权威模式已开启：tracker 因设置变化热重建时须重放（否则切块退回猜测式）
+  let authoritativeOn = false
 
   // tracker 的 onChange 订阅独立管理（重建时旧的单独 dispose，不进共享 disposables）
   let trackerChangeSub: { dispose(): void } | null = null
@@ -213,6 +224,7 @@ export function attachBlockBar(
       extraPromptPatterns: compilePromptPatterns(s.customPromptPatterns),
       onReset: () => foldStore?.discardAll(),
     })
+    if (authoritativeOn) tracker.setAuthoritative(true)
     trackerChangeSub = tracker.onChange(onTrackerChanged)
     createFoldStoreFor() // 新 tracker 无块，fold 从零开始
     lastSig = '' // 新 tracker 无块，sig 可能与旧值相同，强制重绘
@@ -319,18 +331,21 @@ export function attachBlockBar(
       const btm = Math.min(endLine, visBot)
       const folded = !!f
       const selected = selectedIds.has(b.id)
+      // S1 权威退出码非 0 → 色条整条换危险色（运行中块 exitCode 未知仍用循环色）
+      const failed = b.exitCode !== null && b.exitCode !== 0
       if (btm >= t) {
         const top = originTop + (t - viewportY) * rowHeight
         const h = (btm - t + 1) * rowHeight
+        const barColor = failed ? FAIL_COLOR : b.color
         // 折叠态：虚线描边（rssh 同款，fill 透明透出背景）；正常态实心填充
         const barAttrs = folded
-          ? `fill="none" stroke="${b.color}" stroke-width="1" stroke-dasharray="2,2"`
-          : `fill="${b.color}"`
+          ? `fill="none" stroke="${barColor}" stroke-width="1" stroke-dasharray="2,2"`
+          : `fill="${barColor}"`
         bars.push(
           `<rect class="block-hit" data-block="${b.id}" x="0" y="${top.toFixed(1)}" width="${HIT_WIDTH}" height="${h.toFixed(1)}" fill="transparent"></rect>` +
-          `<rect class="block-bar${folded ? ' folded' : ''}${selected ? ' selected' : ''}" x="${((BAR_ZONE_PX - BAR_WIDTH) / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${BAR_WIDTH}" height="${h.toFixed(1)}" rx="1.5" ${barAttrs}></rect>`,
+          `<rect class="block-bar${folded ? ' folded' : ''}${selected ? ' selected' : ''}${failed ? ' failed' : ''}" x="${((BAR_ZONE_PX - BAR_WIDTH) / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${BAR_WIDTH}" height="${h.toFixed(1)}" rx="1.5" ${barAttrs}></rect>`,
         )
-        sig += `${b.id}:${t}-${btm}${folded ? 'F' : ''}${selected ? 'S' : ''};`
+        sig += `${b.id}:${t}-${btm}${folded ? 'F' : ''}${selected ? 'S' : ''}${failed ? 'X' : ''};`
       }
       // 折叠徽标：rssh 同款行末角标——与命令行同一行、贴容器右缘（不遮挡任何文本），
       // 仅命令行在视口内时绘制
@@ -537,9 +552,19 @@ export function attachBlockBar(
       // 多块按块序拼接，块间空行分隔
       writeBlockClipboard(blocks.map(blockText).filter(Boolean).join('\n\n'))
     },
-    notifySubmit() {
+    notifySubmit(lines?: number) {
       // tracker 热重建后此处闭包引用的是最新实例（let tracker）
-      tracker.notifySubmit()
+      tracker.notifySubmit(lines)
+    },
+    setAuthoritative(on: boolean) {
+      authoritativeOn = on
+      tracker.setAuthoritative(on)
+    },
+    notifyPrompt() {
+      tracker.notifyPrompt()
+    },
+    noteExit(exitCode: number) {
+      tracker.noteExit(exitCode)
     },
     dispose() {
       disposed = true

@@ -249,7 +249,7 @@ LOCAL_SHELL_CHOICES = ("cmd", "powershell", "pwsh")
 
 # 顶层标量配置白名单：这些键会在 load_config 时从用户 config.json 合并进来
 # （ui_settings 不在此列：它是子字典，由下方逐键合并逻辑独家处理，整体替换会丢默认值）
-_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell", "connect_timeout", "debug")
+_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell", "connect_timeout", "debug", "shell_integration")
 
 
 def validate_local_shell_value(shell: object) -> str | None:
@@ -273,6 +273,17 @@ def get_fallback_local_shell(cfg: dict | None = None) -> str:
     c = cfg if cfg is not None else load_config()
     val = (c or {}).get("fallback_local_shell", "powershell")
     return validate_local_shell_value(val) or "powershell"
+
+
+def get_shell_integration(cfg: dict | None = None) -> bool:
+    """SSH 会话是否注入 shell 集成片段（OSC 133/633 命令/退出码/cwd 事件）。
+
+    默认开启；config.json 设 "shell_integration": false 全局关闭（设备类自研
+    shell 不想看到注入回显/报错时可关）。
+    """
+    c = cfg if cfg is not None else load_config()
+    v = (c or {}).get("shell_integration", True)
+    return v if isinstance(v, bool) else True
 
 
 def get_connect_timeout(cfg: dict | None = None) -> float:

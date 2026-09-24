@@ -12,6 +12,7 @@ import type { TerminalInstance, SshConnInfo } from './terminalInstance'
 import { attachBlockBar } from './blockBar'
 import { HighlightDecorator } from './highlightDecorations'
 import { compileHighlightRules } from './highlight'
+import { stripRcProbe } from './quickScript'
 import type { WsClientMessage } from '../types/ws'
 
 // 类型从 terminalInstance.ts 重导出（组件导入路径不变）
@@ -70,6 +71,10 @@ export function useTerminals(settings: TerminalSettings) {
     },
     []
   )
+  // 按会话读取 Map 中现行实例（terminalsRef 口径；ref 恒定故普通函数定义、不入依赖数组）：
+  // setTerminals 的 {...cur} 浅扩会替换 Map 值对象，工厂闭包持有的 instance 可能过期，
+  // S1 事件回调等需经它访问挂载后字段（blockBar 等）
+  const getLiveInstance = (sid: string): TerminalInstance | undefined => terminalsRef.current.get(sid)
   // 保存最新的 activeId 引用，避免 restoreTerminals 依赖 activeId 导致定时器频繁重建
   const activeIdRef = useRef<string | null>(null)
   activeIdRef.current = activeId
@@ -250,7 +255,11 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       const anchor = inst.cmd_anchor
       inst.saw_tab = false
       inst.cmd_anchor = null
-      if (typed && !viaTab) {
+      // S1 集成已生效：历史入库由 633;E 权威事件通道负责（shell 视角定稿文本，
+      // Tab 补全/↑ 召回/多行粘贴天然覆盖），键盘猜测通道整体让位
+      if (inst.siState?.integrated) {
+        // 不做任何记录，仅完成上面的缓冲/锚点状态收敛
+      } else if (typed && !viaTab) {
         console.log('[history] 回车记录·键入版:', JSON.stringify(typed))
         api.recordCommand(typed).catch(() => {})
       } else {
@@ -326,6 +335,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
       requestClose: (sid: string) => closeTerminalRef.current!(sid),
       resync: resyncTerminal,
       ensureFit,
+      getLiveInstance,
     } as const
 
     // ---- 本机终端 / rawConn 重连：后端会话先行，直接建连（无占位阶段）----
@@ -486,6 +496,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
           requestClose: (sid) => closeTerminalRef.current!(sid),
           resync: resyncTerminal,
           ensureFit,
+          getLiveInstance,
         })
 
         setTerminals((prev) => {
@@ -593,6 +604,7 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     inst.resizeObservedEl = null
     inst.blockBar?.dispose()
     inst.highlight?.dispose()
+    inst.siState?.sub?.dispose() // S1 OSC 133/633 解析器句柄
     // state_timer 已改为批量轮询，不再需要单独清理
     try { await api.closeSession(session_id) } catch {}
     setTerminals((prev) => {
@@ -665,8 +677,17 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
     const cmd = normalizeInvisible(command)
     if (execute) {
       sendClient(inst.ws, { type: 'input', data: cmd + '\n' })
-      console.log('[history] 回车记录·快捷指令注入:', JSON.stringify(cmd))
-      api.recordCommand(cmd).catch(() => {})
+      // S1 集成会话：命令执行完的 633;E 事件按 shell 实际执行文本入库——
+      // 此处不再直记（长命令执行超 3s 会绕过 DB 同命令去重产生双记录）。
+      // 未集成（本机 shell/旧后端/连接窗口期）维持原行为：注入即记录。
+      if (!inst.siState?.integrated) {
+        // 记录剥掉 s.run 探针的真实命令（探针是脚本实现细节，不属用户意图）
+        const rec = stripRcProbe(cmd)
+        if (rec) {
+          console.log('[history] 回车记录·快捷指令注入:', JSON.stringify(rec))
+          api.recordCommand(rec).catch(() => {})
+        }
+      }
       inst.input_buffer = ''
       // 程序注入绕过 term.onData（只对真实键盘触发），显式走一次 Enter 语义，
       // 否则 enter 模式下快捷指令不会开启新命令块（色块不划分）。
@@ -756,6 +777,8 @@ const resyncTerminal = useCallback((session_id: string, term: Terminal, ws: WebS
         inst.container = el
         // 命令块渲染层（左侧色条 + 遮罩折叠）：xterm 打开后才有几何信息可测
         if (!inst.blockBar) inst.blockBar = attachBlockBar(inst.term, el, settingsRef.current)
+        // S1 集成先于挂载生效（极端时序：注入回执在首帧就到达）：补放权威模式
+        if (inst.siState?.integrated) inst.blockBar?.setAuthoritative(true)
         // 关键字高亮装饰层（rssh 同款）：xterm 打开后创建（同 blockBar 模式），
         // 创建即应用当前规则集，后续规则变化走 updateTerminalSettings
         if (!inst.highlight) {

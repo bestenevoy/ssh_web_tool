@@ -118,6 +118,15 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/**
+ * 剥掉 s.run 的退出码探针后缀（`${cmd}; echo "__Q<n>_RC__:$?"`）。
+ * S1 shell 集成激活时命令由远端 633;E 事件按"实际执行全文"入库——探针是
+ * 脚本运行时的实现细节而非用户意图，历史记录只保留真实命令部分。
+ */
+export function stripRcProbe(cmd: string): string {
+  return cmd.replace(/;\s*echo\s+"__Q\d+_RC__:\$\?"$/, '').trim()
+}
+
 function checkAbort(host: QuickScriptHost): void {
   if (host.cancelled()) throw new ScriptAbort('脚本已停止')
   if (Date.now() >= host.deadline()) throw new ScriptAbort('脚本超过 120s 全局超时')

@@ -168,6 +168,8 @@ class UiSettingsRequest(BaseModel):
 
 class RecordCommandRequest(BaseModel):
     command: str
+    # S1 来源标签（仅进 [history] 决策日志便于对账）："S1 shell 集成" 等；缺省"键入"
+    via: str = "键入"
     # Tab 补全延迟兜底模式：session_id + defer_sec>0 时，先等待 defer_sec，
     # 若该会话回显解析在此期间已记录命令（权威版含补全文本）则跳过本条
     session_id: str = ""
@@ -176,6 +178,11 @@ class RecordCommandRequest(BaseModel):
 
 class IgnoreCommandRequest(BaseModel):
     command: str
+
+
+class SessionCwdRequest(BaseModel):
+    # S1 shell 集成 633;P;Cwd 事件上报的绝对路径
+    dir: str
 
 
 class PreopUploadRequest(BaseModel):
