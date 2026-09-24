@@ -14,10 +14,10 @@ router = APIRouter(prefix="/api", tags=["history"])
 async def api_record_command(req: RecordCommandRequest):
     """记录一条命令到全局历史（增加使用频次）
 
-    Tab 补全延迟兜底模式（session_id + defer_sec>0）：补全文本从输出侧回来，
-    前端键盘缓冲对含 Tab 的行不可信（可能残缺，补全后再输入还会交错成非前缀
-    乱串，DB 前缀/超串去重拦不住）——先延迟等待回显解析（权威）落库，窗口内
-    该会话已有回显记录则跳过；没等到才兜底记键盘版，保证任何 shell 下至少一条
+    Tab 补全延迟兜底模式（session_id + defer_sec>0）：快照捕获不可用时才走到
+    这里。回显解析通道已降级为只做 cd 跟踪不入库（2026-09-24，持续回显污染
+    修复），本检查现仅对本机 PSReadLine 采集器（权威旁路，走 _record_echo 记
+    时刻戳）有意义；SSH 会话下恒落键盘版——可能残缺，但至少一条。
     """
     if req.defer_sec > 0 and req.session_id:
         await asyncio.sleep(req.defer_sec)

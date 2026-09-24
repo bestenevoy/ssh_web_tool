@@ -198,7 +198,9 @@ async def record_command(command: str, via: str = "键入") -> None:
 
 async def record_echo_command(cmd: str) -> None:
     """
-    记录从终端回显解析出的"实际执行命令"（权威来源，含 Tab 补全/历史翻查结果）：
+    记录权威旁路补记的"实际执行命令"（当前唯一调用方：本机 PowerShell 的
+    PSReadLine 采集器——读 PSReadLine 历史文件，非输出流猜测；后端回显解析
+    通道已降级为只做 cd 跟踪不再入库）。清理规则：
     1. 先删除 3 秒内记录的该命令的严格前缀残留（前端键盘输入版，如 cd /va vs cd /var）
     2. 3 秒内已记录过本条的严格超串则跳过（本条是折行截断片段）
     3. 3 秒内已记录同命令则跳过（前端/CLI 已即时记录过，避免重复计数）

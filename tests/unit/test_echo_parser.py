@@ -260,8 +260,10 @@ def test_bell_char_cleaned():
 
 
 @pytest.mark.asyncio
-async def test_parse_echo_line_tab_completion_keeps_final():
-    """Tab 补全会 \r 重写整行：应只保留最后一次覆盖后的命令"""
+async def test_parse_echo_line_not_recorded_but_tracks_cd():
+    """回显解析降级（2026-09-24 持续回显污染修复）回归锁：_parse_echo_line
+    只驱动 cd 跟踪（Tab 补全后的最终命令），**绝不写历史**——历史入库
+    通道全部由输入动作触发（键盘回车/快照/显式发送/PSReadLine 采集器）"""
     import asyncio
 
     s = SSHSession("t", "10.0.0.1", 22, "root")
@@ -276,10 +278,11 @@ async def test_parse_echo_line_tab_completion_keeps_final():
         recorded.append(cmd)
 
     s._record_echo = fake_record
-    # 模拟：cd /va\r 被 readline 重写为 cd /var
+    # 模拟：cd /va\r 被 readline 重写为 cd /var（\r 覆盖取最后一条）
     s._parse_echo_line("root@host:~# cd /va\rroot@host:~# cd /var\n")
     await asyncio.sleep(0.1)
-    assert recorded == ["cd /var"]
+    assert recorded == []  # 不再入库
+    assert s.current_dir == "/var"  # cd 跟踪仍由回显权威文本驱动
 
 
 # ---------- 字符集转义残留（ESC ( B 等）不得混进命令 ----------

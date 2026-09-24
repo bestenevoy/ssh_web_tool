@@ -462,38 +462,36 @@ class SSHSession:
         """移除输出监听器"""
         self._output_bus.remove_listener(q)
 
-    # ============ 命令回显解析（逻辑在 EchoParser 组件，后端统一记录实际执行的命令） ============
+    # ============ 命令回显解析（逻辑在 EchoParser 组件，仅作 cd 跟踪权威源，不再写历史） ============
 
     def _parse_echo_line(self, data: str):
-        """
-        从输出流解析"命令回显行"并记录到全局历史（由后端统一记录）。
+        """从输出流解析"命令回显行"，只用于 cd 跟踪（SFTP 初始目录权威源）。
 
-        原理：交互式 shell（pty echo / readline）会把用户实际输入的命令回显在
-        提示符之后（root@host:~$ cd /var），Tab 补全、历史翻查（方向键/Ctrl+R）
-        后的最终内容都会体现在这行里；前端只记录键盘输入，会丢失补全内容。
-
-        解析细节（行缓冲/提示符剥离/去重）在 EchoParser 组件，此处只做调度。
+        历史入库通道（2026-09-24 降级）：键盘回车 / 回车快照 captureTypedLine /
+        显式发送 sendCommandTo·CLI / 本机 PSReadLine 采集器——全部由"输入动作"
+        触发。本通道原先按输出行猜命令入库，是持续回显场景（tail -f、设备日志
+        流、`xxx>`/`ip:port>`/宽松 PS1 形态撞车的输出行）反复污染历史的最大
+        误报源，且 3s 去重窗口对逐条不同的输出流无效，故整体退役其记录职责；
+        回显行仍是 Tab 补全/历史翻查后最终命令的最准文本，保留驱动 _track_cd。
         """
         if not self._has_shell or self.process is None:
             return
         for cmd in self._echo_parser.feed(data):
-            print(f"[history] echo解析→ {cmd!r} (session={self.session_id})")
+            print(f"[history] echo观察(不入库) {cmd!r} (session={self.session_id})")
             # cd 跟踪权威修正：回显行是 Tab 补全/历史翻查后的最终命令，
             # 输入侧按键缓冲只见补全前内容（含 Tab 的行已跳过缓冲解析）；
             # 本机会话无 SFTP 需求不跟踪，避免本地 shell 回显干扰
             if not self.is_local():
                 self._track_cd(cmd)
-            try:
-                self._echo_task = asyncio.create_task(self._record_echo(cmd))
-            except Exception:
-                pass
 
     async def _record_echo(self, cmd: str):
         """异步记录回显命令（不阻塞输出广播循环）
-        record_echo_command 内部：清理键盘输入版前缀残留（如 cd /va）、
-        3 秒内同命令去重（前端/CLI 已即时记录过则不重复）"""
+
+        调用方仅剩权威旁路：本机 PowerShell 的 PSReadLine 采集器（读的是
+        PSReadLine 历史文件，非输出流猜测）。record_echo_command 内部：
+        清理键盘输入版前缀残留（如 cd /va）、3 秒内同命令去重。"""
         # 记录时刻戳：Tab 补全行的前端延迟兜底（/history/record defer 模式）据此
-        # 判断回显是否已记录权威版；PSReadLine 采集器等旁路也走本方法，统一覆盖
+        # 判断权威版是否已记录
         self._echo_last_record_ts = time.time()
         try:
             from .history_db import record_echo_command
