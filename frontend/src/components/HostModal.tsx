@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type { Host, HostType } from '../types'
+import { api } from '../lib/api'
+import { normalizeInvisible } from '../lib/invisibleChars'
 
 interface Props {
   open: boolean
@@ -17,6 +19,11 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
   const [port, setPort] = useState(22)
   const [username, setUsername] = useState('root')
   const [password, setPassword] = useState('')
+  // 私钥登录：密钥文件路径（~/.ssh 下常见）+ 加密口令（可选）
+  const [privateKey, setPrivateKey] = useState('')
+  const [privateKeyPass, setPrivateKeyPass] = useState('')
+  const [pickingKey, setPickingKey] = useState(false)
+  const [keyError, setKeyError] = useState('')
   const [type, setType] = useState('other')
   const [group, setGroup] = useState('')
   const [newGroupName, setNewGroupName] = useState('')
@@ -60,6 +67,9 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
       setPort(host.port)
       setUsername(host.username)
       setPassword(host.password || '')
+      setPrivateKey(host.private_key || '')
+      setPrivateKeyPass(host.passphrase || '')
+      setKeyError('')
       setType(host.type)
       setGroup(host.group || '')
       setDeviceType(host.device_type || 'linux')
@@ -81,6 +91,9 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
       setPort(22)
       setUsername('root')
       setPassword('')
+      setPrivateKey('')
+      setPrivateKeyPass('')
+      setKeyError('')
       setType('other')
       setGroup('')
       setDeviceType('linux')
@@ -118,6 +131,11 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
     // 编辑模式下密码留空表示不修改（明文回显，修改后提交新值）
     if (!isEdit || password) payload.password = password
     if (!isEdit || mgmtPassword) payload.mgmt_password = mgmtPassword
+    // 私钥字段同密码语义：编辑模式留空表示不修改。路径先做隐形字符归一
+    //（粘贴路径常混入 NBSP/零宽字符，后端按路径读文件会直接找不到）
+    const cleanKey = normalizeInvisible(privateKey).trim()
+    if (!isEdit || cleanKey) payload.private_key = cleanKey
+    if (!isEdit || privateKeyPass) payload.passphrase = privateKeyPass
     onSave({
       ...payload,
       pw_username_selector: pwUsernameSelector,
@@ -130,6 +148,22 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
       pw_success_selector: pwSuccessSelector,
       pw_headless: pwHeadless,
     })
+  }
+
+  /** 调系统原生文件对话框选择私钥文件（默认定位 ~/.ssh；非 Windows 报错提示手动输入） */
+  const pickPrivateKey = () => {
+    if (pickingKey) return
+    setPickingKey(true)
+    setKeyError('')
+    const v = privateKey.trim()
+    const dir = v.includes('/') || v.includes('\\') ? v.replace(/[^\\/]+$/, '') : '~/.ssh'
+    api
+      .pickFile('open', dir, '选择 SSH 私钥文件')
+      .then((r) => {
+        if (r.status === 'picked' && r.path) setPrivateKey(r.path)
+      })
+      .catch((e) => setKeyError((e as Error).message))
+      .finally(() => setPickingKey(false))
   }
 
   const isStorage = deviceType === 'storage'
@@ -188,6 +222,41 @@ export function HostModal({ open, host, groups, hostTypes, onClose, onSave, onAd
             />
           </div>
         </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label>SSH 私钥文件{host?.has_private_key ? '（已设置）' : ''}</label>
+            <div className="key-path-row">
+              <input
+                type="text"
+                value={privateKey}
+                onChange={(e) => setPrivateKey(e.target.value)}
+                placeholder={host ? '留空则不修改' : '如：~/.ssh/id_rsa（与密码二选一即可）'}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={pickPrivateKey}
+                disabled={pickingKey}
+                title="调用系统文件对话框选择私钥（默认打开 ~/.ssh）"
+              >
+                {pickingKey ? '选择中…' : '📂 选择'}
+              </button>
+            </div>
+          </div>
+          <div className="form-group">
+            <label>私钥口令（可选）</label>
+            <input
+              type="text"
+              value={privateKeyPass}
+              onChange={(e) => setPrivateKeyPass(e.target.value)}
+              placeholder={host ? '留空则不修改' : '密钥有加密口令时填写'}
+              autoComplete="new-password"
+            />
+          </div>
+        </div>
+        {keyError && <div className="file-open-error">{keyError}</div>}
         <div className="form-group">
           <label>分组</label>
           <div className="group-select-row">

@@ -47,6 +47,21 @@ SFTP_CHUNK_SIZE = 4 * 1024 * 1024
 SFTP_IDLE_TIMEOUT = 300
 
 
+def _load_private_key_text(value: str) -> str:
+    """私钥字段双形态解析：PEM 文本直通；否则按文件路径处理（支持 ~ 展开）"""
+    s = value.strip()
+    if "PRIVATE KEY" in s:
+        return s
+    path = os.path.expanduser(s)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except FileNotFoundError:
+        raise ValueError(f"私钥文件不存在: {path}") from None
+    except OSError as e:
+        raise ValueError(f"私钥文件读取失败: {path}（{e}）") from None
+
+
 class _DirectPtyWrapper:
     """直接包装底层 PTY 对象，提供与 PtyProcess 兼容的接口
 
@@ -441,7 +456,11 @@ class SSHSession:
         if self._password:
             kwargs["password"] = self._password
         if self._private_key:
-            kwargs["client_keys"] = [asyncssh.import_private_key(self._private_key, self._passphrase)]  # type: ignore[list-item]
+            try:
+                key = asyncssh.import_private_key(_load_private_key_text(self._private_key), self._passphrase)
+            except (asyncssh.KeyImportError, asyncssh.KeyEncryptionError) as e:
+                raise ValueError(f"私钥导入失败（{self._private_key}）: {e}") from None
+            kwargs["client_keys"] = [key]  # type: ignore[list-item]
         return kwargs
 
     async def connect(self, password: str | None = None, private_key: str | None = None, passphrase: str | None = None):
