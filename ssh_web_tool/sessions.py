@@ -449,6 +449,10 @@ class SSHSession:
             "port": self.port,
             "username": self.username,
             "known_hosts": None,  # 跳过主机密钥校验（本地工具简化处理）
+            # 不读 ~/.ssh/config：asyncssh 用系统默认编码（中文 Windows 为 GBK）解析该文件，
+            # UTF-8 中文注释会触发 UnicodeDecodeError 导致所有连接失败；本工具连接参数
+            # 全部显式指定，无需用户 ssh 配置。必须传空列表——传 () 会触发 asyncssh 默认回退
+            "config": [],
             "keepalive_interval": 10,  # 每 10 秒发送 keepalive 包，防止空闲超时断开
             "keepalive_count_max": 2,  # 2 次 keepalive 无响应（约 20s）即判定连接断开，快速发现静默断线
             "connect_timeout": get_connect_timeout(),  # TCP 建连超时（配置化），防不可达主机卡死
