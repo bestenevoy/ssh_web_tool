@@ -221,7 +221,9 @@ def _fallback_shell() -> str:
 # 空回车判定：bash 空回车不产生新历史条目，用 `history 1` 的条目编号比对
 # （编号不变=没有新命令执行→跳过 E；HISTNO 在部分 bash/上下文中为空不可靠）；
 # history 不可用时退回"命令文本与上次不同且非空"的弱判定。
-# 注入片段自身那一条不上报 E，并从 bash 历史删除，尽量不污染用户 shell。
+# 注入片段自身那一条不上报 E，并从 bash 历史删除；readline 把它回显到输出流的
+# 部分由 _InjectEchoGuard 在广播前精确吞噬（终端/日志/解析均不可见）——
+# 三管齐下，注入对用户完全无痕。
 # 注：fc 输出带前导 TAB（缩进），由前端解码后 trim；此处 case 匹配任意位置不受影响。
 SHELL_INTEGRATION_SNIPPET = (
     "__wst_precmd(){ __wst_e=$?; "
@@ -255,6 +257,70 @@ SHELL_INTEGRATION_SNIPPET = (
     "|| precmd(){ __wst_precmd; }; fi; "
     "printf '\\033]633;SI;ready\\007'"
 )
+
+
+class _InjectEchoGuard:
+    """吞噬 S1 集成片段经 pty echo 回流到输出流的回显（让注入在终端上不可见）。
+
+    注入时机由工具控制（shell 建立 1.2s 后、输出流静止）；实测 readline 回显
+    字节流 = 片段原文 + 接受行时的换行，无重绘插入——故做精确前缀匹配：完整
+    匹配则片段+换行整体吞掉；任何不匹配（或超时）立即回放已暂存字节并放弃，
+    绝不误吞真实输出（最坏退回"看得见注入行一行闪过"，与现状持平）。
+    """
+
+    _TIMEOUT = 10.0
+
+    def __init__(self, snippet: str):
+        self._snippet = snippet
+        self._pos = 0  # 已匹配的片段字符数
+        self._phase2 = False  # 片段已匹配完，待吞咽尾随换行
+        self._buffer: list[str] = []  # 暂存待判定字节（失败时原样回放，一个不丢）
+        self._done = False
+        self._started = time.monotonic()
+
+    @property
+    def finished(self) -> bool:
+        """吞噬流程已终结（成功吞掉 / 匹配失败回放 / 超时放弃）"""
+        return self._done
+
+    def filter(self, data: str) -> str:
+        """过滤一块输出，返回可转发内容（空串 = 全部被吞或暂存中）"""
+        if self._done:
+            return data
+        if time.monotonic() - self._started > self._TIMEOUT:
+            return self._abort(data)  # 防呆：迟迟等不到回显，放弃并回放
+        if not self._phase2:
+            n = len(self._snippet)
+            k = 0
+            m = len(data)
+            while k < m and self._pos + k < n and data[k] == self._snippet[self._pos + k]:
+                k += 1
+            if k:
+                self._buffer.append(data[:k])
+                self._pos += k
+                data = data[k:]
+            if self._pos < n:
+                if data:  # 出现不匹配字符：放弃隐藏
+                    return self._abort(data)
+                return ""  # 整块都是片段前缀：暂存，等待后续块
+            self._phase2 = True
+            if not data:
+                return ""
+        # 阶段 2：吞掉紧随的回显换行（CRLF/CR/LF 任一）；非换行直接放行
+        if data.startswith("\r\n"):
+            data = data[2:]
+        elif data[:1] in ("\r", "\n"):
+            data = data[1:]
+        self._done = True
+        self._buffer = []
+        return data
+
+    def _abort(self, data: str) -> str:
+        """放弃吞噬：回放暂存字节 + 本块数据"""
+        self._done = True
+        out = "".join(self._buffer) + data
+        self._buffer = []
+        return out
 
 
 class SSHSession:
@@ -301,6 +367,8 @@ class SSHSession:
         # 由 633;P;Cwd 事件权威驱动，echo 观察通道让位（_parse_echo_line 跳过）
         self._si_task: asyncio.Task | None = None
         self._si_active = False
+        # 注入片段回显吞噬器（注入时激活，_broadcast_output 广播前过滤）
+        self._si_echo_guard: _InjectEchoGuard | None = None
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
@@ -591,6 +659,8 @@ class SSHSession:
         收到事件后经 set_cwd 置位（后端看不到 OSC 流内容归属）。
         """
         self._si_active = False
+        # 换 shell 时上一轮回显吞噬未完成即弃用（新注入会重建；旧回显随旧进程消亡）
+        self._si_echo_guard = None
         if self.is_local() or not get_shell_integration():
             return
         if self._si_task is not None and not self._si_task.done():
@@ -603,9 +673,9 @@ class SSHSession:
     async def _inject_shell_integration(self) -> None:
         """延迟注入集成片段：等远端 shell 提示符/登录脚本收尾（1.2s 经验值）。
 
-        片段本身会作为一行出现在终端并被远端执行（readline 回显），这是无
-        rcfile 注入手段前提下的可见代价；片段自过滤（不上报自身 E）并从
-        bash 历史删除，用户侧仅多一次闪过的注入行。
+        片段以一行命令写入远端 pty；readline 把它回显到输出流的部分由
+        _InjectEchoGuard 在广播前精确剔除（终端不可见）；片段自身另外不上报
+        E 并从 bash 历史删除，用户 shell 完全无痕。
         """
         try:
             await asyncio.sleep(1.2)
@@ -614,11 +684,14 @@ class SSHSession:
             stdin = getattr(self.process, "stdin", None)
             if stdin is None:
                 return
+            # 先激活回显吞噬再写入：两者间无 await 间隙，回显到达必被过滤
+            self._si_echo_guard = _InjectEchoGuard(SHELL_INTEGRATION_SNIPPET)
             stdin.write(SHELL_INTEGRATION_SNIPPET + "\n")
             print(f"[si] shell 集成片段已注入 session={self.session_id}")
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            self._si_echo_guard = None
             print(f"[si] 注入失败 session={self.session_id}: {e!r}")
 
     def set_cwd(self, path: str) -> None:
@@ -630,6 +703,15 @@ class SSHSession:
 
     async def _broadcast_output(self, data: str):
         """广播输出给所有监听器，并维护缓冲区（用于状态检测）和日志持久化"""
+        # S1 注入回显吞噬：注入行经 pty echo 回流的部分在此被精确剔除，
+        # 终端、日志、回显解析（cd 跟踪观察通道）均不可见
+        guard = self._si_echo_guard
+        if guard is not None:
+            data = guard.filter(data)
+            if guard.finished:
+                self._si_echo_guard = None
+            if not data:
+                return
         # 解析命令回显（实际执行的命令）并记录历史
         self._parse_echo_line(data)
         # 日志持久化：聚合缓冲，静默期/超阈值后清洗一次性写入
@@ -2153,6 +2235,7 @@ class SSHSession:
             self.conn = None
         self._connected = False
         self._has_shell = False
+        self._si_echo_guard = None  # 未完成的注入回显吞噬随会话关闭弃用
         # 日志：先落盘剩余缓冲，再关闭 handler，最后补全结束时间重命名
         self._flush_log_now()
         self._close_logger()
