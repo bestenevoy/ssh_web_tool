@@ -241,6 +241,10 @@ DEFAULT_CONFIG: dict = {
     # 取值为短标识（cmd/powershell/pwsh）或 detect_local_shells 扫描出的完整路径
     "fallback_local_shell": "powershell",
     "debug": False,  # 是否开启 pywebview 调试模式（F12 开发者工具）；开启会略增内存/CPU
+    # 是否解析 ~/.ssh/config（Host 别名/HostName/Port/User/IdentityFile/ProxyJump）。
+    # 走项目自带的 UTF-8 解析器（ssh_config.py），不用 asyncssh 的解析（它在中文
+    # Windows 上按 GBK 打开文件会直接崩），关掉只是退回"配置项里填什么连什么"
+    "use_ssh_config": True,
     "ui_settings": dict(UI_SETTINGS_DEFAULTS),  # 前端 UI 设置（主题/字体/命令块等）
 }
 
@@ -249,7 +253,14 @@ LOCAL_SHELL_CHOICES = ("cmd", "powershell", "pwsh")
 
 # 顶层标量配置白名单：这些键会在 load_config 时从用户 config.json 合并进来
 # （ui_settings 不在此列：它是子字典，由下方逐键合并逻辑独家处理，整体替换会丢默认值）
-_TOP_LEVEL_KEYS = ("open_browser", "fallback_local_shell", "connect_timeout", "debug", "shell_integration")
+_TOP_LEVEL_KEYS = (
+    "open_browser",
+    "fallback_local_shell",
+    "connect_timeout",
+    "debug",
+    "shell_integration",
+    "use_ssh_config",
+)
 
 
 def validate_local_shell_value(shell: object) -> str | None:
@@ -283,6 +294,18 @@ def get_shell_integration(cfg: dict | None = None) -> bool:
     """
     c = cfg if cfg is not None else load_config()
     v = (c or {}).get("shell_integration", True)
+    return v if isinstance(v, bool) else True
+
+
+def get_use_ssh_config(cfg: dict | None = None) -> bool:
+    """连接前是否解析 ~/.ssh/config（Host 别名/HostName/Port/User/IdentityFile/ProxyJump）。
+
+    默认开启；解析用的是项目自带的 UTF-8 最小解析器（ssh_config.py），任何异常都
+    退化为"无配置"，不会像 asyncssh 那样在中文 Windows 上按 GBK 打开文件而崩连接。
+    config.json 设 "use_ssh_config": false 可全局关闭。
+    """
+    c = cfg if cfg is not None else load_config()
+    v = (c or {}).get("use_ssh_config", True)
     return v if isinstance(v, bool) else True
 
 

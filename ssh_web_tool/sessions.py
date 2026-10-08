@@ -14,13 +14,14 @@ import re
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, ClassVar
 
 import asyncssh
 from fastapi import WebSocket
 
 from . import prompt_detect
-from .config import get_connect_timeout, get_shell_integration
+from .config import get_connect_timeout, get_shell_integration, get_use_ssh_config
 from .echo_parser import EchoParser
 from .output_bus import OutputBus
 from .ps_history import PSReadlineTailer, TailerLike
@@ -30,6 +31,7 @@ from .session_log import (
     build_shell_meta,
     resolve_existing_log,
 )
+from .ssh_config import ResolvedHost, resolve_host
 from .ws_protocol import SERVER_SSH_CONNECTED
 
 # 供 asyncssh.connect 劫持（patch_asyncssh）识别"工具内部连接"的标记：
@@ -45,6 +47,33 @@ SFTP_CHUNK_SIZE = 4 * 1024 * 1024
 # SFTP 空闲自动关闭时限：长期空闲会一直占着服务端 sftp-server 进程与传输独立
 # 连接（额外的 sshd 会话）；监控循环发现超过该时长无操作即关闭，下次用到懒建重开。
 SFTP_IDLE_TIMEOUT = 300
+
+# ~/.ssh/config 路径：None = 用默认（用户目录 .ssh/config）；测试可 monkeypatch 指向临时文件
+_SSH_CONFIG_PATH: Path | None = None
+# ProxyJump 跳数上限：防配置文件里写成环导致无限建隧道
+_JUMP_MAX_HOPS = 5
+
+
+def _parse_jump_spec(spec: str) -> tuple[str | None, str, int]:
+    """解析 ProxyJump 单跳 `user@host:port`（缺省 user=None、port=22），支持 [IPv6]:port"""
+    user: str | None = None
+    rest = spec.strip()
+    if "@" in rest:
+        u, _, rest = rest.rpartition("@")
+        user = u or None
+    host, port = rest, 22
+    if host.startswith("["):
+        end = host.find("]")
+        if end > 0:
+            tail = host[end + 1 :]
+            host = host[1:end]
+            if tail.startswith(":") and tail[1:].isdigit():
+                port = int(tail[1:])
+    elif ":" in host:
+        h, _, p = host.rpartition(":")
+        if p.isdigit():
+            host, port = h, int(p)
+    return user, host, port
 
 
 def _load_private_key_text(value: str) -> str:
@@ -258,6 +287,21 @@ SHELL_INTEGRATION_SNIPPET = (
     "printf '\\033]633;SI;ready\\007'"
 )
 
+# 注入时机参数：等远端 shell 输出流静止再写片段。固定睡眠（旧值 1.2s）在慢登录
+# 主机上会把片段打进还在跑的 rc 脚本/motd，或拼进用户已敲的半行命令
+_SI_MIN_DELAY = 0.3  # 最短等待：shell 刚建立输出还没开始，先留出起手时间
+_SI_QUIET_WINDOW = 0.3  # 静止判定：连续这么久无新输出即认为登录流程收尾
+_SI_MAX_WAIT = 15.0  # 等安全时机的上限：超时仍在刷屏说明前台程序在跑，本轮放弃注入
+_SI_READY_TIMEOUT = 8.0  # 注入后等 633;SI;ready 回执的时长（判定钩子是否装上）
+_SI_READY_MARKER = "633;SI;ready"  # 片段末尾 printf 的回执，经输出流回到后端
+
+# 命令注入前的"上一轮收尾"等待：133;D 与提示符重绘同批到达，上一条命令的 D
+# 可能还在路上（实测连续注入时它比本次注入晚 30~100ms）。抢跑复位 + 注入会把
+# 那个迟到的 D 当成本条命令的结束信号，退出码整体滞后一条（true/false/exit 7
+# 实测拿到 0/0/1）。等输出静下来再复位即可，静不下来（前台程序在刷屏）到上限放行。
+_CMD_SETTLE_QUIET = 0.12
+_CMD_SETTLE_MAX = 1.0
+
 
 class _InjectEchoGuard:
     """吞噬 S1 集成片段经 pty echo 回流到输出流的回显（让注入在终端上不可见）。
@@ -323,6 +367,42 @@ class _InjectEchoGuard:
         return out
 
 
+class _OscEventScanner:
+    """从输出流增量提取 S1 的 OSC 133/633 事件（后端侧，与前端解析互不依赖）。
+
+    后端只关心 133;D;<退出码>——它由 precmd 在提示符画出之前发出，是"命令已结束"
+    的权威信号：有了它，命令捕获不必再靠提示符正则猜测 + 空闲超时兜底，退出码也
+    不必再补一次 `echo $?` 往返。其余事件（E/P/A）后端用不到，直接忽略。
+
+    事件可能被切在两个数据块之间，故保留未匹配完的尾巴；上限 _CARRY_MAX 防止
+    无 OSC 的大输出把缓冲撑大。
+    """
+
+    _CARRY_MAX = 256
+    _PATTERN = re.compile(r"\x1b\](?:133|633);([A-Z])(?:;([^\x07\x1b]*))?(?:\x07|\x1b\\)")
+
+    def __init__(self) -> None:
+        self._carry = ""
+        self.exit_code: int | None = None
+        self.finished = asyncio.Event()  # 收到 133;D 即置位
+
+    def begin_command(self) -> None:
+        """注入命令前复位：上一轮的结束信号与退出码作废"""
+        self.exit_code = None
+        self.finished.clear()
+
+    def feed(self, data: str) -> None:
+        text = f"{self._carry}{data}" if self._carry else data
+        pos = 0
+        for m in self._PATTERN.finditer(text):
+            pos = m.end()
+            if m.group(1) == "D":
+                arg = m.group(2) or ""
+                self.exit_code = int(arg) if arg.isdigit() else None
+                self.finished.set()
+        self._carry = text[pos:][-self._CARRY_MAX :]
+
+
 class SSHSession:
     """单个 SSH 会话（对应一个 SSH 连接 + 可选的交互式终端）"""
 
@@ -369,6 +449,17 @@ class SSHSession:
         self._si_active = False
         # 注入片段回显吞噬器（注入时激活，_broadcast_output 广播前过滤）
         self._si_echo_guard: _InjectEchoGuard | None = None
+        # 注入时机判定：最近一次输出时刻 + 是否已见过输出 + 是否有未回车的键盘输入
+        # （用户已敲半行命令时注入会把片段拼进他的命令行，本轮直接跳过）
+        self._si_out_ts = time.monotonic()
+        self._si_out_seen = False
+        self._si_input_pending = False
+        # 片段末尾会 printf 633;SI;ready，输出流里看到即证明钩子已装上
+        self._si_ready = False
+        self._si_ready_event = asyncio.Event()
+        # 后端侧 OSC 事件解析：命令结束信号（133;D）+ 该命令的退出码
+        self._si_events = _OscEventScanner()
+        self._si_last_exit: int | None = None
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
@@ -407,6 +498,10 @@ class SSHSession:
         self._password: str | None = None
         self._private_key: str | None = None
         self._passphrase: str | None = None
+        # ~/.ssh/config 解析结果缓存（None = 尚未解析）；切换主机时作废
+        self._ssh_cfg: ResolvedHost | None = None
+        # ProxyJump 隧道链（首跳→末跳）；终端连接与 SFTP 传输独立连接共用同一条链
+        self._jump_conns: list[asyncssh.SSHClientConnection] = []
         self._last_cols = 120
         self._last_rows = 40
         self._keepalive_task: asyncio.Task | None = None
@@ -510,16 +605,65 @@ class SSHSession:
     # 超时秒数从全局配置读取（config.json connect_timeout，1-300 默认 10）；
     # 认证阶段另有路由层外层总超时兜底
 
+    def _resolve_ssh_config(self) -> ResolvedHost:
+        """解析会话主机在 ~/.ssh/config 里的有效配置（结果缓存，切换主机时作废）
+
+        用项目自带的 UTF-8 最小解析器（ssh_config.py），不经过 asyncssh——后者按
+        系统默认编码（中文 Windows = GBK）打开该文件，UTF-8 中文注释会让所有连接
+        在建连前崩掉。解析器任何异常都退化为"无配置"，不影响按会话参数直连。
+        """
+        if self._ssh_cfg is not None:
+            return self._ssh_cfg
+        if not get_use_ssh_config():
+            self._ssh_cfg = ResolvedHost()
+            return self._ssh_cfg
+        cfg = resolve_host(self.host, _SSH_CONFIG_PATH)
+        if cfg.ignored_match_blocks:
+            print(f"[SSHSystem] ~/.ssh/config 含 Match 块，已整体忽略（仅支持 Host 块）: {self.host}")
+        if cfg.matched_patterns:
+            print(f"[SSHSystem] ~/.ssh/config 命中 Host {' '.join(cfg.matched_patterns)} -> {self.host}")
+        self._ssh_cfg = cfg
+        return cfg
+
+    def _effective_target(self) -> tuple[str, int, str]:
+        """实际连接目标 (host, port, username)：config 的 HostName/Port/User 覆盖会话里的值"""
+        cfg = self._resolve_ssh_config()
+        return cfg.hostname or self.host, cfg.port or self.port, cfg.user or self.username
+
+    def _client_keys(self, cfg: ResolvedHost) -> list:
+        """认证密钥：主机配置里显式选的私钥优先；否则用 config 的 IdentityFile
+
+        IdentityFile 只保留真实存在的文件（config 里常同时列 ed25519/rsa，缺一就
+        抛 FileNotFoundError 会连累整条连接）。一个都不存在时返回空列表——调用方
+        据此不传 client_keys，保留 asyncssh 的默认密钥/agent 行为。
+        """
+        if self._private_key:
+            try:
+                return [asyncssh.import_private_key(_load_private_key_text(self._private_key), self._passphrase)]
+            except (asyncssh.KeyImportError, asyncssh.KeyEncryptionError) as e:
+                raise ValueError(f"私钥导入失败（{self._private_key}）: {e}") from None
+        keys: list[str] = []
+        for path in cfg.identity_files:
+            if os.path.isfile(path):
+                keys.append(path)
+            else:
+                print(f"[SSHSystem] IdentityFile 不存在，已跳过: {path}")
+        return keys
+
     def _ssh_connect_kwargs(self) -> dict:
         """组装 asyncssh.connect 参数（终端连接与 SFTP 传输专用独立连接共用同一凭据）"""
+        cfg = self._resolve_ssh_config()
+        if cfg.has_proxy_command:
+            # 明确报错而非静默直连：直连会绕过用户配置的跳板，连到不该连的机器上
+            raise ValueError(f"~/.ssh/config 中 {self.host} 配置了 ProxyCommand，本工具暂不支持")
+        host, port, username = self._effective_target()
         kwargs: dict = {
-            "host": self.host,
-            "port": self.port,
-            "username": self.username,
+            "host": host,
+            "port": port,
+            "username": username,
             "known_hosts": None,  # 跳过主机密钥校验（本地工具简化处理）
-            # 不读 ~/.ssh/config：asyncssh 用系统默认编码（中文 Windows 为 GBK）解析该文件，
-            # UTF-8 中文注释会触发 UnicodeDecodeError 导致所有连接失败；本工具连接参数
-            # 全部显式指定，无需用户 ssh 配置。必须传空列表——传 () 会触发 asyncssh 默认回退
+            # asyncssh 自带的 config 解析必须显式关掉：传空列表（falsy 且非 () 哨兵，
+            # () 是"未指定"会回退默认 ~/.ssh/config 并按系统编码打开）；我们只用自解析结果
             "config": [],
             "keepalive_interval": 10,  # 每 10 秒发送 keepalive 包，防止空闲超时断开
             "keepalive_count_max": 2,  # 2 次 keepalive 无响应（约 20s）即判定连接断开，快速发现静默断线
@@ -527,13 +671,113 @@ class SSHSession:
         }
         if self._password:
             kwargs["password"] = self._password
-        if self._private_key:
-            try:
-                key = asyncssh.import_private_key(_load_private_key_text(self._private_key), self._passphrase)
-            except (asyncssh.KeyImportError, asyncssh.KeyEncryptionError) as e:
-                raise ValueError(f"私钥导入失败（{self._private_key}）: {e}") from None
-            kwargs["client_keys"] = [key]  # type: ignore[list-item]
+        client_keys = self._client_keys(cfg)
+        if client_keys:
+            kwargs["client_keys"] = client_keys
         return kwargs
+
+    def _jump_dead(self) -> bool:
+        """已建隧道链的末跳是否已断开（末跳断则整条链不可用，需重建）"""
+        if not self._jump_conns:
+            return True
+        conn = self._jump_conns[-1]
+        try:
+            t = getattr(conn, "_transport", None)
+            if t is not None:
+                return bool(t.is_closing())
+            return bool(conn.is_closing())  # type: ignore[attr-defined]
+        except Exception:
+            return True
+
+    async def _get_tunnel(self, spec: str) -> asyncssh.SSHClientConnection:
+        """取（或建）ProxyJump 隧道链，返回末跳连接供 asyncssh 的 tunnel= 使用
+
+        存活链直接复用：终端连接与 SFTP 传输独立连接共享同一条隧道，
+        不必每建一条连接就多打穿一次跳板机。
+        """
+        if not self._jump_dead():
+            return self._jump_conns[-1]
+        await self.close_jump()
+        return await self._open_jump_chain(spec)
+
+    async def _open_jump_chain(self, spec: str) -> asyncssh.SSHClientConnection:
+        """按 ProxyJump 建隧道链：逗号分隔多跳，逐跳以前一跳为 tunnel，返回末跳连接
+
+        跳板凭据只用 config 的 IdentityFile / asyncssh 默认密钥，不做密码交互——
+        跳板密码与目标密码通常是两套，而传输独立连接是静默重认证场景，没有地方
+        弹窗询问；认证不上就直接失败并把错误透出给用户。
+        """
+        hops = [h for h in (x.strip() for x in spec.split(",")) if h]
+        if not hops:
+            raise ValueError("ProxyJump 配置为空")
+        if len(hops) > _JUMP_MAX_HOPS:
+            raise ValueError(f"ProxyJump 跳数过多（{len(hops)} 跳，上限 {_JUMP_MAX_HOPS}）")
+        built: list[asyncssh.SSHClientConnection] = []
+        tunnel: asyncssh.SSHClientConnection | None = None
+        try:
+            for hop in hops:
+                user, host, port = _parse_jump_spec(hop)
+                cfg = resolve_host(host, _SSH_CONFIG_PATH) if get_use_ssh_config() else ResolvedHost()
+                if cfg.has_proxy_command:
+                    raise ValueError(f"跳板机 {hop} 配置了 ProxyCommand，本工具暂不支持")
+                keys = [p for p in cfg.identity_files if os.path.isfile(p)]
+                hop_kwargs: dict = {
+                    "host": cfg.hostname or host,
+                    "port": cfg.port or port,
+                    "username": cfg.user or user,
+                    "known_hosts": None,
+                    "config": [],
+                    "connect_timeout": get_connect_timeout(),
+                    "tunnel": tunnel,
+                }
+                if keys:
+                    hop_kwargs["client_keys"] = keys
+                conn = await asyncssh.connect(**hop_kwargs)
+                built.append(conn)
+                tunnel = conn
+            self._jump_conns = built
+            assert tunnel is not None
+            return tunnel
+        except BaseException:
+            # 半途失败：已建出的跳板连接必须真关掉，否则每次重试都多占一个 sshd 会话
+            for c in built:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            raise
+
+    async def close_jump(self) -> None:
+        """关闭 ProxyJump 隧道链（清理路径调用，失败静默）"""
+        conns, self._jump_conns = self._jump_conns, []
+        for c in conns:
+            try:
+                c.close()
+                await c.wait_closed()
+            except Exception:
+                pass
+
+    async def _connect_ssh(self) -> asyncssh.SSHClientConnection:
+        """建 SSH 连接（终端连接与 SFTP 传输独立连接共用）：需要时先建 ProxyJump 隧道
+
+        _patch_guard 覆盖整段：隧道跳与目标连接都是工具自身发起的，都不能被
+        劫持层（patch_asyncssh）重复注册为镜像会话。
+        """
+        cfg = self._resolve_ssh_config()
+        kwargs = self._ssh_connect_kwargs()
+        # 复用中的隧道链还承载着已建的终端连接，失败时不能顺手关掉（只回收本次新建的）
+        had_chain = not self._jump_dead()
+        _patch_guard.active = True
+        try:
+            if cfg.proxy_jump:
+                kwargs["tunnel"] = await self._get_tunnel(cfg.proxy_jump)
+            return await asyncssh.connect(**kwargs)
+        except BaseException:
+            if not had_chain:
+                await self.close_jump()
+            raise
+        finally:
+            _patch_guard.active = False
 
     async def connect(self, password: str | None = None, private_key: str | None = None, passphrase: str | None = None):
         """建立 SSH 连接（带 keepalive 防止空闲超时断开）"""
@@ -542,20 +786,16 @@ class SSHSession:
         self._private_key = private_key
         self._passphrase = passphrase
         # 先回收旧的 SFTP 通道/传输独立连接（首次连接为空操作；重连、切换主机也走这里，
-        # 目标与凭据可能已变，下次用到文件功能时懒建重建）
+        # 目标与凭据可能已变，下次用到文件功能时懒建重建），再回收旧隧道链
         await self.close_sftp()
+        await self.close_jump()
 
-        # 标记为工具内部连接：劫持层（patch_asyncssh）看到该标记直接放行，
-        # 不会把工具自身的连接重复注册为镜像会话
-        _patch_guard.active = True
-        try:
-            self.conn = await asyncssh.connect(**self._ssh_connect_kwargs())
-        finally:
-            _patch_guard.active = False
+        self.conn = await self._connect_ssh()
         self._connected = True
         self._reconnect_count = 0  # 重连成功后重置计数
         self.last_active = time.time()
-        print(f"[SSHSystem] 连接成功: {self.username}@{self.host}:{self.port} (keepalive=10s)")
+        host, port, username = self._effective_target()
+        print(f"[SSHSystem] 连接成功: {username}@{host}:{port} (keepalive=10s)")
 
     async def start_interactive_shell(self, cols: int = 120, rows: int = 40, term_type: str = "xterm-256color"):
         """启动交互式 pty shell（供网页终端使用）
@@ -661,6 +901,15 @@ class SSHSession:
         self._si_active = False
         # 换 shell 时上一轮回显吞噬未完成即弃用（新注入会重建；旧回显随旧进程消亡）
         self._si_echo_guard = None
+        # 注入时机状态复位：新 shell 的输出流与键盘输入都从零开始观察
+        self._si_out_ts = time.monotonic()
+        self._si_out_seen = False
+        self._si_input_pending = False
+        self._si_ready = False
+        self._si_ready_event.clear()
+        # 换 shell 后旧事件流作废：结束信号/退出码都重新起算
+        self._si_events = _OscEventScanner()
+        self._si_last_exit = None
         if self.is_local() or not get_shell_integration():
             return
         if self._si_task is not None and not self._si_task.done():
@@ -670,15 +919,53 @@ class SSHSession:
         except Exception:
             pass
 
+    def note_remote_input(self, data: str) -> None:
+        """记录远端键盘输入（WebSocket 输入路径调用），供注入时机判断。
+
+        片段必须整行写入：用户已敲了未回车的字符时注入会把两者拼成一条垃圾命令。
+        换行/Ctrl-C/Ctrl-U 之后命令行必定为空；退格只删一个字符、仍可能有残留，
+        保守按"有半行待提交"处理（最坏只是本轮跳过注入，绝不污染用户命令行）。
+        """
+        if not data:
+            return
+        if "\x08" in data or "\x7f" in data:
+            self._si_input_pending = True
+            return
+        self._si_input_pending = bool(re.split(r"[\r\n\x03\x15]", data)[-1])
+
+    async def _wait_shell_quiescent(self) -> bool:
+        """等一个安全的注入时机：输出流已静止且用户没有在敲字。返回是否可以注入。
+
+        必须"先见过输出再等静止"：shell 刚建立时 reader 可能还没把首屏提示符读出来，
+        此刻的"没有输出"不是静止而是尚未开始——过早注入会让片段回显与提示符重绘
+        交错（真机实测：注入 0.35s / 提示符 0.45s，回显吞噬器判定不匹配只能回放，
+        片段又露了出来）。
+
+        到上限仍没有安全时机时：始终静默（没有 reader 在收输出，注入无人观看也无害）
+        照旧注入；有输出在刷说明登录脚本或前台程序（vim/less/make）还在跑，此时注入
+        等于把片段喂给它——放弃本轮，历史/cd 跟踪各自有兜底通道。
+        """
+        deadline = time.monotonic() + _SI_MAX_WAIT
+        await asyncio.sleep(_SI_MIN_DELAY)
+        while time.monotonic() < deadline:
+            idle = time.monotonic() - self._si_out_ts
+            if not self._si_input_pending and self._si_out_seen and idle >= _SI_QUIET_WINDOW:
+                return True
+            await asyncio.sleep(0.05)
+        return not self._si_out_seen and not self._si_input_pending
+
     async def _inject_shell_integration(self) -> None:
-        """延迟注入集成片段：等远端 shell 提示符/登录脚本收尾（1.2s 经验值）。
+        """等远端 shell 收尾后注入集成片段（时机判定见 _wait_shell_quiescent）。
 
         片段以一行命令写入远端 pty；readline 把它回显到输出流的部分由
         _InjectEchoGuard 在广播前精确剔除（终端不可见）；片段自身另外不上报
         E 并从 bash 历史删除，用户 shell 完全无痕。
         """
         try:
-            await asyncio.sleep(1.2)
+            if not await self._wait_shell_quiescent():
+                reason = "用户有未提交的输入" if self._si_input_pending else "远端输出未静止（登录脚本/前台程序）"
+                print(f"[si] 无安全注入时机：{reason}，本轮跳过 session={self.session_id}")
+                return
             if self.is_local() or self._switching_local or self.process is None:
                 return
             stdin = getattr(self.process, "stdin", None)
@@ -688,6 +975,13 @@ class SSHSession:
             self._si_echo_guard = _InjectEchoGuard(SHELL_INTEGRATION_SNIPPET)
             stdin.write(SHELL_INTEGRATION_SNIPPET + "\n")
             print(f"[si] shell 集成片段已注入 session={self.session_id}")
+            # 片段末尾 printf 633;SI;ready，回流出现在输出流即证明钩子已装上。
+            # 超时只记录不重试：历史/cd 跟踪各有兜底通道，而重复注入在不支持的
+            # shell 上会留下 command not found 之类的可见报错
+            await asyncio.wait_for(self._si_ready_event.wait(), timeout=_SI_READY_TIMEOUT)
+            print(f"[si] shell 集成已生效（收到 {_SI_READY_MARKER}）session={self.session_id}")
+        except asyncio.TimeoutError:
+            print(f"[si] {_SI_READY_TIMEOUT:.0f}s 未收到 ready 回执，集成可能未生效 session={self.session_id}")
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -703,6 +997,14 @@ class SSHSession:
 
     async def _broadcast_output(self, data: str):
         """广播输出给所有监听器，并维护缓冲区（用于状态检测）和日志持久化"""
+        # S1 事件解析（原始数据，先于回显吞噬/清洗）：133;D 是命令结束的权威信号
+        self._si_events.feed(data)
+        # 注入时机观测：记录最近输出时刻（等静止）；片段末尾的 ready 回执在此确认
+        self._si_out_ts = time.monotonic()
+        self._si_out_seen = True
+        if not self._si_ready and _SI_READY_MARKER in data:
+            self._si_ready = True
+            self._si_ready_event.set()
         # S1 注入回显吞噬：注入行经 pty echo 回流的部分在此被精确剔除，
         # 终端、日志、回显解析（cd 跟踪观察通道）均不可见
         guard = self._si_echo_guard
@@ -1392,6 +1694,7 @@ class SSHSession:
         self.host = host
         self.port = port
         self.username = username
+        self._ssh_cfg = None  # 目标变了：~/.ssh/config 解析结果作废（connect 里会重新解析）
         try:
             # 建立 SSH 连接（失败抛异常，本地 shell 保留）
             await self.connect(
@@ -1560,15 +1863,49 @@ class SSHSession:
         """检查单行是否是提示符行（逻辑在 prompt_detect.is_prompt_line）"""
         return prompt_detect.is_prompt_line(line)
 
+    @staticmethod
+    def _drain_listener(listener: asyncio.Queue) -> list[str]:
+        """排空监听器队列中已到达但还没取走的输出块"""
+        out: list[str] = []
+        while not listener.empty():
+            try:
+                out.append(listener.get_nowait())
+            except Exception:
+                break
+        return out
+
+    async def _wait_output_settled(self) -> None:
+        """等输出流静止（连续 _CMD_SETTLE_QUIET 秒没有新数据），到上限就放行
+
+        目的是让上一条命令的提示符周期（含 133;D）彻底落地，见 _CMD_SETTLE_QUIET 注释。
+        """
+        deadline = time.monotonic() + _CMD_SETTLE_MAX
+        while True:
+            idle = time.monotonic() - self._si_out_ts
+            if idle >= _CMD_SETTLE_QUIET or time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(min(_CMD_SETTLE_QUIET - idle, 0.05))
+
     async def _inject_and_wait(self, command: str, idle_timeout: float = 0.5, total_timeout: int = 15) -> str:
         """
-        注入命令到交互式终端，等待提示符出现，返回清理后的输出
+        注入命令到交互式终端，等待命令结束，返回清理后的输出
         - 使用独立的输出监听器捕获新输出，不受历史输出和缓冲区清理影响
-        - 多提示符检测：自动识别 shell/Python/MySQL/Redis 等提示符
-        - 空闲超时兜底：连续 idle_timeout 秒无新输出即认为完成
-        - 通用底层方法，供 inject_and_capture 和获取退出码复用
+        - 注入前先等输出静止片刻（_wait_output_settled）：上一条命令的 133;D 可能
+          还在路上，抢跑会把它的退出码当成本条命令的
+        - S1 集成已生效（_si_ready）时走权威路径：等 precmd 发出的 133;D 结束信号，
+          退出码记在 self._si_last_exit，inject_and_capture 据此省掉一次 echo $? 往返；
+          静默命令（cd / sleep N）也不再固定空等 1.5 秒
+        - 集成未生效时回退旧路径：多提示符检测（shell/Python/MySQL/Redis）+ 空闲超时
+        - 前台程序（vim/pager）不产生 133;D，两条路径都靠空闲超时收尾
         - 不自动启动 shell，调用前需确保 shell 已启动
         """
+        use_events = self._si_ready
+        # 先等上一轮提示符周期收尾：迟到的 133;D 必须在复位之前到达，否则会被
+        # 当成本条命令的结束信号（退出码滞后一条）
+        await self._wait_output_settled()
+        self._si_last_exit = None
+        if use_events:
+            self._si_events.begin_command()
         # 使用独立的输出监听器捕获新输出（不受历史输出影响）
         listener = self.add_output_listener()
         captured_parts = []
@@ -1581,38 +1918,44 @@ class SSHSession:
             self.process.stdin.write(f"{command}\n")
             self.last_active = time.time()
 
-            # 等待命令完成：多提示符检测 + 空闲超时兜底
             start_time = time.time()
-            last_output_time = time.time()
+            last_output_time = start_time
             has_output = False
 
             while time.time() - start_time < total_timeout:
                 try:
                     # 非阻塞读取队列中的新输出
                     data = await asyncio.wait_for(listener.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    data = ""
+                if data:
                     captured_parts.append(data)
                     has_output = True
                     last_output_time = time.time()
+                    if not use_events:
+                        # 增量清洗：只清洗新增的 data 块，与之前结果拼接
+                        # 原代码每次都 ''.join(captured_parts)[-2000:] + 全量 _clean_ansi
+                        cleaned_recent += self._clean_ansi(data)
+                        if len(cleaned_recent) > 2000:
+                            cleaned_recent = cleaned_recent[-2000:]
 
-                    # 增量清洗：只清洗新增的 data 块，与之前结果拼接
-                    # 原代码每次都 ''.join(captured_parts)[-2000:] + 全量 _clean_ansi
-                    cleaned_recent += self._clean_ansi(data)
-                    if len(cleaned_recent) > 2000:
-                        cleaned_recent = cleaned_recent[-2000:]
-                    if self._match_any_prompt(cleaned_recent):
-                        await asyncio.sleep(0.15)  # 确保提示符后内容写入
-                        # 读取队列中剩余的输出
-                        while not listener.empty():
-                            try:
-                                extra = listener.get_nowait()
-                                captured_parts.append(extra)
-                            except Exception:
-                                break
+                if use_events:
+                    if self._si_events.finished.is_set():
+                        # 133;D 到达：命令已结束、退出码权威可用。其后紧跟提示符重绘，
+                        # 稍等一下再排空队列，别把重绘字节切在捕获之外
+                        self._si_last_exit = self._si_events.exit_code
+                        await asyncio.sleep(0.05)
+                        captured_parts.extend(self._drain_listener(listener))
                         break
-                except asyncio.TimeoutError:
-                    # 0.1 秒内没有新输出，检查是否空闲超时
-                    pass
+                    if has_output and (time.time() - last_output_time > idle_timeout):
+                        break  # 输出停住又没有 D：前台程序在跑，沿用空闲兜底
+                    continue  # 尚无输出：继续等 D（cd / sleep 这类静默命令）
 
+                # 非集成路径：多提示符检测 + 空闲超时兜底
+                if self._match_any_prompt(cleaned_recent):
+                    await asyncio.sleep(0.15)  # 确保提示符后内容写入
+                    captured_parts.extend(self._drain_listener(listener))
+                    break
                 # 空闲超时：连续无新输出即认为完成（即使没有匹配到提示符）
                 if has_output and (time.time() - last_output_time > idle_timeout):
                     break
@@ -1648,8 +1991,9 @@ class SSHSession:
         注入命令到交互式终端，同时捕获输出返回
         - 命令和输出实时显示在 Web 终端中（通过广播机制）
         - 不发送任何标记命令，不干扰任何交互程序（shell/Python/MySQL/vim）
-        - 完成检测：优先匹配 shell 提示符（快速准确），超时后回退到空闲超时
-        - 自动获取退出码：shell 环境中执行完毕后自动执行 echo $? 获取真实退出码
+        - 完成检测：S1 集成生效时等 133;D 结束信号（权威），否则匹配 shell 提示符，
+          再否则回退到空闲超时
+        - 自动获取退出码：集成生效时直接来自 133;D；否则在 shell 环境中补一次 echo $?
         - 适用于 shell 环境中连续执行命令；非 shell 环境退出码返回 None
         返回 (退出码, stdout, stderr)，退出码为 None 表示无法获取（非 shell 环境）
         """
@@ -1664,9 +2008,10 @@ class SSHSession:
             # 1. 执行命令并捕获输出
             output = await self._inject_and_wait(command, idle_timeout=idle_timeout, total_timeout=total_timeout)
 
-            # 2. 自动获取退出码（仅在 shell 环境中）
-            exit_code = None
-            if capture_exit_code:
+            # 2. 退出码：S1 集成生效时已随 133;D 结束信号带回（_inject_and_wait 存进
+            # _si_last_exit），省掉一次 echo $? 往返；未生效才回退到探针路径
+            exit_code = self._si_last_exit
+            if exit_code is None and capture_exit_code:
                 try:
                     state = self.get_terminal_state()
                     # 仅在普通 shell 环境中获取退出码（Python/MySQL/vim 等不适用）
@@ -1848,14 +2193,13 @@ class SSHSession:
 
     async def _open_sftp_client(self):
         """建立 SFTP 客户端：优先独立传输连接，失败回退终端连接上的共享信道"""
-        # 无凭据（agent/免密登录的会话）时无法自动重认证，直接走共享信道
-        if self._password or self._private_key:
+        # 无凭据（agent/免密登录的会话）时无法自动重认证，直接走共享信道。
+        # ~/.ssh/config 里的 IdentityFile 也算凭据：密钥文件在磁盘上，可静默重认证
+        cfg = self._resolve_ssh_config()
+        if self._password or self._private_key or cfg.identity_files:
             try:
-                _patch_guard.active = True  # 同 connect()：防被劫持层误注册为镜像会话
-                try:
-                    self._sftp_conn = await asyncssh.connect(**self._ssh_connect_kwargs())
-                finally:
-                    _patch_guard.active = False
+                # _connect_ssh 内部已置 _patch_guard：防被劫持层误注册为镜像会话
+                self._sftp_conn = await self._connect_ssh()
                 return await self._sftp_conn.start_sftp_client()
             except Exception as e:
                 # 建连或开 SFTP 子系统失败：已建出的半程连接要真关掉，不能只丢引用
@@ -1948,16 +2292,23 @@ class SSHSession:
                 await f.write(str(content))
         return True
 
-    async def write_file_stream(self, path: str, chunk_iter) -> int:
+    async def write_file_stream(self, path: str, chunk_iter, append: bool = False) -> int:
         """流式写入远程文件：逐块经 SFTP 写入，内存占用恒定。
         大文件上传专用——原实现将整个文件读入内存后一次性 write，
-        几百 MB 的文件会导致内存暴涨、事件循环阻塞甚至上传失败。"""
+        几百 MB 的文件会导致内存暴涨、事件循环阻塞甚至上传失败。
+
+        append=True 用于断点续传：以 FXF_APPEND 打开（不截断已有内容），
+        服务端把每次 write 都落到文件末尾，正好接上已传的半截。
+        模式必须带 "b"——asyncssh 的 "a" 是文本模式（encoding 非 None），
+        写 bytes 会在 encode 上炸（实机验证踩过）。
+        返回本次调用写入的字节数（不含续传前已有的部分）。
+        """
         sftp = await self.get_sftp()
         total = 0
         # 整个传输期间通道视为活动中，防止被空闲自动关闭
         self._sftp_inuse += 1
         try:
-            async with sftp.open(path, "wb") as f:
+            async with sftp.open(path, "ab" if append else "wb") as f:
                 async for chunk in chunk_iter:
                     if not chunk:
                         continue
@@ -1968,12 +2319,17 @@ class SSHSession:
             self._sftp_last_used = time.time()
         return total
 
-    async def read_file_stream(self, path: str, chunk_size: int = SFTP_CHUNK_SIZE):
-        """流式读取远程文件（async 生成器），大文件下载不再整块进内存"""
+    async def read_file_stream(self, path: str, chunk_size: int = SFTP_CHUNK_SIZE, offset: int = 0):
+        """流式读取远程文件（async 生成器），大文件下载不再整块进内存
+
+        offset>0 用于断点续传：从该字节位置开始读（本机 .part 已有 offset 字节）。
+        """
         sftp = await self.get_sftp()
         self._sftp_inuse += 1
         try:
             async with sftp.open(path, "rb") as f:
+                if offset > 0:
+                    await f.seek(offset)
                 while True:
                     chunk = await f.read(chunk_size)
                     if not chunk:
@@ -1993,6 +2349,52 @@ class SSHSession:
             return stat.size or -1
         except Exception:
             return -1
+
+    async def stat_info(self, path: str) -> tuple[int, int]:
+        """返回 (大小, 修改时间)：断点续传用源文件指纹，取不到则 (-1, 0)（等于放弃续传）"""
+        try:
+            sftp = await self.get_sftp()
+            stat = await sftp.stat(path)
+            return (stat.size if stat.size is not None else -1, stat.mtime or 0)
+        except Exception:
+            return (-1, 0)
+
+    async def is_dir(self, path: str) -> bool:
+        """远端路径是否为目录（传输入口据此决定单文件还是递归），取不到属性一律当非目录"""
+        try:
+            sftp = await self.get_sftp()
+            stat = await sftp.stat(path)
+            return stat.type == 2  # SFTP_TYPE_DIRECTORY
+        except Exception:
+            return False
+
+    async def make_directory(self, path: str) -> None:
+        """建远端目录（已存在视为成功）：目录递归上传时逐层镜像本机结构用"""
+        sftp = await self.get_sftp()
+        try:
+            await sftp.mkdir(path)
+        except Exception as e:
+            if not await self.is_dir(path):
+                raise RuntimeError(f"创建远端目录失败: {path} ({e})") from None
+
+    async def rename_file(self, old: str, new: str) -> None:
+        """远程改名（上传的 .part 临时文件转正用）
+
+        优先 posix_rename（OpenSSH 扩展，目标已存在也做原子替换）；服务端不支持
+        该扩展时退回"先删目标再普通 rename"——SFTPv3 的 rename 遇已存在目标会
+        直接失败，覆盖上传是常态，必须先腾位置。
+        """
+        sftp = await self.get_sftp()
+        try:
+            await sftp.posix_rename(old, new)
+            return
+        except Exception as e:
+            print(f"[SFTP] posix_rename 不可用，回退删除+改名: {e}")
+        try:
+            await sftp.remove(new)
+        except Exception:
+            pass  # 目标本来就不存在
+        await sftp.rename(old, new)
 
     async def delete_file(self, path: str) -> bool:
         """删除文件或目录"""
@@ -2215,6 +2617,7 @@ class SSHSession:
         self.stop_output_reader()
         self.stop_local_reader()
         await self.close_sftp()
+        await self.close_jump()  # ProxyJump 隧道链：目标连接都关了，跳板连接不能留着占 sshd 会话
         if self._local_proc is not None:
             try:
                 await asyncio.to_thread(self._local_proc.terminate, True)  # 含 sleep，勿卡事件循环

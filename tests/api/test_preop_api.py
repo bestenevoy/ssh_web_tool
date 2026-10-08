@@ -18,11 +18,24 @@ def _make_fake_session():
             self.written.append((path, content))
             return True
 
-        async def write_file_stream(self, path, chunk_iter):
+        async def write_file_stream(self, path, chunk_iter, append=False):
             # 流式上传桩：聚合分块后按原 write_file 语义记录（内容逐字节无损断言）
             data = b"".join([chunk async for chunk in chunk_iter])
             self.written.append((path, data))
             return len(data)
+
+        async def stat_file(self, path):
+            return -1  # 远端没有 .part（不续传）
+
+        async def read_file(self, path, max_size=10 * 1024 * 1024):
+            raise RuntimeError("no such file")  # 远端没有续传指纹
+
+        async def rename_file(self, old, new):
+            # 上传走 .part 再改名转正：桩里把记录的路径一并改名，断言仍按最终路径比对
+            self.written = [(new if p == old else p, d) for p, d in self.written]
+
+        async def delete_file(self, path):
+            return True
 
     return FakeSession()
 

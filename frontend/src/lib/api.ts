@@ -32,6 +32,8 @@ export interface SftpTransfer {
   total: number // -1 表示未知
   done: number
   status: 'running' | 'done' | 'failed' | 'canceled'
+  // 本次是断点续传（接着上次失败/取消留下的 .part 传），进度不从 0 开始
+  resumed: boolean
   error: string
   started_at: number
   finished_at: number
@@ -281,12 +283,15 @@ export const api = {
     }),
   sftpDelete: (session_id: string, path: string) =>
     request(`/api/sftp/${session_id}/delete`, { method: 'POST', body: JSON.stringify({ path }) }),
-  // 远程文件下载到本机目录（服务器端流式下载，SFTP 双窗工作台用）
+  // 远程文件/目录下载到本机目录（服务器端流式下载，SFTP 双窗工作台用；目录递归镜像）
   sftpDownloadTo: (session_id: string, remote_path: string, local_dir: string) =>
-    request<{ status: string; path: string; local: string; size: number }>(`/api/sftp/${session_id}/download-to`, {
-      method: 'POST',
-      body: JSON.stringify({ remote_path, local_dir }),
-    }),
+    request<{ status: string; path: string; local: string; size: number; files?: number }>(
+      `/api/sftp/${session_id}/download-to`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ remote_path, local_dir }),
+      }
+    ),
   sftpDownloadUrl: (session_id: string, path: string) =>
     `/api/sftp/${session_id}/download?path=${encodeURIComponent(path)}`,
   // 传输任务列表（活动在前）与取消
@@ -328,9 +333,9 @@ export const api = {
       xhr.send(fd)
     }),
 
-  // 预操作上传：后端直读本机源文件（绝对路径或 scripts 目录文件）后 SFTP 上传
+  // 预操作上传：后端直读本机源文件/目录（绝对路径或 scripts 目录文件）后 SFTP 上传；目录递归镜像
   preopUpload: (session_id: string, source: string, source_type: string, remote: string) =>
-    request<{ status: string; source: string; path: string; size: number }>('/api/preop/upload', {
+    request<{ status: string; source: string; path: string; size: number; files?: number }>('/api/preop/upload', {
       method: 'POST',
       body: JSON.stringify({ session_id, source, source_type, remote }),
     }),

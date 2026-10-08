@@ -254,6 +254,8 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
                             await session._auto_switch_to_local("SSH 连接已断开")
                             raise RuntimeError("SSH 连接已断开，已切换到本机终端")
                         stdin.write(data)
+                        # 告知会话"用户正在敲字"：S1 集成片段注入要避开未提交的半行命令
+                        session.note_remote_input(data)
                         session.last_active = time.time()
                 except Exception as e:
                     # 不再自动重连：重连会中断正在运行的全屏程序（如 vi/vim），

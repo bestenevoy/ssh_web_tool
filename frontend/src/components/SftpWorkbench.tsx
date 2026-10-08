@@ -135,7 +135,7 @@ export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: P
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // 本地文件 → 远程当前目录（后端直读本机路径，无需经过浏览器）
+  // 本地文件/目录 → 远程当前目录（后端直读本机路径，无需经过浏览器；目录递归镜像）
   const transferLocalToRemote = async (localPath: string, name: string, destDir?: string) => {
     if (busy) return
     setBusy(true)
@@ -143,7 +143,8 @@ export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: P
       const dest = joinPath(destDir || remote.path, name)
       setStatus({ text: `上传中 ${name} → ${dest}`, kind: 'info' })
       const r = await api.preopUpload(sessionId, localPath, 'path', dest)
-      setStatus({ text: `已上传 ${name} (${fmtSize(r.size)}) → ${dest}`, kind: 'info' })
+      const count = r.files ? `（${r.files} 个文件）` : ''
+      setStatus({ text: `已上传 ${name}${count} (${fmtSize(r.size)}) → ${dest}`, kind: 'info' })
       loadRemote(remote.path)
     } catch (e) {
       setStatus({ text: '上传失败: ' + (e as Error).message, kind: 'error' })
@@ -152,7 +153,7 @@ export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: P
     }
   }
 
-  // 远程文件 → 本地当前目录（服务器端流式下载，浏览器只发指令）
+  // 远程文件/目录 → 本地当前目录（服务器端流式下载，浏览器只发指令；目录递归镜像）
   const transferRemoteToLocal = async (remotePath: string, name: string, localDir?: string) => {
     if (busy) return
     setBusy(true)
@@ -160,7 +161,8 @@ export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: P
       const destDir = localDir || local.path
       setStatus({ text: `下载中 ${name} → ${destDir}`, kind: 'info' })
       const r = await api.sftpDownloadTo(sessionId, remotePath, destDir)
-      setStatus({ text: `已下载 ${name} (${fmtSize(r.size)}) → ${r.local}`, kind: 'info' })
+      const count = r.files ? `（${r.files} 个文件）` : ''
+      setStatus({ text: `已下载 ${name}${count} (${fmtSize(r.size)}) → ${r.local}`, kind: 'info' })
       loadLocal(local.path)
     } catch (e) {
       setStatus({ text: '下载失败: ' + (e as Error).message, kind: 'error' })
@@ -197,10 +199,7 @@ export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: P
       return
     }
     if (item.side === target) return // 同侧拖放无效
-    if (item.isDir) {
-      setStatus({ text: '暂不支持目录传输，请选择文件', kind: 'error' })
-      return
-    }
+    // 目录也可整棵传输（后端递归镜像目录结构）；进度看传输列表里的聚合任务
     // 拖到文件夹行上 → 传输到该文件夹；否则传输到当前目录
     if (target === 'remote') transferLocalToRemote(item.path, item.name, folderPath || remote.path)
     else transferRemoteToLocal(item.path, item.name, folderPath || local.path)
@@ -313,7 +312,9 @@ export function SftpWorkbench({ sessionId, initialRemote, onNotify, onClose }: P
                 setCtx({ x: e.clientX, y: e.clientY, path: r.path, name: r.name, isDir: r.isDir })
               }}
               onDoubleClick={() => handleActivate(side, r)}
-              title={r.isDir ? '双击进入目录 · 拖拽到此处可传输到该文件夹' : '双击传输到对侧 · 或拖拽到对侧窗格/文件夹'}
+              title={
+                r.isDir ? '双击进入目录 · 拖拽到对侧整目录传输 · 拖到此处可传输到该文件夹' : '双击传输到对侧 · 或拖拽到对侧窗格/文件夹'
+              }
             >
               <span className="sftp-wb-icon">{r.isDir ? '📁' : '📄'}</span>
               <span className="sftp-wb-name">{r.name}</span>

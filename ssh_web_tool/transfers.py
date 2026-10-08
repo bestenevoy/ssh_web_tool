@@ -37,6 +37,7 @@ class TransferTask:
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
     canceled: bool = False
+    resumed: bool = False  # 本次是断点续传（从上次留下的 .part 接着传）
 
     def add_done(self, n: int) -> None:
         """上报已传字节；若已请求取消则抛 TransferCanceled 让调用方中断循环。"""
@@ -61,6 +62,7 @@ class TransferTask:
             "total": self.total,
             "done": self.done,
             "status": self.status,
+            "resumed": self.resumed,
             "error": self.error,
             "started_at": self.started_at,
             "finished_at": self.finished_at,

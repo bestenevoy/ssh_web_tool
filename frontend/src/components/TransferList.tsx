@@ -96,6 +96,7 @@ export function TransferList({ sessionId }: Props) {
             </div>
           )}
           <div className="tl-meta">
+            {t.resumed ? '续传 · ' : ''}
             {fmtBytes(t.done)}
             {t.total > 0 ? ` / ${fmtBytes(t.total)}` : ''}
             {t.status === 'running' && pct !== null ? ` · ${pct}%` : ''}
