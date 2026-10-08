@@ -24,7 +24,7 @@ API 文档（Swagger UI）：**http://127.0.0.1:8765/docs**
 | GET | `/api/sessions/{id}/logs` | 获取终端历史日志（分页，含未 flush 缓冲） |
 | GET | `/api/logs/{session_id}` | 按日志文件读取完整历史（会话删除后仍可读，重连回放用） |
 | GET | `/api/sessions/{id}/record` | 查询会话日志记录开关 |
-| POST | `/api/sessions/{id}/record` | 开启/暂停日志记录（默认不记录；开启可指定目录） |
+| POST | `/api/sessions/{id}/record` | 开启/暂停日志记录（远程会话连上后默认已自动开启；开启可指定目录） |
 
 ## 终端持久化
 

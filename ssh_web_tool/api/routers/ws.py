@@ -75,6 +75,10 @@ async def websocket_ssh(websocket: WebSocket, session_id: str):
         await websocket.close()
         return
 
+    # 终端挂载即视为"用户在看的会话"：远程 shell 已在跑的场景（页面重开恢复/重连后
+    # 新连接）此刻按设置自动开启会话日志；shell 尚未启动的由 start_interactive_shell 触发
+    session.note_ui_attach()
+
     # 先注册输出监听器再启动 reader：banner/MOTD/提示符等首包输出不丢失
     # 本地终端场景尤其关键：WinPTY read() 阻塞等待，初始提示符只输出一次，
     # 若 listener 未注册就启动 reader，提示符被广播到空 listener 列表后丢失，

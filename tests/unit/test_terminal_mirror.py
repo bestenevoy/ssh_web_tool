@@ -289,7 +289,11 @@ def test_session_log_long_output_scrolled(tmp_path):
 
 
 def test_session_log_disabled_not_recorded(tmp_path):
-    """默认不记录：不创建日志文件；开启记录后连接以来的早期输出（banner 语义）也落盘"""
+    """默认不记录：不创建日志文件；开启记录后连接以来的早期输出（banner 语义）也落盘
+
+    （"默认不记录"指构造/未挂载终端阶段；远程 shell 建立后按设置自动开启见
+    test_auto_log_record.py，那条路径同样靠这里的近期环回放保住 banner。）
+    """
     s = _mk()
     s._feed_log("before enable\r\n")
     s._flush_log_now()

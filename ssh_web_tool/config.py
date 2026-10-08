@@ -130,6 +130,7 @@ UI_SETTINGS_DEFAULTS: dict = {
     "editor_recent_paths": [],  # 编辑器最近打开的文件路径（新路径插到最前，最多 20 条）
     "log_record_dir": "",  # 终端日志默认保存目录（空 = 程序默认 logs 目录）
     "log_record_no_ask": False,  # 开启记录时不再询问保存目录（直接用默认目录）
+    "log_record_default_on": True,  # 远程终端会话连上后自动开始记录日志（写默认目录，不弹询问）
 }
 
 # ui_settings 各键的合法值校验器（返回规范化后的值；非法返回 None 表示回退默认）
@@ -220,6 +221,8 @@ def _validate_ui_setting(key: str, value) -> object | None:
         return value.strip()[:500]
     if key == "log_record_no_ask":
         return value if isinstance(value, bool) else None
+    if key == "log_record_default_on":
+        return value if isinstance(value, bool) else None
     return None  # 未知键一律忽略
 
 
@@ -307,6 +310,19 @@ def get_use_ssh_config(cfg: dict | None = None) -> bool:
     c = cfg if cfg is not None else load_config()
     v = (c or {}).get("use_ssh_config", True)
     return v if isinstance(v, bool) else True
+
+
+def get_log_record_default(cfg: dict | None = None) -> tuple[bool, str]:
+    """远程终端会话连上后是否自动开始记录日志，以及自动记录落到哪个目录。
+
+    返回 (自动开启, 目录)。目录取 ui_settings.log_record_dir，空串表示用程序内置
+    logs 目录（SSHSession.LOG_DIR）。自动记录是"写而不问"：连上直接落盘、不弹目录
+    选择（弹窗只属于右键手动开启那条路径）；设置里关掉此开关即回到旧的按需记录模式。
+    """
+    ui = get_ui_settings(cfg)
+    enabled = ui.get("log_record_default_on", True)
+    target = ui.get("log_record_dir", "") or ""
+    return (bool(enabled), str(target))
 
 
 def get_connect_timeout(cfg: dict | None = None) -> float:

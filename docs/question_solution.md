@@ -42,6 +42,7 @@
 
 ### 6. 历史会话中的需求（摘要）
 - **日志记录体验**：默认关闭日志记录；开启前弹目录选择（`DirPickerModal`）；设置页新增「日志记录」分区（默认目录 + 「不再询问」）。
+  - 2026-10-08 口径更新：改为**远程终端会话连上后自动开始记录**（`ui_settings.log_record_default_on`，默认开；写在默认目录，不弹询问）。仍不自动记录的三类：本机终端、脚本 API 单独建的会话、外部镜像会话；手动右键开关与「不再询问」逻辑不变。触发点只有两处：`SSHSession.start_interactive_shell`（新建/重连/恢复/本机切远程的远程 shell 建立处）与终端 WebSocket 挂载时的 `note_ui_attach`（shell 已在跑的场景）。
 - **日志与终端显示一致**：用 pyte 终端镜像（`terminal_mirror.py`）替代正则清洗路径，保证日志内容与终端渲染完全一致（进度条终态、退格擦除、排除 alt-screen）。
 - **历史命令/提示符解析**：`EchoParser` 支持多种 shell 提示符（zsh `%`、oh-my-zsh `➜`、starship `❯` 等）；修复 `root@host:~#` 误匹配导致空回车后输出误记。
 - **快捷键**：Ctrl+B 切换主机列表（终端焦点内经 `customKeyEventHandler` 拦截 + 全局兜底）；设置页新增「快捷键」说明分区。

@@ -489,7 +489,8 @@ async def api_get_session_record(session_id: str):
 
 @router.post("/sessions/{session_id}/record")
 async def api_set_session_record(session_id: str, req: SessionRecordRequest):
-    """开启/暂停当前会话日志记录（默认不记录；开启时可指定保存目录，省略用默认目录）"""
+    """开启/暂停当前会话日志记录（远程会话连上后默认已自动开启，这里可手动暂停/恢复；
+    开启时可指定保存目录，省略用默认目录）"""
     session_manager = get_session_manager()
     session = session_manager.get_session(session_id)
     if not session:

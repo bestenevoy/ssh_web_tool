@@ -216,7 +216,11 @@ def test_cleanup_old_logs_removes_stale_only(tmp_path):
 
 def test_default_no_recording_until_enabled(tmp_path):
     """默认不记录：建会话不产生日志文件；显式开启后开始落盘，
-    且开启前的输出（连接信息 banner 语义）一并进入日志"""
+    且开启前的输出（连接信息 banner 语义）一并进入日志
+
+    （此处只验"构造阶段"：会话还没被终端 WebSocket 挂载、远程 shell 也没建立，
+    所以仍不落盘。连上远端后按设置自动开启那条路径见 test_auto_log_record.py。）
+    """
     s = _mk_session()
     assert not s.is_logging()
     s._feed_log("banner info\r\n")

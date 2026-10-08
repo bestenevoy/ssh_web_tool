@@ -140,7 +140,7 @@ class SessionLog:
         self.flush_delay = flush_delay  # 秒：无新输出多久后 flush
         self.flush_max = flush_max  # 字符：缓冲超过该阈值立即 flush
         self.buffer = ""  # 聚合缓冲（未落盘内容的 pending 指示与 flush 触发）
-        self.enabled = False  # 记录开关：默认不记录，右键「开始记录」才开启
+        self.enabled = False  # 记录开关：构造时不落盘，由自动开启（设置默认开）或右键手动开启
         self._ever_enabled = False  # 是否开启过记录（区分首次开启与暂停后恢复）
         self._flush_task: asyncio.Task | None = None
         # 终端镜像：输出流回放到虚拟屏幕，flush 时提取"新显示"的行。
@@ -150,6 +150,11 @@ class SessionLog:
         self._mirror = TerminalMirror()
         self._ring: collections.deque[str] = collections.deque()
         self._ring_size = 0  # 环内总字符数（O(1) 淘汰判断）
+
+    @property
+    def ever_enabled(self) -> bool:
+        """本会话是否开启过记录（区分"从未开启"与"用户手动暂停过"）"""
+        return self._ever_enabled
 
     def enable_with(
         self, log_file: str, log_dir: str, cache: dict[str, logging.Logger], meta: list[str] | None = None

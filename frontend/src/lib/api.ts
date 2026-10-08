@@ -17,6 +17,8 @@ export interface UiSettingsPayload {
   editor_recent_paths: string[]
   log_record_dir: string
   log_record_no_ask: boolean
+  // 远程终端会话连上后自动开始记录日志（默认开）
+  log_record_default_on: boolean
 }
 
 // SFTP 传输任务（后端 transfer_registry；前端 1s 轮询渲染传输列表）

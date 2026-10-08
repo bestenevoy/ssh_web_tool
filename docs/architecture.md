@@ -38,7 +38,7 @@
 
 1. **连接状态后端统一维护**：WebSocket 断开不关闭 SSH 会话，页面重开可恢复（restore 有抢占保护，多 tab/多页面场景已修）。
 2. **本机/远端同一终端互切**：任何 SSH 断开（exit 或传输层掉线）自动切回本机 shell（WinPTY 跑 cmd/PowerShell/pwsh），终端始终可用；重连复用同一会话与同一份终端记录。本机终端输入 `ssh user:pass@host[:port]` 由服务端拦截直连远端。
-3. **会话日志 = 终端镜像转录**：`SessionLog` + `TerminalMirror`（pyte 虚拟屏幕）保证日志内容与终端显示构造性一致（进度条只留终态、退格/`\r` 覆盖收敛、alt-screen 不混入）。默认不记录；未开启记录时输出只存有界近期环（256KB），首次开启回放保连接 banner；文件名 `{host}_{start}_running_{session_id}.log`，关闭时补全结束时间。
+3. **会话日志 = 终端镜像转录**：`SessionLog` + `TerminalMirror`（pyte 虚拟屏幕）保证日志内容与终端显示构造性一致（进度条只留终态、退格/`\r` 覆盖收敛、alt-screen 不混入）。构造阶段不落盘（只预生成路径）；网页终端挂上（WebSocket）且远程 shell 建立后按 `ui_settings.log_record_default_on`（默认开）自动开启记录，写 `log_record_dir`（空 = `~/.ai4one/sshtool/logs`），不弹目录选择——本机终端、脚本 API 单独建的会话、外部镜像会话都不自动记录，右键「开始记录日志」仍可手动开关。未开启记录时输出只存有界近期环（256KB），首次开启回放保连接 banner；文件名 `{host}_{start}_running_{session_id}.log`，关闭时补全结束时间。
 4. **事件循环阻塞纪律**：所有路由均为 `async def`，因此任何同步阻塞调用必须 `asyncio.to_thread` 移出循环——已知四处：Ctrl+C 控制台注入（Win32 SendMessageTimeout，进程级 AttachConsole 用全局锁串行）、本机 PTY terminate（内含 time.sleep）、本机 PTY 读取轮询、编辑器文件全量读写。
 5. **输出广播有界**：`OutputBus` 每监听器约 100 块（≈400KB）队列，慢消费者丢最旧保最新，前端断流不拖垮内存。
 6. **SFTP 传输任务化**：上传/下载在 `transfers.py` 注册表登记，支持进度轮询（`GET /api/sftp/transfers`）、取消（半成品清理）、打开所在目录；本机终端禁用 SFTP；断点续传未实现（已排期）。

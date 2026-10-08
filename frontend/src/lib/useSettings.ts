@@ -23,8 +23,10 @@ export interface TerminalSettings {
   // 编辑器最近打开的文件路径（新路径插到最前，最多 20 条）
   editorRecentPaths: string[]
   // 日志记录：默认保存目录（空 = 程序默认 logs 目录）/ 开启记录时不再询问
+  // / 远程会话连上后自动开始记录（默认开）
   logRecordDir: string
   logRecordNoAsk: boolean
+  logRecordDefaultOn: boolean
 }
 
 export const DEFAULT_SETTINGS: TerminalSettings = {
@@ -42,6 +44,7 @@ export const DEFAULT_SETTINGS: TerminalSettings = {
   editorRecentPaths: [],
   logRecordDir: '',
   logRecordNoAsk: false,
+  logRecordDefaultOn: true,
 }
 
 // 可选字体列表
@@ -83,6 +86,7 @@ export function toUiSettingsPayload(partial: Partial<TerminalSettings>): Partial
   if (partial.editorRecentPaths !== undefined) out.editor_recent_paths = partial.editorRecentPaths
   if (partial.logRecordDir !== undefined) out.log_record_dir = partial.logRecordDir
   if (partial.logRecordNoAsk !== undefined) out.log_record_no_ask = partial.logRecordNoAsk
+  if (partial.logRecordDefaultOn !== undefined) out.log_record_default_on = partial.logRecordDefaultOn
   return out
 }
 
@@ -152,6 +156,9 @@ export function applyUiSettings(
   }
   if (typeof payload.log_record_no_ask === 'boolean') {
     next.logRecordNoAsk = payload.log_record_no_ask
+  }
+  if (typeof payload.log_record_default_on === 'boolean') {
+    next.logRecordDefaultOn = payload.log_record_default_on
   }
   return next
 }

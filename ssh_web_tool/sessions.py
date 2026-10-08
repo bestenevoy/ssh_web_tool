@@ -21,7 +21,7 @@ import asyncssh
 from fastapi import WebSocket
 
 from . import prompt_detect
-from .config import get_connect_timeout, get_shell_integration, get_use_ssh_config
+from .config import get_connect_timeout, get_log_record_default, get_shell_integration, get_use_ssh_config
 from .echo_parser import EchoParser
 from .output_bus import OutputBus
 from .ps_history import PSReadlineTailer, TailerLike
@@ -463,13 +463,17 @@ class SSHSession:
         # 日志持久化：同一会话（session_id）固定同一份日志文件
         # 命名：{host}_{start}_running_{session_id}.log，会话关闭时补全结束时间：
         #       {host}_{start}_{end}_{session_id}.log
-        # 默认不记录：这里只预生成路径（恢复会话沿用旧文件），不创建文件与
-        # FileHandler；用户右键「开始记录」时才按所选目录惰性落盘（set_logging）
+        # 构造时不落盘：这里只预生成路径（恢复会话沿用旧文件），不创建文件与
+        # FileHandler。真正开启有两条路：远程 shell 建立时按设置自动开启
+        # （_auto_enable_logging，默认开），或用户右键「开始记录日志」手动开启（set_logging）
         log_file = resolve_existing_log(self.session_id, self.LOG_DIR) or build_log_file(
             self.session_id, self.host, self.created_at, self.LOG_DIR
         )
         self._session_log = SessionLog(session_id, log_file, None, self.LOG_FLUSH_DELAY, self.LOG_FLUSH_MAX)
         self._reader_task: asyncio.Task | None = None
+        # 是否有网页终端（WebSocket）挂在本会话上：自动记录日志只认"用户在看的终端"，
+        # 脚本 API 单独建的会话、外部劫持的镜像会话不会因此凭空落盘
+        self._ui_attached: bool = False
         # 本地 shell（WinPTY 后端，本机 cmd/powershell；SSH 断开后可自动切换）
         self._local_proc: Any = None  # winpty.PtyProcess（backend=1 WinPTY，动态导入，类型标注为 Any）
         # 外部镜像会话属性（paramiko/asyncssh monkey-patch 注册时动态设置）
@@ -820,6 +824,9 @@ class SSHSession:
         )
         self._has_shell = True
         self.last_active = time.time()
+        # 远程 shell 一旦建立就按设置自动开启日志（默认开）：放在启动读取器之前，
+        # banner/MOTD 从一开始就直接进日志，不依赖近期环回放
+        self._auto_enable_logging(new_shell=True)
         # S1 shell 集成：新 shell 挂钩子（Ghostty/VSCode 同思路，见 SHELL_INTEGRATION_SNIPPET）
         self.arm_shell_integration()
         # 自动启动 SSH 输出读取器（广播给所有监听器）
@@ -1047,18 +1054,21 @@ class SSHSession:
         """当前会话日志是否正在记录（会话级暂停/恢复开关状态）"""
         return self._session_log.enabled
 
-    def set_logging(self, enabled: bool, log_dir: str | None = None) -> None:
-        """开启/暂停当前会话日志记录（默认不记录）
+    def set_logging(self, enabled: bool, log_dir: str | None = None, shell_key: str | None = None) -> None:
+        """开启/暂停当前会话日志记录
 
-        - enabled=True：按 log_dir 开启记录（省略时用默认 LOG_DIR）。目标目录
-          与当前文件同目录则沿用（同会话暂停后恢复/重连续写），否则在该目录
+        - enabled=True：按 log_dir 开启记录（省略时用默认 LOG_DIR，支持 ~ 前缀）。
+          目标目录与当前文件同目录则沿用（同会话暂停后恢复/重连续写），否则在该目录
           新建文件；目录无法创建/不可写时抛 OSError，由调用方提示用户。
         - enabled=False：暂停记录（丢弃未落盘缓冲；已落盘内容保留）。
+        - shell_key：日志文件头的 shell 特性元信息种类。省略时按会话现状推断
+          （本机 shell 激活时按实际 shell，否则 ssh-remote）；远程 shell 建立那条路
+          要显式传 "ssh-remote"，因为本机→远程切换时此刻 _local_proc 还没清空。
         """
         if not enabled:
             self._session_log.set_enabled(False)
             return
-        target_dir = log_dir or self.LOG_DIR
+        target_dir = os.path.expanduser(log_dir) if log_dir else self.LOG_DIR
         current = self._log_file
         if current and os.path.normcase(os.path.dirname(current)) == os.path.normcase(target_dir):
             log_file = current  # 同目录沿用（同一终端 = 同一份记录）
@@ -1068,12 +1078,49 @@ class SSHSession:
             )
         # Shell 特性元信息（记录进日志文件头，防误操作）：本地 shell 激活时按实际
         # shell 记录；否则按 SSH 远端会话记录
-        shell_key = "ssh-remote"
-        if self._local_proc is not None:
-            ls = (self._local_shell or "").lower().split("\\")[-1]
-            shell_key = ls if ls in ("cmd", "powershell", "pwsh") else "powershell"
+        if shell_key is None:
+            shell_key = "ssh-remote"
+            if self._local_proc is not None:
+                ls = (self._local_shell or "").lower().split("\\")[-1]
+                shell_key = ls if ls in ("cmd", "powershell", "pwsh") else "powershell"
         meta = build_shell_meta(shell_key, self.host, self.session_id)
         self._session_log.enable_with(log_file, target_dir, self._logger_cache, meta=meta)
+
+    def note_ui_attach(self) -> None:
+        """网页终端（WebSocket）挂到本会话时调用：标记"这是用户在看的终端会话"
+
+        自动记录日志只针对这种会话——脚本 API 单独建的会话、外部劫持的镜像会话
+        没有人在界面里看，不该因为工具在跑就凭空写文件。此刻远程 shell 已在运行
+        （页面重开恢复 / 重连后新连接挂上来）就地开启；shell 还没启动的场景由
+        start_interactive_shell 触发同一段逻辑。
+        """
+        self._ui_attached = True
+        self._auto_enable_logging()
+
+    def _auto_enable_logging(self, new_shell: bool = False) -> None:
+        """按设置自动开启会话日志（默认开启，设置里可整体关掉回到手动模式）
+
+        只在"远程 shell 已在跑或正在建立"时生效：本机终端（本地 shell）不自动记录，
+        外部镜像会话也不。开启失败（目录不可用等）只放弃自动记录，绝不影响建连——
+        用户仍可右键手动开启。
+
+        new_shell=True 表示这是一条全新的远程 shell（刚连接/刚重连）：即便用户在本
+        会话里手动暂停过记录，新连接也按"连接后默认开启"重新落盘。反过来，页面刷新
+        这类只是重新挂载终端的场景（new_shell=False）尊重用户此前的暂停选择。
+        """
+        if not self._ui_attached or self._external or self._session_log.enabled:
+            return
+        if not new_shell and self._session_log.ever_enabled:
+            return
+        if not self._has_shell:
+            return  # 远程 shell 还没建立（本机终端会话 / 仅 HTTP 建连阶段）：不自动记录
+        enabled, log_dir = get_log_record_default()
+        if not enabled:
+            return
+        try:
+            self.set_logging(True, log_dir or None, shell_key="ssh-remote")
+        except Exception:
+            logging.getLogger(__name__).warning("会话 %s 自动开启日志失败（目录不可用？）", self.session_id)
 
     def note_local_command(self, typed: str) -> None:
         """本地 shell 回车成行（未被 SSH 拦截）时调用：交给 PSReadLine 采集器

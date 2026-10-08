@@ -33,6 +33,7 @@ describe('toUiSettingsPayload', () => {
       editorRecentPaths: ['C:\\a.zs'],
       logRecordDir: 'D:\\logs',
       logRecordNoAsk: true,
+      logRecordDefaultOn: false,
     })
     expect(out).toEqual({
       theme: 'light',
@@ -47,6 +48,7 @@ describe('toUiSettingsPayload', () => {
       editor_recent_paths: ['C:\\a.zs'],
       log_record_dir: 'D:\\logs',
       log_record_no_ask: true,
+      log_record_default_on: false,
     })
   })
 
@@ -76,6 +78,7 @@ describe('applyUiSettings', () => {
       editorRecentPaths: [],
       logRecordDir: '',
       logRecordNoAsk: false,
+      logRecordDefaultOn: true,
     })
   })
 

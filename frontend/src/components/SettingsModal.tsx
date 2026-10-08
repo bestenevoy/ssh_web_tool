@@ -343,13 +343,22 @@ export function SettingsModal({
             </select>
           </div>
 
-          {/* 日志记录：归属基本设置（开关入口在终端右键菜单，这里只放默认行为配置） */}
+          {/* 日志记录：归属基本设置（开关入口在终端右键菜单，这里放默认行为配置） */}
           <div className="settings-modal-title settings-modal-title-sub">日志记录</div>
           <div className="settings-modal-hint">
-            终端默认不记录日志；在终端右键菜单选择「开始记录日志」后才开始写入。
+            连上远端主机的终端会话会自动开始记录日志，写入下方「默认保存目录」；本机终端仍需右键「开始记录日志」手动开启。
+          </div>
+          <div className="settings-modal-row">
+            <label title="关闭后恢复旧行为：任何终端都不自动记录，需在终端右键菜单选择「开始记录日志」">
+              连接后自动记录日志
+            </label>
+            <input
+              type="checkbox" className="switch" checked={settings.logRecordDefaultOn}
+              onChange={(e) => onUpdate({ logRecordDefaultOn: e.target.checked })}
+            />
           </div>
           <div className="settings-modal-row-column">
-            <label title="右键「开始记录日志」时若勾选了「不再询问」，将直接使用此目录（留空 = 程序默认目录 ~/.ai4one/sshtool/logs）">
+            <label title="自动记录以及右键「开始记录日志」（勾选不再询问时）使用的目录；留空 = 程序默认目录 ~/.ai4one/sshtool/logs">
               默认保存目录
             </label>
             <div style={{ display: 'flex', gap: 6 }}>
